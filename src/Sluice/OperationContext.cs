@@ -1,0 +1,22 @@
+namespace Sluice;
+
+public sealed class OperationContext(TimeProvider clock, CancellationToken cancellationToken)
+{
+    private readonly List<ResourceAddress> _observedReads = [];
+
+    public IReadOnlyList<ResourceAddress> ObservedReads => _observedReads;
+
+    public TimeProvider Clock { get; } = clock;
+
+    public CancellationToken CancellationToken { get; } = cancellationToken;
+
+    public OperationContext() : this(TimeProvider.System, CancellationToken.None)
+    {
+    }
+
+    public OperationContext(CancellationToken cancellationToken) : this(TimeProvider.System, cancellationToken)
+    {
+    }
+
+    internal void RecordRead(ResourceAddress address) => _observedReads.Add(address);
+}
