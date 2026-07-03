@@ -1,61 +1,116 @@
-# See https://aka.ms/enforce-configuration for how to configure the enforce configuration
-
 root = true
 
+############################
+# Global editor basics
+############################
 [*]
-charset = utf-8-bom
-end_of_line = crlf
-indent_size = 4
-insert_final_newline = true
-trim_trailing_whitespace = true
-
-[*.cs]
-csharp_new_line_before_open_brace = all
-csharp_new_line_before_else = true
-csharp_new_line_before_catch = true
-csharp_new_line_before_finally = true
-csharp_prefer_builtin_alias = true
-csharp_prefer_static_local_function = true
-csharp_style_expression_bodied_expression = true
-csharp_style_expression_bodied_method = true
-csharp_style_expression_bodied_constructor = true
-csharp_style_expression_bodied_destructor = true
-csharp_style_expression_bodied_property = true
-csharp_style_expression_bodied_indexer = true
-csharp_style_expression_bodied_operator = true
-csharp_style_expression_bodied_conversion = true
-csharp_style_nested_control_flow_for_type_with_only_one_catch = true
-csharp_style_pattern_matching_expression = when_used_for_type
-csharp_style_throw_expression = true
-csharp_prefer_simple_default_argument = true
-csharp_preferred_modifier = first
-dotnet_sort_system_directives_first = true
-dotnet_separate_import_directive_groups = false
-dotnet_style_object_initializer = true
-dotnet_style_collection_initializer = true
-dotnet_style_prefer_compact_literal_initialization = true
-dotnet_style_prefer_simple_using_statement = true
-dotnet_style_prefer_auto_dimensional_array = true
-dotnet_style_namespace_match_namespace = true
-dotnet_style_prefer_conditional_expression_over_assignment = when_compatible_on_single_line
-dotnet_style_prefer_conditional_expression_over_if = when_compatible_on_single_line
-dotnet_style_prefer_switch_expression = when_compatible_with_single_case
-
-[*.cs]
+charset = utf-8
 end_of_line = lf
-
-[*.md]
 insert_final_newline = true
 trim_trailing_whitespace = true
 indent_style = space
-indent_size = 2
+indent_size = 4
 
-[Taskfile*.yml]
-indent_style = space
-indent_size = 2
+############################
+# C# formatting & style
+############################
+[*.cs]
 
-[*.{yaml,yml}]
-indent_size = 2
+# Braces: avoid single-line control statements
+csharp_prefer_braces = true:warning
 
-[*.json]
-indent_size = 2
+# "using" organization
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = true
+
+# Prefer file-scoped namespaces (common in modern codebases)
+csharp_style_namespace_declarations = file_scoped:warning
+
+# Prefer expression-bodied only when it stays readable
+csharp_style_expression_bodied_methods = when_on_single_line:suggestion
+csharp_style_expression_bodied_properties = when_on_single_line:suggestion
+
+# Remove "this." unless needed (reduces visual noise)
+dotnet_style_qualification_for_field = false:suggestion
+dotnet_style_qualification_for_property = false:suggestion
+dotnet_style_qualification_for_method = false:suggestion
+dotnet_style_qualification_for_event = false:suggestion
+
+# Prefer pattern matching / modern null checks
+csharp_style_pattern_matching_over_is_with_cast_check = true:suggestion
+csharp_style_pattern_matching_over_as_with_null_check = true:suggestion
+
+# Prefer simplified constructs
+csharp_style_prefer_switch_expression = true:suggestion
+csharp_style_prefer_tuple_swap = true:suggestion
+
+# Explicit accessibility is common in larger codebases
+dotnet_style_require_accessibility_modifiers = always:warning
+
+# Prefer readonly where possible (helps correctness)
+dotnet_style_readonly_field = true:suggestion
+
+# If you like primary constructors / etc later, keep suggestions not warnings first
+# (Add more rules as your team adopts newer features)
+
+############################
+# Analyzer severities (common enterprise knobs)
+############################
+
+# "Add braces" diagnostic (backs csharp_prefer_braces)
+dotnet_diagnostic.IDE0011.severity = warning
+
+# Remove unnecessary usings
+dotnet_diagnostic.IDE0005.severity = warning
+
+# Prefer 'is null' checks where relevant
+dotnet_diagnostic.IDE0041.severity = suggestion
+
+# Use LoggerMessage delegates for better performance (disabled)
+dotnet_diagnostic.CA1848.severity = none
+
+dotnet_diagnostic.CA1822.severity = none
+
+# Naming: you’ll usually add rules (below)
+
+# Interfaces must start with I
+dotnet_naming_rule.interfaces_should_be_prefixed.severity = warning
+dotnet_naming_rule.interfaces_should_be_prefixed.symbols = interfaces
+dotnet_naming_rule.interfaces_should_be_prefixed.style = prefix_I
+
+dotnet_naming_symbols.interfaces.applicable_kinds = interface
+dotnet_naming_symbols.interfaces.applicable_accessibilities = public, internal, protected, protected_internal, private_protected
+dotnet_naming_symbols.interfaces.required_modifiers =
+
+dotnet_naming_style.prefix_I.required_prefix = I
+dotnet_naming_style.prefix_I.capitalization = pascal_case
+
+# Private constants/statics should be PascalCase
+dotnet_naming_rule.private_const_fields_pascal.severity = warning
+dotnet_naming_rule.private_const_fields_pascal.symbols = private_const_fields
+dotnet_naming_rule.private_const_fields_pascal.style = pascal_case_style
+
+dotnet_naming_symbols.private_const_fields.applicable_kinds = field
+dotnet_naming_symbols.private_const_fields.applicable_accessibilities = private
+dotnet_naming_symbols.private_const_fields.required_modifiers = const
+
+dotnet_naming_style.pascal_case_style.capitalization = pascal_case
+
+# Private instance fields (and static non-const) should be _camelCase
+dotnet_naming_rule.private_fields_underscore.severity = warning
+dotnet_naming_rule.private_fields_underscore.symbols = private_fields
+dotnet_naming_rule.private_fields_underscore.style = underscore_camel
+
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+dotnet_naming_symbols.private_fields.required_modifiers =
+
+dotnet_naming_style.underscore_camel.required_prefix = _
+dotnet_naming_style.underscore_camel.capitalization = camel_case
+
+dotnet_diagnostic.IDE0005.severity = error
+dotnet_diagnostic.IDE0051.severity = error
+dotnet_diagnostic.IDE0052.severity = error
+dotnet_diagnostic.IDE0060.severity = error
+dotnet_diagnostic.CA1801.severity = error
+dotnet_diagnostic.CA1811.severity = error
