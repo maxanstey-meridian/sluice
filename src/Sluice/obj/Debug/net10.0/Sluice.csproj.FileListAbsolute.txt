@@ -1,0 +1,11 @@
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/bin/Debug/net10.0/Sluice.deps.json
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/bin/Debug/net10.0/Sluice.dll
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/bin/Debug/net10.0/Sluice.pdb
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/obj/Debug/net10.0/Sluice.GeneratedMSBuildEditorConfig.editorconfig
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/obj/Debug/net10.0/Sluice.AssemblyInfoInputs.cache
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/obj/Debug/net10.0/Sluice.AssemblyInfo.cs
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/obj/Debug/net10.0/Sluice.csproj.CoreCompileInputs.cache
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/obj/Debug/net10.0/Sluice.dll
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/obj/Debug/net10.0/refint/Sluice.dll
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/obj/Debug/net10.0/Sluice.pdb
+/Users/max/.meridian/v3/runs/20260703-194258-sluice-s1-resource-vocabulary/worktree/src/Sluice/obj/Debug/net10.0/ref/Sluice.dll

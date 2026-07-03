@@ -1,0 +1,14 @@
+version: 3
+
+tasks:
+  build:
+    cmds:
+      - dotnet build Sluice.sln
+  test:
+    deps:
+      - build
+    cmds:
+      - dotnet test Sluice.sln --no-build
+  format:
+    cmds:
+      - dotnet csharpier .

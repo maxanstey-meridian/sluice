@@ -1,0 +1,61 @@
+# See https://aka.ms/enforce-configuration for how to configure the enforce configuration
+
+root = true
+
+[*]
+charset = utf-8-bom
+end_of_line = crlf
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.cs]
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_prefer_builtin_alias = true
+csharp_prefer_static_local_function = true
+csharp_style_expression_bodied_expression = true
+csharp_style_expression_bodied_method = true
+csharp_style_expression_bodied_constructor = true
+csharp_style_expression_bodied_destructor = true
+csharp_style_expression_bodied_property = true
+csharp_style_expression_bodied_indexer = true
+csharp_style_expression_bodied_operator = true
+csharp_style_expression_bodied_conversion = true
+csharp_style_nested_control_flow_for_type_with_only_one_catch = true
+csharp_style_pattern_matching_expression = when_used_for_type
+csharp_style_throw_expression = true
+csharp_prefer_simple_default_argument = true
+csharp_preferred_modifier = first
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = false
+dotnet_style_object_initializer = true
+dotnet_style_collection_initializer = true
+dotnet_style_prefer_compact_literal_initialization = true
+dotnet_style_prefer_simple_using_statement = true
+dotnet_style_prefer_auto_dimensional_array = true
+dotnet_style_namespace_match_namespace = true
+dotnet_style_prefer_conditional_expression_over_assignment = when_compatible_on_single_line
+dotnet_style_prefer_conditional_expression_over_if = when_compatible_on_single_line
+dotnet_style_prefer_switch_expression = when_compatible_with_single_case
+
+[*.cs]
+end_of_line = lf
+
+[*.md]
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[Taskfile*.yml]
+indent_style = space
+indent_size = 2
+
+[*.{yaml,yml}]
+indent_size = 2
+
+[*.json]
+indent_size = 2
