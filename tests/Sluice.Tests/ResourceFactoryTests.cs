@@ -1,16 +1,5 @@
 namespace Sluice.Tests;
 
-// Example domain types — consumer types, defined in the test project only.
-public sealed record CustomerId(string Value) : IResourceKey
-{
-    public override string ToString() => Value;
-}
-
-public sealed record OrderId(string Value) : IResourceKey
-{
-    public override string ToString() => Value;
-}
-
 public sealed class ResourceFactoryTests
 {
     [Fact]

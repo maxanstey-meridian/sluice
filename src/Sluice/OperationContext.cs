@@ -10,13 +10,11 @@ public sealed class OperationContext(TimeProvider clock, CancellationToken cance
 
     public CancellationToken CancellationToken { get; } = cancellationToken;
 
-    public OperationContext() : this(TimeProvider.System, CancellationToken.None)
-    {
-    }
+    public OperationContext()
+        : this(TimeProvider.System, CancellationToken.None) { }
 
-    public OperationContext(CancellationToken cancellationToken) : this(TimeProvider.System, cancellationToken)
-    {
-    }
+    public OperationContext(CancellationToken cancellationToken)
+        : this(TimeProvider.System, cancellationToken) { }
 
     internal void RecordRead(ResourceAddress address) => _observedReads.Add(address);
 }

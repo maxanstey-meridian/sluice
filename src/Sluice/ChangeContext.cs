@@ -8,9 +8,8 @@ public sealed class ChangeContext(CancellationToken cancellationToken)
 
     public CancellationToken CancellationToken { get; } = cancellationToken;
 
-    public ChangeContext() : this(CancellationToken.None)
-    {
-    }
+    public ChangeContext()
+        : this(CancellationToken.None) { }
 
     public async Task Apply(Func<ChangeSet, Task> work)
     {
