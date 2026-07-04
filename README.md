@@ -92,6 +92,29 @@ public sealed class UserQueries(IUserStore store)
 }
 ```
 
+With a helper, this becomes easier — extract the Track call so the query body reads top-to-bottom:
+
+```csharp
+// The address is still explicit at the definition site.
+// The call site is just a method call.
+public static async Task<User> GetUser(this IReadScope read, UserId id, IUserStore store) =>
+    await read.Track(UserResources.User.For(id), _ => store.GetUser(id));
+
+public static async Task<UserSettings> GetSettings(this IReadScope read, UserId id, IUserStore store) =>
+    await read.Track(UserResources.Settings.For(id), _ => store.GetSettings(id));
+```
+
+The query body shrinks to:
+
+```csharp
+.Compute(async (id, read) =>
+{
+    var user = await read.GetUser(id, store);
+    var settings = await read.GetSettings(id, store);
+    return new UserProfile(id, user.Name, user.Email, settings.DarkMode, settings.Language);
+});
+```
+
 Read through Sluice — first call computes and caches, second call returns the cached value:
 
 ```csharp
