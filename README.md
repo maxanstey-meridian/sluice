@@ -140,7 +140,7 @@ public sealed class UserCommands(ISluice sluice, IUserStore store)
     public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
         sluice.Apply(
             _ => store.UpdateDarkMode(id, darkMode),
-            changes => changes.Changed(UserResources.Settings.For(id)),
+            UserWriteEffects.SettingsChanged(id),
             ct);
 }
 ```
@@ -184,29 +184,50 @@ Queries are registered lazily when first passed to `SluiceKernel.Get`. That mean
 
 `ISluice.Apply` runs the write first, then invalidates affected cached entries before returning.
 
-For static changed addresses — you know the address at call time, no result needed:
+The recommended pattern is to pre-build `WriteEffect` recipes in a static class. This names the intent of each write and keeps call sites readable:
 
 ```csharp
-await sluice.Apply(
-    // The write: mutate the store.
-    _ => store.UpdateUserName(id, "Alice Smith"),
-    // The declaration: this address changed. Any cached entry that
-    // tracked a read on entity:user:{id} is evicted.
-    changes => changes.Changed(UserResources.User.For(id)),
+public static class UserWriteEffects
+{
+    public static WriteEffect SettingsChanged(UserId id) =>
+        WriteEffect.For().Changes(UserResources.Settings.For(id));
+
+    public static WriteEffect ProfileChanged(UserId id) =>
+        WriteEffect.For().Changes(UserResources.User.For(id));
+}
+
+// Call site: the recipe communicates intent, the addresses are encapsulated.
+public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
+    sluice.Apply(
+        _ => store.UpdateDarkMode(id, darkMode),
+        UserWriteEffects.SettingsChanged(id),
+        ct);
+```
+
+For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID), use `WriteEffect<T>`:
+
+```csharp
+public static class OrderWriteEffects
+{
+    public static WriteEffect<Order> Created(CustomerId customerId) =>
+        WriteEffect<Order>.For()
+            .Changes(OrderResources.OrdersByCustomer.For(customerId))
+            .ChangesResult(order => OrderResources.Order.For(order.Id));
+}
+
+// The resolver runs after the write completes, receiving its result.
+var order = await sluice.Apply(
+    ct => store.CreateOrder(customerId, input),
+    OrderWriteEffects.Created(customerId),
     ct);
 ```
 
-For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID):
+For dynamic cases where addresses depend on runtime conditions, use `Action<ChangeBuilder>` as an escape hatch:
 
 ```csharp
-// The resolver runs after the write completes, receiving its result.
-// Here the collection address is known upfront, but the entity address
-// needs the created order's ID from the store result.
-var order = await sluice.Apply(
-    ct => store.CreateOrder(customerId, input),
-    changes => changes
-        .Changed(OrderResources.OrdersByCustomer.For(customerId))
-        .Changed(result => OrderResources.Order.For(result.Id)),
+await sluice.Apply(
+    _ => store.UpdateUserName(id, "Alice Smith"),
+    changes => changes.Changed(UserResources.User.For(id)),
     ct);
 ```
 

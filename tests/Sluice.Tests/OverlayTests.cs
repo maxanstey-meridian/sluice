@@ -212,4 +212,45 @@ public sealed class OverlayTests
         postManifest.Operations.Should().ContainSingle();
         postManifest.Operations[0].Name.Should().Be("customer.score");
     }
+
+    [Fact]
+    public async Task Apply_WriteEffectOverload_StaticChanges_InvalidatesCache()
+    {
+        var (store, queries, sluice, _) = CreateSut();
+        var id = new CustomerId("c1");
+
+        var score1 = await sluice.Get(queries.CustomerScore, id, CancellationToken.None);
+        score1.Score.Should().Be(90);
+
+        await sluice.Apply(
+            _ => store.UpdateCustomer(id, new CustomerPatch("Updated", null)),
+            CustomerWriteEffects.Updated(id),
+            CancellationToken.None
+        );
+
+        var score2 = await sluice.Get(queries.CustomerScore, id, CancellationToken.None);
+        score2.Score.Should().Be(90);
+        store.GetCustomerCallCount.Should().BeGreaterThan(1);
+    }
+
+    [Fact]
+    public async Task Apply_WriteEffectOverload_ResultDerived_InvalidatesCache()
+    {
+        var (store, queries, sluice, _) = CreateSut();
+        var customerId = new CustomerId("A");
+
+        var score1 = await sluice.Get(queries.CustomerScore, customerId, CancellationToken.None);
+        score1.Score.Should().Be(20);
+
+        var order = await sluice.Apply(
+            _ => store.CreateOrder(customerId, new CreateOrderInput(10m)),
+            OrderWriteEffects.Created(customerId),
+            CancellationToken.None
+        );
+
+        order.Id.Value.Should().StartWith("o");
+
+        var score2 = await sluice.Get(queries.CustomerScore, customerId, CancellationToken.None);
+        score2.Score.Should().Be(30);
+    }
 }

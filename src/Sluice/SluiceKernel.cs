@@ -32,6 +32,15 @@ public sealed class SluiceKernel(ICacheStore cacheStore) : ISluice, IDisposable
         await _registry.ApplyAsync(async ctx => await ctx.Apply(() => work(ct), effect), ct);
     }
 
+    public async Task Apply(
+        Func<CancellationToken, Task> work,
+        WriteEffect effect,
+        CancellationToken ct
+    )
+    {
+        await _registry.ApplyAsync(async ctx => await ctx.Apply(() => work(ct), effect), ct);
+    }
+
     public async Task<T> Apply<T>(
         Func<CancellationToken, Task<T>> work,
         Action<ChangeBuilder<T>> changes,
@@ -41,6 +50,18 @@ public sealed class SluiceKernel(ICacheStore cacheStore) : ISluice, IDisposable
         var builder = new ChangeBuilder<T>();
         changes(builder);
         var effect = builder.ToWriteEffect();
+        return await _registry.ApplyAsync<T>(
+            async ctx => await ctx.Apply(() => work(ct), effect),
+            ct
+        );
+    }
+
+    public async Task<T> Apply<T>(
+        Func<CancellationToken, Task<T>> work,
+        WriteEffect<T> effect,
+        CancellationToken ct
+    )
+    {
         return await _registry.ApplyAsync<T>(
             async ctx => await ctx.Apply(() => work(ct), effect),
             ct

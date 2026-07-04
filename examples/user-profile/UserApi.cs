@@ -11,6 +11,15 @@ public static class UserResources
     );
 }
 
+public static class UserWriteEffects
+{
+    public static WriteEffect ProfileChanged(UserId id) =>
+        WriteEffect.For().Changes(UserResources.User.For(id));
+
+    public static WriteEffect SettingsChanged(UserId id) =>
+        WriteEffect.For().Changes(UserResources.Settings.For(id));
+}
+
 public sealed class UserQueries(IUserStore store)
 {
     public readonly Query<UserId, User> User = new Query<UserId, User>("user.byId")
@@ -52,14 +61,14 @@ public sealed class UserCommands(ISluice sluice, IUserStore store)
     public Task UpdateUserName(UserId id, string name, CancellationToken ct) =>
         sluice.Apply(
             _ => store.UpdateUserName(id, name),
-            changes => changes.Changed(UserResources.User.For(id)),
+            UserWriteEffects.ProfileChanged(id),
             ct
         );
 
     public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
         sluice.Apply(
             _ => store.UpdateDarkMode(id, darkMode),
-            changes => changes.Changed(UserResources.Settings.For(id)),
+            UserWriteEffects.SettingsChanged(id),
             ct
         );
 }
