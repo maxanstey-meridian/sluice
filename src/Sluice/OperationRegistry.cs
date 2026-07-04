@@ -28,7 +28,14 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
         var cached = await cacheStore.GetAsync<TValue>(entryKey, ct);
         if (cached is not null)
         {
-            return cached.Value;
+            if (cached.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
+            {
+                await cacheStore.RemoveAsync(entryKey, ct);
+            }
+            else
+            {
+                return cached.Value;
+            }
         }
 
         _lock.EnterWriteLock();
@@ -62,7 +69,8 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
         var value = await operation.RunCompute(key, ctx);
 
         var now = DateTimeOffset.UtcNow;
-        var entry = new CacheEntry<TValue>(value, [.. ctx.ObservedReads], now);
+        DateTimeOffset? entryExpiresAt = operation.Ttl is { } ttl ? now + ttl : null;
+        var entry = new CacheEntry<TValue>(value, [.. ctx.ObservedReads], now, entryExpiresAt);
 
         await cacheStore.SetAsync(entryKey, entry, ct);
 

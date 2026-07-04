@@ -22,14 +22,16 @@ public sealed record ResourceAddress
         {
             throw new ArgumentException(
                 "Resource name cannot contain ':' — it is the address delimiter.",
-                nameof(name));
+                nameof(name)
+            );
         }
 
         if (key.Contains(':'))
         {
             throw new ArgumentException(
                 "Resource key cannot contain ':' — it is the address delimiter.",
-                nameof(key));
+                nameof(key)
+            );
         }
 
         Kind = kind;

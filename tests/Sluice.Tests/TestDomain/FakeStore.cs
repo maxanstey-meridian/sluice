@@ -65,10 +65,7 @@ internal sealed class FakeStore : IStore
             {
                 return Task.FromResult<IReadOnlyList<Order>>(orders);
             }
-            var newOrders = new List<Order>
-            {
-                new(new OrderId($"{id.Value}-order"), id, 100m),
-            };
+            var newOrders = new List<Order> { new(new OrderId($"{id.Value}-order"), id, 100m) };
             _orders[id] = newOrders;
             return Task.FromResult<IReadOnlyList<Order>>(newOrders);
         }
