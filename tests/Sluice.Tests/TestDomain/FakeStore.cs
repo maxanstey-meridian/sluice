@@ -4,9 +4,15 @@ internal sealed class FakeStore : IStore
 {
     public int GetCustomerCallCount { get; private set; }
     public int GetOrdersByCustomerCallCount { get; private set; }
+    public int UpdateCustomerCallCount { get; private set; }
+    public int CreateOrderCallCount { get; private set; }
+    public int GetOrderCallCount { get; private set; }
+    public int DeleteOrderCallCount { get; private set; }
+    public int ReassignOrderCallCount { get; private set; }
 
     private readonly Dictionary<CustomerId, Customer> _customers = new();
     private readonly Dictionary<CustomerId, List<Order>> _orders = new();
+    private int _nextOrderId = 100;
 
     public FakeStore()
     {
@@ -40,5 +46,88 @@ internal sealed class FakeStore : IStore
     {
         GetOrdersByCustomerCallCount++;
         return Task.FromResult<IReadOnlyList<Order>>(_orders[id]);
+    }
+
+    public Task UpdateCustomer(CustomerId id, CustomerPatch patch)
+    {
+        UpdateCustomerCallCount++;
+        var customer = _customers[id];
+        _customers[id] = new Customer(
+            id,
+            patch.Name ?? customer.Name,
+            patch.Email ?? customer.Email
+        );
+        return Task.CompletedTask;
+    }
+
+    public Task<Order> CreateOrder(CustomerId customerId, CreateOrderInput input)
+    {
+        CreateOrderCallCount++;
+        var orderId = new OrderId($"o{_nextOrderId++}");
+        var order = new Order(orderId, customerId, input.Total);
+        _orders[customerId].Add(order);
+        return Task.FromResult(order);
+    }
+
+    public Task<Order> GetOrder(OrderId orderId)
+    {
+        GetOrderCallCount++;
+        foreach (var customerOrders in _orders.Values)
+        {
+            foreach (var order in customerOrders)
+            {
+                if (order.Id == orderId)
+                {
+                    return Task.FromResult(order);
+                }
+            }
+        }
+        throw new KeyNotFoundException($"Order {orderId} not found");
+    }
+
+    public Task DeleteOrder(OrderId orderId)
+    {
+        DeleteOrderCallCount++;
+        foreach (var customerOrders in _orders.Values)
+        {
+            var order = customerOrders.FirstOrDefault(o => o.Id == orderId);
+            if (order != null)
+            {
+                customerOrders.Remove(order);
+                return Task.CompletedTask;
+            }
+        }
+        throw new KeyNotFoundException($"Order {orderId} not found");
+    }
+
+    public Task ReassignOrder(OrderId orderId, CustomerId newCustomerId)
+    {
+        ReassignOrderCallCount++;
+        Order? order = null;
+        CustomerId? foundOldCustomerId = null;
+        foreach (var kvp in _orders)
+        {
+            var found = kvp.Value.FirstOrDefault(o => o.Id == orderId);
+            if (found != null)
+            {
+                order = found;
+                foundOldCustomerId = kvp.Key;
+                break;
+            }
+        }
+
+        if (order == null)
+        {
+            throw new KeyNotFoundException($"Order {orderId} not found");
+        }
+
+        if (foundOldCustomerId is not null)
+        {
+            _orders[foundOldCustomerId].Remove(order);
+        }
+
+        var updatedOrder = new Order(order.Id, newCustomerId, order.Total);
+        _orders[newCustomerId].Add(updatedOrder);
+        return Task.CompletedTask;
     }
 }

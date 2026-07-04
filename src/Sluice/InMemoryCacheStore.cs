@@ -19,5 +19,12 @@ public sealed class InMemoryCacheStore : ICacheStore
         return Task.CompletedTask;
     }
 
-    public Task<bool> RemoveAsync(string key, CancellationToken ct) => Task.FromResult(_store.Remove(key));
+    public Task<bool> RemoveAsync(string key, CancellationToken ct) =>
+        Task.FromResult(_store.Remove(key));
+
+    public Task ClearAsync(CancellationToken ct)
+    {
+        _store.Clear();
+        return Task.CompletedTask;
+    }
 }
