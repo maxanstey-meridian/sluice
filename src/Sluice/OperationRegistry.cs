@@ -10,6 +10,7 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
     private readonly ConcurrentDictionary<ResourceAddress, HashSet<string>> _reverseIndex = new();
     private readonly ConcurrentDictionary<string, HashSet<ResourceAddress>> _forwardIndex = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _cachedAt = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _inFlight = new();
 
     public OperationRegistry Register<TKey, TValue>(CachedOperation<TKey, TValue> operation)
     {
@@ -38,58 +39,80 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
             }
         }
 
-        _lock.EnterWriteLock();
+        var semaphore = _inFlight.GetOrAdd(entryKey, _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync(ct);
         try
         {
-            if (_forwardIndex.TryGetValue(entryKey, out var oldEdges))
+            var rechecked = await cacheStore.GetAsync<TValue>(entryKey, ct);
+            if (rechecked is not null)
             {
-                _cachedAt.TryRemove(entryKey, out _);
-                foreach (var address in oldEdges)
+                if (rechecked.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
                 {
-                    if (!_reverseIndex.TryGetValue(address, out var entryKeys))
-                    {
-                        continue;
-                    }
-
-                    entryKeys.Remove(entryKey);
-                    if (entryKeys.Count == 0)
-                    {
-                        _reverseIndex.TryRemove(address, out _);
-                    }
+                    await cacheStore.RemoveAsync(entryKey, ct);
                 }
-                _forwardIndex.TryRemove(entryKey, out _);
+                else
+                {
+                    return rechecked.Value;
+                }
             }
-        }
-        finally
-        {
-            _lock.ExitWriteLock();
-        }
 
-        var ctx = new OperationContext(ct);
-        var value = await operation.RunCompute(key, ctx);
-
-        var now = DateTimeOffset.UtcNow;
-        DateTimeOffset? entryExpiresAt = operation.Ttl is { } ttl ? now + ttl : null;
-        var entry = new CacheEntry<TValue>(value, [.. ctx.ObservedReads], now, entryExpiresAt);
-
-        await cacheStore.SetAsync(entryKey, entry, ct);
-
-        _lock.EnterWriteLock();
-        try
-        {
-            foreach (var address in ctx.ObservedReads)
+            _lock.EnterWriteLock();
+            try
             {
-                _reverseIndex.GetOrAdd(address, _ => new HashSet<string>()).Add(entryKey);
+                if (_forwardIndex.TryGetValue(entryKey, out var oldEdges))
+                {
+                    _cachedAt.TryRemove(entryKey, out _);
+                    foreach (var address in oldEdges)
+                    {
+                        if (!_reverseIndex.TryGetValue(address, out var entryKeys))
+                        {
+                            continue;
+                        }
+
+                        entryKeys.Remove(entryKey);
+                        if (entryKeys.Count == 0)
+                        {
+                            _reverseIndex.TryRemove(address, out _);
+                        }
+                    }
+                    _forwardIndex.TryRemove(entryKey, out _);
+                }
             }
-            _forwardIndex[entryKey] = [.. ctx.ObservedReads];
-            _cachedAt[entryKey] = now;
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+
+            var ctx = new OperationContext(ct);
+            var value = await operation.RunCompute(key, ctx);
+
+            var now = DateTimeOffset.UtcNow;
+            DateTimeOffset? entryExpiresAt = operation.Ttl is { } ttl ? now + ttl : null;
+            var entry = new CacheEntry<TValue>(value, [.. ctx.ObservedReads], now, entryExpiresAt);
+
+            await cacheStore.SetAsync(entryKey, entry, ct);
+
+            _lock.EnterWriteLock();
+            try
+            {
+                foreach (var address in ctx.ObservedReads)
+                {
+                    _reverseIndex.GetOrAdd(address, _ => new HashSet<string>()).Add(entryKey);
+                }
+                _forwardIndex[entryKey] = [.. ctx.ObservedReads];
+                _cachedAt[entryKey] = now;
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+
+            return value;
         }
         finally
         {
-            _lock.ExitWriteLock();
+            semaphore.Release();
         }
-
-        return value;
     }
 
     public async Task ApplyAsync(Func<ChangeContext, Task> write, CancellationToken ct)
@@ -117,6 +140,7 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
             _reverseIndex.Clear();
             _forwardIndex.Clear();
             _cachedAt.Clear();
+            _inFlight.Clear();
         }
         finally
         {

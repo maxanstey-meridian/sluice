@@ -25,7 +25,7 @@ public sealed class ThreadSafetyTests
 
         await cacheStore.RemoveAsync(operation.BuildEntryKey(customerIdA), CancellationToken.None);
 
-        controlledStore.ArmOrdersReadGate(expectedOrdersReadStarts: 10);
+        controlledStore.ArmOrdersReadGate(expectedOrdersReadStarts: 1);
 
         var readTasks = new List<Task<int>>();
         for (int i = 0; i < 10; i++)
