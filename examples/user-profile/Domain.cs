@@ -5,7 +5,6 @@ using Sluice;
 public sealed record UserId(string Value) : IResourceKey
 {
     public string ResourceKey => Value;
-    public override string ToString() => Value;
 }
 
 public sealed record User(UserId Id, string Name, string Email);
