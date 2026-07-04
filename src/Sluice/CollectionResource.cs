@@ -5,7 +5,7 @@ public sealed class CollectionResource<TKey>(string name)
 {
     public string Name { get; } = name;
 
-    public ResourceAddress For(TKey key) => new(ResourceKind.Collection, Name, key.ToString()!);
+    public ResourceAddress For(TKey key) => new(ResourceKind.Collection, Name, key.ResourceKey);
 
     public ResourceAddress Wildcard() => new(ResourceKind.Collection, Name, "*");
 }

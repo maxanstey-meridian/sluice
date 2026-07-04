@@ -37,10 +37,11 @@ Example: a user profile query reads `entity:user:alice` and `entity:userSettings
 Create resources — these declare the identity of the data you cache around:
 
 ```csharp
-// Keys implement IResourceKey so that resource addresses can use their ToString().
+// Keys implement IResourceKey. The ResourceKey property is used in resource
+// addresses — it must be stable, culture-invariant, and unique within the resource.
 public sealed record UserId(string Value) : IResourceKey
 {
-    public override string ToString() => Value;
+    public string ResourceKey => Value;
 }
 
 // Each resource is a named entity. The name becomes part of the resource address
@@ -167,7 +168,7 @@ collection:orders.byCustomer:customer-123
 external:stripe:price-list
 ```
 
-Resource keys implement `IResourceKey`. `EntityResource<TKey>.For(key)` and `CollectionResource<TKey>.For(key)` use `key.ToString()` as the address key.
+Resource keys implement `IResourceKey`, which exposes `ResourceKey` — a string that uniquely identifies the key within its resource type. `EntityResource<TKey>.For(key)` and `CollectionResource<TKey>.For(key)` use `key.ResourceKey` as the address key. `ResourceKey` must be stable (same value across process restarts), culture-invariant, and unique within the resource.
 
 ### Queries
 
@@ -234,12 +235,12 @@ A wildcard changed address invalidates all cached entries that read the same res
 // and which addresses invalidate which entries. Useful for debugging.
 var graph = sluice.DumpGraph();
 
-// Static metadata for registered operations — name, input type, output type.
-// No execution needed; works off registration alone.
+// Static metadata for lazily registered operations — name, input type, output type.
+// Queries appear here after their first Get call.
 var manifest = sluice.Describe();
 ```
 
-`DumpGraph()` returns a text snapshot of the runtime state. Example output after reading the user and profile queries for Alice and Bob:
+`DumpGraph()` returns a text snapshot of the runtime state. Example output after reading the user query for Alice and profile queries for Alice and Bob:
 
 ```text
 OPERATIONS:
@@ -285,8 +286,8 @@ The graph reads top-to-bottom: each cached entry lists the resource addresses it
 
 ```text
 Operations:
-  user.byId       UserId → User          (DelegateCachedOperation`2)
-  user.profile    UserId → UserProfile   (DelegateCachedOperation`2)
+  user.byId       UserId → User          (delegate-backed query)
+  user.profile    UserId → UserProfile   (delegate-backed query)
 ```
 
 Because overlay queries are lazily registered, `Describe()` only includes queries that have been executed through `Get`.
