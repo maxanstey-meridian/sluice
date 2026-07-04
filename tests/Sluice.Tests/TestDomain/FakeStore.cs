@@ -39,13 +39,25 @@ internal sealed class FakeStore : IStore
     public Task<Customer> GetCustomer(CustomerId id)
     {
         GetCustomerCallCount++;
-        return Task.FromResult(_customers[id]);
+        if (_customers.TryGetValue(id, out var customer))
+        {
+            return Task.FromResult(customer);
+        }
+        var newCustomer = new Customer(id, $"Customer {id.Value}", $"email-{id.Value}@test.com");
+        _customers[id] = newCustomer;
+        return Task.FromResult(newCustomer);
     }
 
     public Task<IReadOnlyList<Order>> GetOrdersByCustomer(CustomerId id)
     {
         GetOrdersByCustomerCallCount++;
-        return Task.FromResult<IReadOnlyList<Order>>(_orders[id]);
+        if (_orders.TryGetValue(id, out var orders))
+        {
+            return Task.FromResult<IReadOnlyList<Order>>(orders);
+        }
+        var newOrders = new List<Order> { new Order(new OrderId($"{id.Value}-order"), id, 100m) };
+        _orders[id] = newOrders;
+        return Task.FromResult<IReadOnlyList<Order>>(newOrders);
     }
 
     public Task UpdateCustomer(CustomerId id, CustomerPatch patch)

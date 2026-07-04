@@ -1,10 +1,14 @@
 namespace Sluice;
 
-public abstract class CachedOperation<TKey, TValue>(string name, int version = 1)
+public abstract class CachedOperation<TKey, TValue>(string name, int version = 1) : IOperation
 {
     public string Name { get; } = name;
 
     public int Version { get; } = version;
+
+    public Type KeyType => typeof(TKey);
+
+    public Type ValueType => typeof(TValue);
 
     protected abstract CacheKey Key(TKey key);
 
