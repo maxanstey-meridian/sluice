@@ -2,7 +2,9 @@ namespace Sluice.Tests;
 
 public sealed class BenchmarkTests
 {
-    [Fact(Skip = "Kill criterion #2 deferred to dogfooding — in-memory operations cannot produce meaningful overhead ratios.")]
+    [Fact(
+        Skip = "Kill criterion #2 deferred to dogfooding — in-memory operations cannot produce meaningful overhead ratios."
+    )]
     public async Task Tracking_Overhead_Is_Under_5_Percent()
     {
         var store = new FakeStore();
