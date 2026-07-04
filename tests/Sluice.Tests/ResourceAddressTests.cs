@@ -66,6 +66,49 @@ public sealed class ResourceAddressTests
         }
     }
 
+    public sealed class Validation
+    {
+        [Fact]
+        public void Constructor_Rejects_Colon_In_Name()
+        {
+            var act = () => new ResourceAddress(ResourceKind.Entity, "user:detail", "alice");
+            act.Should().Throw<ArgumentException>()
+               .WithMessage("*name*");
+        }
+
+        [Fact]
+        public void Constructor_Rejects_Colon_In_Key()
+        {
+            var act = () => new ResourceAddress(ResourceKind.Entity, "user", "tenant:alice");
+            act.Should().Throw<ArgumentException>()
+               .WithMessage("*key*");
+        }
+
+        [Fact]
+        public void Constructor_Accepts_Star_As_Key()
+        {
+            var addr = new ResourceAddress(ResourceKind.Entity, "user", "*");
+            addr.Key.Should().Be("*");
+            addr.ToString().Should().Be("entity:user:*");
+        }
+
+        [Fact]
+        public void Constructor_Accepts_Normal_Values()
+        {
+            var addr = new ResourceAddress(ResourceKind.Collection, "orders.byCustomer", "customer-123");
+            addr.Kind.Should().Be(ResourceKind.Collection);
+            addr.Name.Should().Be("orders.byCustomer");
+            addr.Key.Should().Be("customer-123");
+        }
+
+        [Fact]
+        public void ToString_Produces_Expected_Format()
+        {
+            var addr = new ResourceAddress(ResourceKind.External, "stripe", "price-list");
+            addr.ToString().Should().Be("external:stripe:price-list");
+        }
+    }
+
     public sealed class ToStringRendering
     {
         [Fact]
