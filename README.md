@@ -7,9 +7,10 @@ Instead of invalidating cached operations with broad tags, a query records the r
 The app-facing API is deliberately small:
 
 - `sluice.Get(query, key, ct)` reads through the cache.
-- `sluice.Apply(work, changes, ct)` runs a write and invalidates affected cached entries.
+- `sluice.Apply(work, writeEffect, ct)` runs a write and invalidates affected cached entries.
 - `read.Track(address, work)` records a dependency inside a query.
-- `changes.Changed(address)` declares what a write changed.
+- `WriteEffect.For().Changes(address)` declares what a write changed.
+- `changes.Changed(address)` is the inline escape hatch for one-off writes.
 
 ## Status
 
@@ -139,7 +140,7 @@ public sealed class UserCommands(ISluice sluice, IUserStore store)
     // tracked a read on entity:userSettings:{id}.
     public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
         sluice.Apply(
-            _ => store.UpdateDarkMode(id, darkMode),
+            ct => store.UpdateDarkMode(id, darkMode, ct),
             UserWriteEffects.SettingsChanged(id),
             ct);
 }
@@ -182,7 +183,7 @@ Queries are registered lazily when first passed to `SluiceKernel.Get`. That mean
 
 ### Writes
 
-`ISluice.Apply` runs the write first, then invalidates affected cached entries before returning.
+`ISluice.Apply` runs the write first, then invalidates affected cached entries before returning. The primary form takes a pre-built `WriteEffect`; the `Action<ChangeBuilder>` overload is inline syntax for the same thing.
 
 The recommended pattern is to pre-build `WriteEffect` recipes in a static class. This names the intent of each write and keeps call sites readable:
 
@@ -199,7 +200,7 @@ public static class UserWriteEffects
 // Call site: the recipe communicates intent, the addresses are encapsulated.
 public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
     sluice.Apply(
-        _ => store.UpdateDarkMode(id, darkMode),
+        ct => store.UpdateDarkMode(id, darkMode, ct),
         UserWriteEffects.SettingsChanged(id),
         ct);
 ```
@@ -217,7 +218,7 @@ public static class OrderWriteEffects
 
 // The resolver runs after the write completes, receiving its result.
 var order = await sluice.Apply(
-    ct => store.CreateOrder(customerId, input),
+    ct => store.CreateOrder(customerId, input, ct),
     OrderWriteEffects.Created(customerId),
     ct);
 ```
@@ -357,8 +358,8 @@ Primary app-facing types:
 - `ISluice`
 - `Query<TKey, TValue>`
 - `IReadScope`
-- `ChangeBuilder`
-- `ChangeBuilder<T>`
+- `WriteEffect`
+- `WriteEffect<T>`
 - `Resource`
 - `EntityResource<TKey>`
 - `CollectionResource<TKey>`
@@ -366,14 +367,17 @@ Primary app-facing types:
 - `ResourceAddress`
 - `IResourceKey`
 
+Inline/escape-hatch types:
+
+- `ChangeBuilder`
+- `ChangeBuilder<T>`
+
 Kernel types still exist and are tested directly:
 
 - `CachedOperation<TKey, TValue>`
 - `OperationRegistry`
 - `OperationContext`
 - `ChangeContext`
-- `WriteEffect`
-- `WriteEffect<T>`
 - `TrackedResource`
 - `ICacheStore`
 - `InMemoryCacheStore`
