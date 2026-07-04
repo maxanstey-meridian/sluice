@@ -9,15 +9,20 @@ public static class UserResources
     public static readonly EntityResource<UserId> Settings = Resource.Entity<UserId>(
         "userSettings"
     );
+
+    public static readonly EntityResource<UserId> Preferences = Resource.Entity<UserId>(
+        "userPreferences"
+    );
 }
 
 public static class UserWriteEffects
 {
-    public static WriteEffect ProfileChanged(UserId id) =>
-        WriteEffect.For().Changes(UserResources.User.For(id));
-
-    public static WriteEffect SettingsChanged(UserId id) =>
-        WriteEffect.For().Changes(UserResources.Settings.For(id));
+    public static WriteEffect Updated(UserId id) =>
+        WriteEffect
+            .For()
+            .Changes(UserResources.User.For(id))
+            .Changes(UserResources.Settings.For(id))
+            .Changes(UserResources.Preferences.For(id));
 }
 
 public sealed class UserQueries(IUserStore store)
@@ -27,7 +32,7 @@ public sealed class UserQueries(IUserStore store)
         .Compute(
             async (id, read) =>
             {
-                return await read.Track(UserResources.User.For(id), _ => store.GetUser(id));
+                return await read.Track(UserResources.User.For(id), ct => store.GetUser(id, ct));
             }
         );
 
@@ -38,11 +43,19 @@ public sealed class UserQueries(IUserStore store)
         .Compute(
             async (id, read) =>
             {
-                var user = await read.Track(UserResources.User.For(id), _ => store.GetUser(id));
+                var user = await read.Track(
+                    UserResources.User.For(id),
+                    ct => store.GetUser(id, ct)
+                );
 
                 var settings = await read.Track(
                     UserResources.Settings.For(id),
-                    _ => store.GetSettings(id)
+                    ct => store.GetSettings(id, ct)
+                );
+
+                var preferences = await read.Track(
+                    UserResources.Preferences.For(id),
+                    ct => store.GetPreferences(id, ct)
                 );
 
                 return new UserProfile(
@@ -50,25 +63,15 @@ public sealed class UserQueries(IUserStore store)
                     user.Name,
                     user.Email,
                     settings.DarkMode,
-                    settings.Language
+                    settings.Language,
+                    preferences.Theme
                 );
             }
         );
 }
 
-public sealed class UserCommands(ISluice sluice, IUserStore store)
+public sealed class UpdateUserUseCase(ISluice sluice, IUserStore store)
 {
-    public Task UpdateUserName(UserId id, string name, CancellationToken ct) =>
-        sluice.Apply(
-            _ => store.UpdateUserName(id, name),
-            UserWriteEffects.ProfileChanged(id),
-            ct
-        );
-
-    public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
-        sluice.Apply(
-            _ => store.UpdateDarkMode(id, darkMode),
-            UserWriteEffects.SettingsChanged(id),
-            ct
-        );
+    public Task Execute(UserId id, UpdateUserInput input, CancellationToken ct) =>
+        sluice.Apply(ct => store.UpdateUser(id, input, ct), UserWriteEffects.Updated(id), ct);
 }

@@ -11,28 +11,33 @@ public sealed record User(UserId Id, string Name, string Email);
 
 public sealed record UserSettings(UserId Id, bool DarkMode, string Language);
 
+public sealed record UserPreferences(UserId Id, string Theme);
+
 public sealed record UserProfile(
     UserId Id,
     string Name,
     string Email,
     bool DarkMode,
-    string Language
+    string Language,
+    string Theme
 );
+
+public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
 
 public interface IUserStore
 {
-    public Task<User> GetUser(UserId id);
-    public Task<UserSettings> GetSettings(UserId id);
-    public Task UpdateUserName(UserId id, string name);
-    public Task UpdateDarkMode(UserId id, bool darkMode);
+    public Task<User> GetUser(UserId id, CancellationToken ct);
+    public Task<UserSettings> GetSettings(UserId id, CancellationToken ct);
+    public Task<UserPreferences> GetPreferences(UserId id, CancellationToken ct);
+    public Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct);
 }
 
 public sealed class InMemoryUserStore : IUserStore
 {
     public int GetUserCallCount { get; private set; }
     public int GetSettingsCallCount { get; private set; }
-    public int UpdateUserNameCallCount { get; private set; }
-    public int UpdateDarkModeCallCount { get; private set; }
+    public int GetPreferencesCallCount { get; private set; }
+    public int UpdateUserCallCount { get; private set; }
 
     private readonly Dictionary<UserId, User> _users = new()
     {
@@ -46,31 +51,43 @@ public sealed class InMemoryUserStore : IUserStore
         [new UserId("bob")] = new UserSettings(new UserId("bob"), true, "fr"),
     };
 
-    public Task<User> GetUser(UserId id)
+    private readonly Dictionary<UserId, UserPreferences> _preferences = new()
+    {
+        [new UserId("alice")] = new UserPreferences(new UserId("alice"), "system"),
+        [new UserId("bob")] = new UserPreferences(new UserId("bob"), "compact"),
+    };
+
+    public Task<User> GetUser(UserId id, CancellationToken ct)
     {
         GetUserCallCount++;
         return Task.FromResult(_users[id]);
     }
 
-    public Task<UserSettings> GetSettings(UserId id)
+    public Task<UserSettings> GetSettings(UserId id, CancellationToken ct)
     {
         GetSettingsCallCount++;
         return Task.FromResult(_settings[id]);
     }
 
-    public Task UpdateUserName(UserId id, string name)
+    public Task<UserPreferences> GetPreferences(UserId id, CancellationToken ct)
     {
-        UpdateUserNameCallCount++;
-        var existing = _users[id];
-        _users[id] = existing with { Name = name };
-        return Task.CompletedTask;
+        GetPreferencesCallCount++;
+        return Task.FromResult(_preferences[id]);
     }
 
-    public Task UpdateDarkMode(UserId id, bool darkMode)
+    public Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct)
     {
-        UpdateDarkModeCallCount++;
-        var existing = _settings[id];
-        _settings[id] = existing with { DarkMode = darkMode };
+        UpdateUserCallCount++;
+
+        var user = _users[id];
+        _users[id] = user with { Name = input.Name };
+
+        var settings = _settings[id];
+        _settings[id] = settings with { DarkMode = input.DarkMode };
+
+        var preferences = _preferences[id];
+        _preferences[id] = preferences with { Theme = input.Theme };
+
         return Task.CompletedTask;
     }
 }

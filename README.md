@@ -31,7 +31,7 @@ Sluice makes the relationship explicit:
 - The registry maintains a dependency graph from resource addresses to cached entries.
 - Invalidation is selective: unchanged dependencies stay cached.
 
-Example: a user profile query reads `entity:user:alice` and `entity:userSettings:alice`. Updating the settings evicts the profile entry (which read settings), but keeps the user entry (which didn't).
+Example: a user profile query reads `entity:user:alice`, `entity:userSettings:alice`, and `entity:userPreferences:alice`. A user update use case declares the resources it changed, and Sluice evicts only cached entries that actually read one of those addresses.
 
 ## Quick Start
 
@@ -54,6 +54,9 @@ public static class UserResources
 
     public static readonly EntityResource<UserId> Settings =
         Resource.Entity<UserId>("userSettings");
+
+    public static readonly EntityResource<UserId> Preferences =
+        Resource.Entity<UserId>("userPreferences");
 }
 ```
 
@@ -76,20 +79,27 @@ public sealed class UserQueries(IUserStore store)
                 // If a later write changes entity:user:{id}, this entry is evicted.
                 var user = await read.Track(
                     UserResources.User.For(id),
-                    _ => store.GetUser(id));
+                    ct => store.GetUser(id, ct));
 
-                // A second tracked read. The entry now depends on both addresses.
-                // Changing either one will evict it.
+                // A second tracked read. The entry now depends on settings too.
                 var settings = await read.Track(
                     UserResources.Settings.For(id),
-                    _ => store.GetSettings(id));
+                    ct => store.GetSettings(id, ct));
+
+                // A third tracked read from another one-to-one user table.
+                // The cached profile is one operation, but it depends on three
+                // explicit resource addresses.
+                var preferences = await read.Track(
+                    UserResources.Preferences.For(id),
+                    ct => store.GetPreferences(id, ct));
 
                 return new UserProfile(
                     id,
                     user.Name,
                     user.Email,
                     settings.DarkMode,
-                    settings.Language);
+                    settings.Language,
+                    preferences.Theme);
             });
 }
 ```
@@ -100,10 +110,13 @@ With a helper, this becomes easier — extract the Track call so the query body 
 // The address is still explicit at the definition site.
 // The call site is just a method call.
 public static async Task<User> GetUser(this IReadScope read, UserId id, IUserStore store) =>
-    await read.Track(UserResources.User.For(id), _ => store.GetUser(id));
+    await read.Track(UserResources.User.For(id), ct => store.GetUser(id, ct));
 
 public static async Task<UserSettings> GetSettings(this IReadScope read, UserId id, IUserStore store) =>
-    await read.Track(UserResources.Settings.For(id), _ => store.GetSettings(id));
+    await read.Track(UserResources.Settings.For(id), ct => store.GetSettings(id, ct));
+
+public static async Task<UserPreferences> GetPreferences(this IReadScope read, UserId id, IUserStore store) =>
+    await read.Track(UserResources.Preferences.For(id), ct => store.GetPreferences(id, ct));
 ```
 
 The query body shrinks to:
@@ -113,7 +126,14 @@ The query body shrinks to:
 {
     var user = await read.GetUser(id, store);
     var settings = await read.GetSettings(id, store);
-    return new UserProfile(id, user.Name, user.Email, settings.DarkMode, settings.Language);
+    var preferences = await read.GetPreferences(id, store);
+    return new UserProfile(
+        id,
+        user.Name,
+        user.Email,
+        settings.DarkMode,
+        settings.Language,
+        preferences.Theme);
 });
 ```
 
@@ -132,21 +152,23 @@ var profile = await sluice.Get(queries.Profile, new UserId("alice"), ct);
 Declare changed resources on writes — Sluice runs the write, then evicts any cached entry whose tracked reads intersect the changed addresses:
 
 ```csharp
-public sealed class UserCommands(ISluice sluice, IUserStore store)
+// UserWriteEffects (defined below in Writes) is a static class of pre-built
+// WriteEffect recipes. Each recipe declares which resource addresses a use case changes.
+public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
+
+public sealed class UpdateUserUseCase(ISluice sluice, IUserStore store)
 {
-    // The first arg is the write itself (the store mutation).
-    // The second arg declares which resource address changed.
-    // After the write completes, Sluice evicts every cached entry that
-    // tracked a read on entity:userSettings:{id}.
-    public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
+    // One application use case can update multiple backing records.
+    // The WriteEffect recipe is the invalidation contract for the use case.
+    public Task Execute(UserId id, UpdateUserInput input, CancellationToken ct) =>
         sluice.Apply(
-            ct => store.UpdateDarkMode(id, darkMode, ct),
-            UserWriteEffects.SettingsChanged(id),
+            ct => store.UpdateUser(id, input, ct),
+            UserWriteEffects.Updated(id),
             ct);
 }
 ```
 
-When dark mode changes, the profile entry (which read `entity:userSettings:alice`) is evicted. The user entry (which only read `entity:user:alice`) stays cached.
+When the use case changes Alice, Sluice evicts any cached entry that read `entity:user:alice`, `entity:userSettings:alice`, or `entity:userPreferences:alice`.
 
 ## Concepts
 
@@ -165,6 +187,7 @@ The string form is:
 ```text
 entity:user:alice
 entity:userSettings:alice
+entity:userPreferences:alice
 collection:orders.byCustomer:customer-123
 external:stripe:price-list
 ```
@@ -188,35 +211,56 @@ Queries are registered lazily when first passed to `SluiceKernel.Get`. That mean
 The recommended pattern is to pre-build `WriteEffect` recipes in a static class. This names the intent of each write and keeps call sites readable:
 
 ```csharp
+// WriteEffect recipes encapsulate the resource addresses a use case changes.
+// One recipe per use case, grouped in a static class for discoverability.
 public static class UserWriteEffects
 {
-    public static WriteEffect SettingsChanged(UserId id) =>
-        WriteEffect.For().Changes(UserResources.Settings.For(id));
-
-    public static WriteEffect ProfileChanged(UserId id) =>
-        WriteEffect.For().Changes(UserResources.User.For(id));
+    // UpdateUserUseCase changes three one-to-one user records.
+    // .Changes() is chainable — each call adds another changed address.
+    // Entries that read ANY of these addresses are evicted.
+    public static WriteEffect Updated(UserId id) =>
+        WriteEffect.For()
+            .Changes(UserResources.User.For(id))
+            .Changes(UserResources.Settings.For(id))
+            .Changes(UserResources.Preferences.For(id));
 }
-
-// Call site: the recipe communicates intent, the addresses are encapsulated.
-public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
-    sluice.Apply(
-        ct => store.UpdateDarkMode(id, darkMode, ct),
-        UserWriteEffects.SettingsChanged(id),
-        ct);
 ```
+
+Call sites pass the recipe as the second argument to `Apply`:
+
+```csharp
+public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
+
+public sealed class UpdateUserUseCase(ISluice sluice, IUserStore store)
+{
+    // The store call is the write. It can update multiple backing rows.
+    // The WriteEffect recipe tells Sluice which resources those rows represent.
+    public Task Execute(UserId id, UpdateUserInput input, CancellationToken ct) =>
+        sluice.Apply(
+            ct => store.UpdateUser(id, input, ct),
+            UserWriteEffects.Updated(id),
+            ct);
+}
+```
+
+The cached profile is one query, but it reads several resources. The update is one use case, but it changes several resources. The `WriteEffect` recipe is the explicit bridge between those two facts.
 
 For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID), use `WriteEffect<T>`:
 
 ```csharp
+// WriteEffect<T> adds .ChangesResult(), which takes a resolver function.
+// The resolver runs after the write completes, receiving the write's result.
 public static class OrderWriteEffects
 {
+    // Declares a static address (the collection) AND a result-derived one
+    // (the individual order, whose ID isn't known until the store assigns it).
     public static WriteEffect<Order> Created(CustomerId customerId) =>
         WriteEffect<Order>.For()
             .Changes(OrderResources.OrdersByCustomer.For(customerId))
             .ChangesResult(order => OrderResources.Order.For(order.Id));
 }
 
-// The resolver runs after the write completes, receiving its result.
+// The generic Apply<T> returns the write's result so the caller can use it.
 var order = await sluice.Apply(
     ct => store.CreateOrder(customerId, input, ct),
     OrderWriteEffects.Created(customerId),
@@ -226,6 +270,8 @@ var order = await sluice.Apply(
 For dynamic cases where addresses depend on runtime conditions, use `Action<ChangeBuilder>` as an escape hatch:
 
 ```csharp
+// The Action<ChangeBuilder> overload is inline syntax for building a WriteEffect.
+// Use it for one-off writes where a named recipe would be overkill.
 await sluice.Apply(
     _ => store.UpdateUserName(id, "Alice Smith"),
     changes => changes.Changed(UserResources.User.For(id)),
@@ -239,11 +285,15 @@ Reads done during writes are not tracked. If a write needs existing state to dec
 Entity and collection resources support wildcard addresses — useful when a write affects all instances of a resource at once (e.g. a bulk import or schema migration):
 
 ```csharp
-// Invalidates every cached entry that tracked any read on entity:user:*
-UserResources.User.Wildcard()
+// A wildcard address has "*" as the key segment.
+// It matches any cached entry that read the same resource kind and name,
+// regardless of the specific key value.
+UserResources.User.Wildcard()        // entity:user:*
+UserResources.Settings.Wildcard()    // entity:userSettings:*
+UserResources.Preferences.Wildcard() // entity:userPreferences:*
 
-// Invalidates every cached entry that tracked any read on entity:userSettings:*
-UserResources.Settings.Wildcard()
+// Use in a WriteEffect for bulk invalidation:
+WriteEffect.For().Changes(UserResources.User.Wildcard())
 ```
 
 A wildcard changed address invalidates all cached entries that read the same resource kind and name, regardless of key.
@@ -275,12 +325,14 @@ OPERATIONS:
     reads:
       entity:user:alice
       entity:userSettings:alice
+      entity:userPreferences:alice
     cached: 2026-07-04T13:36:52+00:00
 
   user.profile:v1:"bob"
     reads:
       entity:user:bob
       entity:userSettings:bob
+      entity:userPreferences:bob
     cached: 2026-07-04T13:36:52+00:00
 
 RESOURCE ADDRESSES:
@@ -293,6 +345,10 @@ RESOURCE ADDRESSES:
     invalidates:
       user.profile:v1:"alice"
 
+  entity:userPreferences:alice
+    invalidates:
+      user.profile:v1:"alice"
+
   entity:user:bob
     invalidates:
       user.profile:v1:"bob"
@@ -300,9 +356,13 @@ RESOURCE ADDRESSES:
   entity:userSettings:bob
     invalidates:
       user.profile:v1:"bob"
+
+  entity:userPreferences:bob
+    invalidates:
+      user.profile:v1:"bob"
 ```
 
-The graph reads top-to-bottom: each cached entry lists the resource addresses it tracked during computation, and each resource address lists the entries it would invalidate. You can see at a glance that changing `entity:userSettings:alice` only hits the profile entry, not the user entry.
+The graph reads top-to-bottom: each cached entry lists the resource addresses it tracked during computation, and each resource address lists the entries it would invalidate. You can see at a glance that `user.profile:v1:"alice"` depends on three backing resources, while `user.byId:v1:"alice"` only depends on the user row.
 
 `Describe()` returns a `SystemManifest` containing registered operation metadata:
 
@@ -326,14 +386,14 @@ The example demonstrates:
 
 - first read as a cache miss
 - repeated read as a cache hit
-- a composite query reading two resources
+- a composite query reading three resources
 - graph output via `DumpGraph()`
-- selective invalidation: updating settings evicts the profile but not the user entry
+- use-case invalidation: one write changes multiple backing resources
 
 Key files:
 
 - `examples/user-profile/Domain.cs` — IDs, DTOs, store port, in-memory store
-- `examples/user-profile/UserApi.cs` — resources, queries, commands
+- `examples/user-profile/UserApi.cs` — resources, queries, write-effect recipe, use case
 - `examples/user-profile/Program.cs` — runnable walkthrough
 
 ## Build And Test
