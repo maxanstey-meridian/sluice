@@ -34,14 +34,17 @@ Example: a user profile query reads `entity:user:alice` and `entity:userSettings
 
 ## Quick Start
 
-Create resources:
+Create resources — these declare the identity of the data you cache around:
 
 ```csharp
+// Keys implement IResourceKey so that resource addresses can use their ToString().
 public sealed record UserId(string Value) : IResourceKey
 {
     public override string ToString() => Value;
 }
 
+// Each resource is a named entity. The name becomes part of the resource address
+// (e.g. entity:user:alice). Writes declare these same addresses when they change data.
 public static class UserResources
 {
     public static readonly EntityResource<UserId> User =
@@ -52,20 +55,29 @@ public static class UserResources
 }
 ```
 
-Define a query:
+Define a query — a cached operation that tracks what it reads:
 
 ```csharp
+// The store dependency is captured in the closure — no DI into the query itself.
 public sealed class UserQueries(IUserStore store)
 {
+    // A Query takes a name (used in cache keys and the dependency graph),
+    // a key selector (serialized to JSON for the cache entry key),
+    // and a compute body that does the actual work.
     public readonly Query<UserId, UserProfile> Profile =
         new Query<UserId, UserProfile>("user.profile")
             .Key(id => id.Value)
             .Compute(async (id, read) =>
             {
+                // read.Track does two things: records that this cached entry
+                // depends on the given resource address, then runs the store call.
+                // If a later write changes entity:user:{id}, this entry is evicted.
                 var user = await read.Track(
                     UserResources.User.For(id),
                     _ => store.GetUser(id));
 
+                // A second tracked read. The entry now depends on both addresses.
+                // Changing either one will evict it.
                 var settings = await read.Track(
                     UserResources.Settings.For(id),
                     _ => store.GetSettings(id));
@@ -80,20 +92,27 @@ public sealed class UserQueries(IUserStore store)
 }
 ```
 
-Read through Sluice:
+Read through Sluice — first call computes and caches, second call returns the cached value:
 
 ```csharp
+// SluiceKernel wraps an OperationRegistry with an in-memory cache.
 var sluice = new SluiceKernel(new InMemoryCacheStore());
 var queries = new UserQueries(store);
 
+// Cache miss on first call: runs Compute, tracks reads, stores the result.
+// Cache hit on second call with the same key: returns immediately, no store calls.
 var profile = await sluice.Get(queries.Profile, new UserId("alice"), ct);
 ```
 
-Declare changed resources on writes:
+Declare changed resources on writes — Sluice runs the write, then evicts any cached entry whose tracked reads intersect the changed addresses:
 
 ```csharp
 public sealed class UserCommands(ISluice sluice, IUserStore store)
 {
+    // The first arg is the write itself (the store mutation).
+    // The second arg declares which resource address changed.
+    // After the write completes, Sluice evicts every cached entry that
+    // tracked a read on entity:userSettings:{id}.
     public Task UpdateDarkMode(UserId id, bool darkMode, CancellationToken ct) =>
         sluice.Apply(
             _ => store.UpdateDarkMode(id, darkMode),
@@ -141,18 +160,24 @@ Queries are registered lazily when first passed to `SluiceKernel.Get`. That mean
 
 `ISluice.Apply` runs the write first, then invalidates affected cached entries before returning.
 
-For static changed addresses:
+For static changed addresses — you know the address at call time, no result needed:
 
 ```csharp
 await sluice.Apply(
+    // The write: mutate the store.
     _ => store.UpdateUserName(id, "Alice Smith"),
+    // The declaration: this address changed. Any cached entry that
+    // tracked a read on entity:user:{id} is evicted.
     changes => changes.Changed(UserResources.User.For(id)),
     ct);
 ```
 
-For result-derived changed addresses:
+For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID):
 
 ```csharp
+// The resolver runs after the write completes, receiving its result.
+// Here the collection address is known upfront, but the entity address
+// needs the created order's ID from the store result.
 var order = await sluice.Apply(
     ct => store.CreateOrder(customerId, input),
     changes => changes
@@ -165,10 +190,13 @@ Reads done during writes are not tracked. If a write needs existing state to dec
 
 ### Wildcards
 
-Entity and collection resources support wildcard addresses:
+Entity and collection resources support wildcard addresses — useful when a write affects all instances of a resource at once (e.g. a bulk import or schema migration):
 
 ```csharp
+// Invalidates every cached entry that tracked any read on entity:user:*
 UserResources.User.Wildcard()
+
+// Invalidates every cached entry that tracked any read on entity:userSettings:*
 UserResources.Settings.Wildcard()
 ```
 
@@ -179,23 +207,64 @@ A wildcard changed address invalidates all cached entries that read the same res
 `SluiceKernel` exposes the registry inspection helpers:
 
 ```csharp
+// Text snapshot of the runtime dependency graph — entries, their tracked reads,
+// and which addresses invalidate which entries. Useful for debugging.
 var graph = sluice.DumpGraph();
+
+// Static metadata for registered operations — name, input type, output type.
+// No execution needed; works off registration alone.
 var manifest = sluice.Describe();
 ```
 
-`DumpGraph()` shows the runtime graph:
+`DumpGraph()` returns a text snapshot of the runtime state. Example output after reading the user and profile queries for Alice and Bob:
 
-- cached entries
-- observed reads for each entry
-- resource addresses and the entries they invalidate
-- cache timestamps
+```text
+OPERATIONS:
+  user.byId:v1:"alice"
+    reads:
+      entity:user:alice
+    cached: 2026-07-04T13:36:52+00:00
+
+  user.profile:v1:"alice"
+    reads:
+      entity:user:alice
+      entity:userSettings:alice
+    cached: 2026-07-04T13:36:52+00:00
+
+  user.profile:v1:"bob"
+    reads:
+      entity:user:bob
+      entity:userSettings:bob
+    cached: 2026-07-04T13:36:52+00:00
+
+RESOURCE ADDRESSES:
+  entity:user:alice
+    invalidates:
+      user.byId:v1:"alice"
+      user.profile:v1:"alice"
+
+  entity:userSettings:alice
+    invalidates:
+      user.profile:v1:"alice"
+
+  entity:user:bob
+    invalidates:
+      user.profile:v1:"bob"
+
+  entity:userSettings:bob
+    invalidates:
+      user.profile:v1:"bob"
+```
+
+The graph reads top-to-bottom: each cached entry lists the resource addresses it tracked during computation, and each resource address lists the entries it would invalidate. You can see at a glance that changing `entity:userSettings:alice` only hits the profile entry, not the user entry.
 
 `Describe()` returns a `SystemManifest` containing registered operation metadata:
 
-- operation name
-- input type
-- output type
-- defining operation type
+```text
+Operations:
+  user.byId       UserId → User          (DelegateCachedOperation`2)
+  user.profile    UserId → UserProfile   (DelegateCachedOperation`2)
+```
 
 Because overlay queries are lazily registered, `Describe()` only includes queries that have been executed through `Get`.
 
