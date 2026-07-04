@@ -8,8 +8,8 @@ The app-facing API is deliberately small:
 
 - `sluice.Get(query, key, ct)` reads through the cache.
 - `sluice.Apply(work, writeEffect, ct)` runs a write and invalidates affected cached entries.
-- `read.Track(address, work)` records a dependency inside a query.
-- `WriteEffect.For().Changes(address)` declares what a write changed.
+- `TrackedRead<TKey, TValue>` bundles a resource address with its store read delegate — `.Get(key, scope)` records the dependency and fetches the value.
+- `new WriteEffect(address)` declares what a write changed.
 - `changes.Changed(address)` is the inline escape hatch for one-off writes.
 
 ## Status
@@ -45,8 +45,9 @@ public sealed record UserId(string Value) : IResourceKey
     public string ResourceKey => Value;
 }
 
-// Each resource is a named entity. The name becomes part of the resource address
-// (e.g. entity:user:alice). Writes declare these same addresses when they change data.
+// Resources are static — pure data, no store dependency.
+// The name becomes part of the resource address (e.g. entity:user:alice).
+// Writes reference these same resources when declaring what changed.
 public static class UserResources
 {
     public static readonly EntityResource<UserId> User =
@@ -60,89 +61,57 @@ public static class UserResources
 }
 ```
 
-Define a query — a cached operation that tracks what it reads:
+Bundle each resource with its store read delegate — `TrackedRead` handles tracking automatically:
 
 ```csharp
-// The store dependency is captured in the closure — no DI into the query itself.
-public sealed class UserQueries(IUserStore store)
+// Each TrackedRead is a one-liner: resource + store delegate.
+// The store is captured in the closure — no DI into the read itself.
+// .Get(key, scope) records the dependency and runs the store call.
+// The cancellation token from IReadScope is passed to the store delegate internally.
+public sealed class UserReads(IUserStore store)
 {
-    // A Query takes a name (used in cache keys and the dependency graph),
-    // a key selector (serialized to JSON for the cache entry key),
-    // and a compute body that does the actual work.
-    public readonly Query<UserId, UserProfile> Profile =
-        new Query<UserId, UserProfile>("user.profile")
-            .Key(id => id.Value)
-            .Compute(async (id, read) =>
-            {
-                // read.Track does two things: records that this cached entry
-                // depends on the given resource address, then runs the store call.
-                // If a later write changes entity:user:{id}, this entry is evicted.
-                var user = await read.Track(
-                    UserResources.User.For(id),
-                    ct => store.GetUser(id, ct));
+    public readonly TrackedRead<UserId, User> User = new(
+        UserResources.User.For, (id, ct) => store.GetUser(id, ct));
 
-                // A second tracked read. The entry now depends on settings too.
-                var settings = await read.Track(
-                    UserResources.Settings.For(id),
-                    ct => store.GetSettings(id, ct));
+    public readonly TrackedRead<UserId, UserSettings> Settings = new(
+        UserResources.Settings.For, (id, ct) => store.GetSettings(id, ct));
 
-                // A third tracked read from another one-to-one user table.
-                // The cached profile is one operation, but it depends on three
-                // explicit resource addresses.
-                var preferences = await read.Track(
-                    UserResources.Preferences.For(id),
-                    ct => store.GetPreferences(id, ct));
-
-                return new UserProfile(
-                    id,
-                    user.Name,
-                    user.Email,
-                    settings.DarkMode,
-                    settings.Language,
-                    preferences.Theme);
-            });
+    public readonly TrackedRead<UserId, UserPreferences> Preferences = new(
+        UserResources.Preferences.For, (id, ct) => store.GetPreferences(id, ct));
 }
 ```
 
-With a helper, this becomes easier — extract the Track call so the query body reads top-to-bottom:
+Define a query — the compute body reads through the tracked reads, no Sluice vocabulary at the read site:
 
 ```csharp
-// The address is still explicit at the definition site.
-// The call site is just a method call.
-public static async Task<User> GetUser(this IReadScope read, UserId id, IUserStore store) =>
-    await read.Track(UserResources.User.For(id), ct => store.GetUser(id, ct));
-
-public static async Task<UserSettings> GetSettings(this IReadScope read, UserId id, IUserStore store) =>
-    await read.Track(UserResources.Settings.For(id), ct => store.GetSettings(id, ct));
-
-public static async Task<UserPreferences> GetPreferences(this IReadScope read, UserId id, IUserStore store) =>
-    await read.Track(UserResources.Preferences.For(id), ct => store.GetPreferences(id, ct));
-```
-
-The query body shrinks to:
-
-```csharp
-.Compute(async (id, read) =>
+public sealed class UserQueries(UserReads reads)
 {
-    var user = await read.GetUser(id, store);
-    var settings = await read.GetSettings(id, store);
-    var preferences = await read.GetPreferences(id, store);
-    return new UserProfile(
-        id,
-        user.Name,
-        user.Email,
-        settings.DarkMode,
-        settings.Language,
-        preferences.Theme);
-});
+    public readonly Query<UserId, UserProfile> Profile = new(
+        "user.profile",
+        id => id.Value,
+        async (id, scope) =>
+        {
+            var user = await reads.User.Get(id, scope);
+            var settings = await reads.Settings.Get(id, scope);
+            var preferences = await reads.Preferences.Get(id, scope);
+
+            return new UserProfile(
+                id,
+                user.Name,
+                user.Email,
+                settings.DarkMode,
+                settings.Language,
+                preferences.Theme);
+        });
+}
 ```
 
 Read through Sluice — first call computes and caches, second call returns the cached value:
 
 ```csharp
-// SluiceKernel wraps an OperationRegistry with an in-memory cache.
 var sluice = new SluiceKernel(new InMemoryCacheStore());
-var queries = new UserQueries(store);
+var reads = new UserReads(store);
+var queries = new UserQueries(reads);
 
 // Cache miss on first call: runs Compute, tracks reads, stores the result.
 // Cache hit on second call with the same key: returns immediately, no store calls.
@@ -152,9 +121,16 @@ var profile = await sluice.Get(queries.Profile, new UserId("alice"), ct);
 Declare changed resources on writes — Sluice runs the write, then evicts any cached entry whose tracked reads intersect the changed addresses:
 
 ```csharp
-// UserWriteEffects (defined below in Writes) is a static class of pre-built
-// WriteEffect recipes. Each recipe declares which resource addresses a use case changes.
 public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
+
+public static class UserWriteEffects
+{
+    public static WriteEffect Updated(UserId id) =>
+        new(
+            UserResources.User.For(id),
+            UserResources.Settings.For(id),
+            UserResources.Preferences.For(id));
+}
 
 public sealed class UpdateUserUseCase(ISluice sluice, IUserStore store)
 {
@@ -198,9 +174,14 @@ Resource keys implement `IResourceKey`, which exposes `ResourceKey` — a string
 
 `Query<TKey, TValue>` defines a cached operation.
 
-- `.Key(...)` builds the cache key shape. Sluice serializes it with `System.Text.Json`.
-- `.Compute(...)` receives an `IReadScope`.
-- Calls to `read.Track(...)` record observed dependencies before running the underlying read.
+- The **name** (first arg) is used in cache keys and the dependency graph.
+- The **key selector** (second arg) builds the cache key shape. Sluice serializes it with `System.Text.Json`.
+- The **compute body** (third arg) receives an `IReadScope`.
+- Optional `version` and `ttl` parameters control cache invalidation and entry expiry.
+
+`TrackedRead<TKey, TValue>` is the recommended way to read inside a compute body. It bundles a resource address with its store delegate — `.Get(key, scope)` records the dependency and runs the store call. The cancellation token from `IReadScope` is passed to the store delegate internally; there's no `ct` parameter at the call site.
+
+For custom tracking (computed addresses, conditional reads), `read.Track(...)` is available directly on `IReadScope` as an escape hatch.
 
 Queries are registered lazily when first passed to `SluiceKernel.Get`. That means `Describe()` is empty until a query has been executed at least once.
 
@@ -215,14 +196,13 @@ The recommended pattern is to pre-build `WriteEffect` recipes in a static class.
 // One recipe per use case, grouped in a static class for discoverability.
 public static class UserWriteEffects
 {
-    // UpdateUserUseCase changes three one-to-one user records.
-    // .Changes() is chainable — each call adds another changed address.
+    // Each address is a resource the write changed.
     // Entries that read ANY of these addresses are evicted.
     public static WriteEffect Updated(UserId id) =>
-        WriteEffect.For()
-            .Changes(UserResources.User.For(id))
-            .Changes(UserResources.Settings.For(id))
-            .Changes(UserResources.Preferences.For(id));
+        new(
+            UserResources.User.For(id),
+            UserResources.Settings.For(id),
+            UserResources.Preferences.For(id));
 }
 ```
 
@@ -248,15 +228,14 @@ The cached profile is one query, but it reads several resources. The update is o
 For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID), use `WriteEffect<T>`:
 
 ```csharp
-// WriteEffect<T> adds .ChangesResult(), which takes a resolver function.
-// The resolver runs after the write completes, receiving the write's result.
+// WriteEffect<T> takes static addresses as constructor params,
+// then .ChangesResult() adds result-derived resolvers that run after the write completes.
 public static class OrderWriteEffects
 {
     // Declares a static address (the collection) AND a result-derived one
     // (the individual order, whose ID isn't known until the store assigns it).
     public static WriteEffect<Order> Created(CustomerId customerId) =>
-        WriteEffect<Order>.For()
-            .Changes(OrderResources.OrdersByCustomer.For(customerId))
+        new WriteEffect<Order>(OrderResources.OrdersByCustomer.For(customerId))
             .ChangesResult(order => OrderResources.Order.For(order.Id));
 }
 
@@ -293,7 +272,7 @@ UserResources.Settings.Wildcard()    // entity:userSettings:*
 UserResources.Preferences.Wildcard() // entity:userPreferences:*
 
 // Use in a WriteEffect for bulk invalidation:
-WriteEffect.For().Changes(UserResources.User.Wildcard())
+new WriteEffect(UserResources.User.Wildcard())
 ```
 
 A wildcard changed address invalidates all cached entries that read the same resource kind and name, regardless of key.
@@ -393,7 +372,7 @@ The example demonstrates:
 Key files:
 
 - `examples/user-profile/Domain.cs` — IDs, DTOs, store port, in-memory store
-- `examples/user-profile/UserApi.cs` — resources, queries, write-effect recipe, use case
+- `examples/user-profile/UserApi.cs` — resources, tracked reads, queries, write-effect recipe, use case
 - `examples/user-profile/Program.cs` — runnable walkthrough
 
 ## Build And Test
@@ -417,6 +396,7 @@ Primary app-facing types:
 - `SluiceKernel`
 - `ISluice`
 - `Query<TKey, TValue>`
+- `TrackedRead<TKey, TValue>`
 - `IReadScope`
 - `WriteEffect`
 - `WriteEffect<T>`
@@ -446,7 +426,8 @@ The overlay is the intended application API. The kernel remains useful for lower
 
 ## Limitations
 
-- Invalidation only knows about reads that go through `read.Track`.
+- Invalidation only knows about reads that go through `TrackedRead.Get` or `read.Track`.
+- Writes must declare every resource address they changed. Missing write effects leave stale cached entries.
 - If a write succeeds and the process crashes before invalidation completes, stale cache entries can remain.
 - The in-memory cache store is for tests/examples, not distributed production caching.
 - The dependency graph is process-local.

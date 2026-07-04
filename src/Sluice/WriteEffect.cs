@@ -1,32 +1,13 @@
 namespace Sluice;
 
-public sealed class WriteEffect
+public sealed class WriteEffect(params ResourceAddress[] addresses)
 {
-    private readonly List<ResourceAddress> _addresses = [];
-
-    public static WriteEffect For() => new();
-
-    public WriteEffect Changes(ResourceAddress address)
-    {
-        _addresses.Add(address);
-        return this;
-    }
-
-    internal IEnumerable<ResourceAddress> Resolve() => _addresses;
+    internal IReadOnlyList<ResourceAddress> Addresses { get; } = addresses;
 }
 
-public sealed class WriteEffect<T>
+public sealed class WriteEffect<T>(params ResourceAddress[] addresses)
 {
-    private readonly List<ResourceAddress> _addresses = new();
-    private readonly List<Func<T, ResourceAddress>> _resultResolvers = new();
-
-    public static WriteEffect<T> For() => new();
-
-    public WriteEffect<T> Changes(ResourceAddress address)
-    {
-        _addresses.Add(address);
-        return this;
-    }
+    private readonly List<Func<T, ResourceAddress>> _resultResolvers = [];
 
     public WriteEffect<T> ChangesResult(Func<T, ResourceAddress> resolver)
     {
@@ -36,7 +17,7 @@ public sealed class WriteEffect<T>
 
     internal IEnumerable<ResourceAddress> Resolve(T result)
     {
-        foreach (var address in _addresses)
+        foreach (var address in addresses)
         {
             yield return address;
         }

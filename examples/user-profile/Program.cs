@@ -3,7 +3,8 @@ using SluiceExample;
 
 var store = new InMemoryUserStore();
 var sluice = new SluiceKernel(new InMemoryCacheStore());
-var queries = new UserQueries(store);
+var reads = new UserReads(store);
+var queries = new UserQueries(reads);
 var updateUser = new UpdateUserUseCase(sluice, store);
 
 var alice = new UserId("alice");

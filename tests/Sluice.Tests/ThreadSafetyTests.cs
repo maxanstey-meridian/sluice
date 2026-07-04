@@ -218,7 +218,7 @@ public sealed class ThreadSafetyTests
                             ctx =>
                                 ctx.Apply(
                                     () => Task.CompletedTask,
-                                    WriteEffect.For().Changes(CustomerResources.Customer.Wildcard())
+                                    new WriteEffect(CustomerResources.Customer.Wildcard())
                                 ),
                             CancellationToken.None
                         );

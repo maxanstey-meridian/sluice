@@ -61,25 +61,41 @@ public sealed class TtlTests
         }
     }
 
-    private static OverlayQueries CreateQueries(FakeStore store) => new(store);
-
     private static SluiceKernel CreateKernel(ICacheStore cacheStore) => new(cacheStore);
+
+    private static Query<CustomerId, CustomerScore> ScoreQuery(
+        IStore store,
+        TimeSpan? ttl = null
+    ) =>
+        new(
+            "customer.score",
+            id => new { customerId = id.Value },
+            async (id, read) =>
+            {
+                _ = await read.Track(
+                    CustomerResources.Customer.For(id),
+                    _ => store.GetCustomer(id)
+                );
+                var orders = await read.Track(
+                    OrderResources.OrdersByCustomer.For(id),
+                    _ => store.GetOrdersByCustomer(id)
+                );
+                return new CustomerScore(id, (int)orders.Sum(o => o.Total));
+            },
+            ttl: ttl
+        );
 
     [Fact]
     public async Task Ttl_EntryExpires_AfterTtl()
     {
         var store = new FakeStore();
-        var queries = CreateQueries(store);
+        var query = ScoreQuery(store, TimeSpan.FromMilliseconds(100));
         var cacheStore = new TrackingCacheStore(new InMemoryCacheStore());
         var sluice = CreateKernel(cacheStore);
 
         var customerA = new CustomerId("A");
 
-        var result1 = await sluice.Get(
-            queries.CustomerScore.Ttl(TimeSpan.FromMilliseconds(100)),
-            customerA,
-            CancellationToken.None
-        );
+        var result1 = await sluice.Get(query, customerA, CancellationToken.None);
         result1.Score.Should().Be(20);
         store.GetCustomerCallCount.Should().Be(1);
 
@@ -94,7 +110,7 @@ public sealed class TtlTests
 
         await Task.Delay(150);
 
-        var result2 = await sluice.Get(queries.CustomerScore, customerA, CancellationToken.None);
+        var result2 = await sluice.Get(query, customerA, CancellationToken.None);
         result2.Score.Should().Be(20);
         store.GetCustomerCallCount.Should().Be(2);
         cacheStore.RemoveCallCount.Should().Be(1);
@@ -109,17 +125,17 @@ public sealed class TtlTests
     public async Task Ttl_NoTtl_NeverExpires()
     {
         var store = new FakeStore();
-        var queries = CreateQueries(store);
+        var query = ScoreQuery(store);
         var cacheStore = new TrackingCacheStore(new InMemoryCacheStore());
         var sluice = CreateKernel(cacheStore);
 
         var customerA = new CustomerId("A");
 
-        await sluice.Get(queries.CustomerScore, customerA, CancellationToken.None);
+        await sluice.Get(query, customerA, CancellationToken.None);
         store.GetCustomerCallCount.Should().Be(1);
         cacheStore.RemoveCallCount.Should().Be(0);
 
-        await sluice.Get(queries.CustomerScore, customerA, CancellationToken.None);
+        await sluice.Get(query, customerA, CancellationToken.None);
         store.GetCustomerCallCount.Should().Be(1);
         cacheStore.RemoveCallCount.Should().Be(0);
     }
@@ -128,17 +144,13 @@ public sealed class TtlTests
     public async Task Ttl_ExpiredEntry_RemovedFromCache()
     {
         var store = new FakeStore();
-        var queries = CreateQueries(store);
+        var query = ScoreQuery(store, TimeSpan.FromMilliseconds(100));
         var cacheStore = new TrackingCacheStore(new InMemoryCacheStore());
         var sluice = CreateKernel(cacheStore);
 
         var customerA = new CustomerId("A");
 
-        await sluice.Get(
-            queries.CustomerScore.Ttl(TimeSpan.FromMilliseconds(100)),
-            customerA,
-            CancellationToken.None
-        );
+        await sluice.Get(query, customerA, CancellationToken.None);
         store.GetCustomerCallCount.Should().Be(1);
 
         var entryKey = "customer.score:v1:{\"customerId\":\"A\"}";
@@ -154,7 +166,7 @@ public sealed class TtlTests
 
         cacheStore.BlockNextSet();
 
-        var refreshTask = sluice.Get(queries.CustomerScore, customerA, CancellationToken.None);
+        var refreshTask = sluice.Get(query, customerA, CancellationToken.None);
         await cacheStore.Removed;
 
         cacheStore.RemoveCallCount.Should().Be(1);
@@ -180,17 +192,13 @@ public sealed class TtlTests
     public async Task Ttl_ExpiredEntry_TriggersGraphReplacement()
     {
         var store = new FakeStore();
-        var queries = CreateQueries(store);
+        var query = ScoreQuery(store, TimeSpan.FromMilliseconds(100));
         var cacheStore = new TrackingCacheStore(new InMemoryCacheStore());
         var sluice = CreateKernel(cacheStore);
 
         var customerA = new CustomerId("A");
 
-        await sluice.Get(
-            queries.CustomerScore.Ttl(TimeSpan.FromMilliseconds(100)),
-            customerA,
-            CancellationToken.None
-        );
+        await sluice.Get(query, customerA, CancellationToken.None);
         store.GetCustomerCallCount.Should().Be(1);
 
         var graphBefore = sluice.DumpGraph();
@@ -203,7 +211,7 @@ public sealed class TtlTests
 
         cacheStore.BlockNextSet();
 
-        var refreshTask = sluice.Get(queries.CustomerScore, customerA, CancellationToken.None);
+        var refreshTask = sluice.Get(query, customerA, CancellationToken.None);
         await cacheStore.Removed;
 
         cacheStore.RemoveCallCount.Should().Be(1);
@@ -229,21 +237,17 @@ public sealed class TtlTests
     public async Task Ttl_NotYetExpired_IsCacheHit()
     {
         var store = new FakeStore();
-        var queries = CreateQueries(store);
+        var query = ScoreQuery(store, TimeSpan.FromMinutes(5));
         var cacheStore = new TrackingCacheStore(new InMemoryCacheStore());
         var sluice = CreateKernel(cacheStore);
 
         var customerA = new CustomerId("A");
 
-        await sluice.Get(
-            queries.CustomerScore.Ttl(TimeSpan.FromMinutes(5)),
-            customerA,
-            CancellationToken.None
-        );
+        await sluice.Get(query, customerA, CancellationToken.None);
         store.GetCustomerCallCount.Should().Be(1);
         cacheStore.RemoveCallCount.Should().Be(0);
 
-        await sluice.Get(queries.CustomerScore, customerA, CancellationToken.None);
+        await sluice.Get(query, customerA, CancellationToken.None);
         store.GetCustomerCallCount.Should().Be(1);
         cacheStore.RemoveCallCount.Should().Be(0);
     }

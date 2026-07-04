@@ -10,15 +10,7 @@ public sealed class ChangeBuilder
         return this;
     }
 
-    internal WriteEffect ToWriteEffect()
-    {
-        var effect = WriteEffect.For();
-        foreach (var address in _addresses)
-        {
-            effect.Changes(address);
-        }
-        return effect;
-    }
+    internal WriteEffect ToWriteEffect() => new(_addresses.ToArray());
 }
 
 public sealed class ChangeBuilder<T>
@@ -40,11 +32,7 @@ public sealed class ChangeBuilder<T>
 
     internal WriteEffect<T> ToWriteEffect()
     {
-        var effect = WriteEffect<T>.For();
-        foreach (var address in _addresses)
-        {
-            effect.Changes(address);
-        }
+        var effect = new WriteEffect<T>(_addresses.ToArray());
         foreach (var resolver in _resolvers)
         {
             effect.ChangesResult(resolver);

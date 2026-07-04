@@ -35,7 +35,7 @@ public sealed class ChangeContext(CancellationToken cancellationToken)
     public async Task Apply(Func<Task> work, WriteEffect effect)
     {
         await work();
-        foreach (var address in effect.Resolve())
+        foreach (var address in effect.Addresses)
         {
             _changedAddresses.Add(address);
         }

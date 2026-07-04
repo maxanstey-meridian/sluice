@@ -146,7 +146,7 @@ public sealed class WritePathTests
             ctx =>
                 ctx.Apply(
                     () => store.UpdateCustomer(customerA, new CustomerPatch("Updated", null)),
-                    WriteEffect.For().Changes(CustomerResources.Customer.Wildcard())
+                    new WriteEffect(CustomerResources.Customer.Wildcard())
                 ),
             CancellationToken.None
         );

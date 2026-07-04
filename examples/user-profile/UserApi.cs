@@ -15,59 +15,64 @@ public static class UserResources
     );
 }
 
+public sealed class UserReads(IUserStore store)
+{
+    public readonly TrackedRead<UserId, User> User = new(
+        UserResources.User.For,
+        (id, ct) => store.GetUser(id, ct)
+    );
+
+    public readonly TrackedRead<UserId, UserSettings> Settings = new(
+        UserResources.Settings.For,
+        (id, ct) => store.GetSettings(id, ct)
+    );
+
+    public readonly TrackedRead<UserId, UserPreferences> Preferences = new(
+        UserResources.Preferences.For,
+        (id, ct) => store.GetPreferences(id, ct)
+    );
+}
+
 public static class UserWriteEffects
 {
     public static WriteEffect Updated(UserId id) =>
-        WriteEffect
-            .For()
-            .Changes(UserResources.User.For(id))
-            .Changes(UserResources.Settings.For(id))
-            .Changes(UserResources.Preferences.For(id));
+        new(
+            UserResources.User.For(id),
+            UserResources.Settings.For(id),
+            UserResources.Preferences.For(id)
+        );
 }
 
-public sealed class UserQueries(IUserStore store)
+public sealed class UserQueries(UserReads reads)
 {
-    public readonly Query<UserId, User> User = new Query<UserId, User>("user.byId")
-        .Key(id => id.Value)
-        .Compute(
-            async (id, read) =>
-            {
-                return await read.Track(UserResources.User.For(id), ct => store.GetUser(id, ct));
-            }
-        );
+    public readonly Query<UserId, User> User = new(
+        "user.byId",
+        id => id.Value,
+        async (id, scope) =>
+        {
+            return await reads.User.Get(id, scope);
+        }
+    );
 
-    public readonly Query<UserId, UserProfile> Profile = new Query<UserId, UserProfile>(
-        "user.profile"
-    )
-        .Key(id => id.Value)
-        .Compute(
-            async (id, read) =>
-            {
-                var user = await read.Track(
-                    UserResources.User.For(id),
-                    ct => store.GetUser(id, ct)
-                );
+    public readonly Query<UserId, UserProfile> Profile = new(
+        "user.profile",
+        id => id.Value,
+        async (id, scope) =>
+        {
+            var user = await reads.User.Get(id, scope);
+            var settings = await reads.Settings.Get(id, scope);
+            var preferences = await reads.Preferences.Get(id, scope);
 
-                var settings = await read.Track(
-                    UserResources.Settings.For(id),
-                    ct => store.GetSettings(id, ct)
-                );
-
-                var preferences = await read.Track(
-                    UserResources.Preferences.For(id),
-                    ct => store.GetPreferences(id, ct)
-                );
-
-                return new UserProfile(
-                    id,
-                    user.Name,
-                    user.Email,
-                    settings.DarkMode,
-                    settings.Language,
-                    preferences.Theme
-                );
-            }
-        );
+            return new UserProfile(
+                id,
+                user.Name,
+                user.Email,
+                settings.DarkMode,
+                settings.Language,
+                preferences.Theme
+            );
+        }
+    );
 }
 
 public sealed class UpdateUserUseCase(ISluice sluice, IUserStore store)

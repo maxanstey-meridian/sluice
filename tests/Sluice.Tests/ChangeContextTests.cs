@@ -138,10 +138,10 @@ public sealed class ChangeContextTests
         public async Task Void_Form_Executes_Work_And_Resolves_Addresses()
         {
             var ctx = new ChangeContext();
-            var effect = WriteEffect
-                .For()
-                .Changes(new ResourceAddress(ResourceKind.Entity, "entity", "1"))
-                .Changes(new ResourceAddress(ResourceKind.Collection, "coll", "2"));
+            var effect = new WriteEffect(
+                new ResourceAddress(ResourceKind.Entity, "entity", "1"),
+                new ResourceAddress(ResourceKind.Collection, "coll", "2")
+            );
 
             await ctx.Apply(
                 async () =>
@@ -164,14 +164,13 @@ public sealed class ChangeContextTests
         public async Task Typed_Form_Executes_Work_Returns_Result_And_Resolves_Addresses()
         {
             var ctx = new ChangeContext();
-            var effect = WriteEffect<string>
-                .For()
-                .Changes(new ResourceAddress(ResourceKind.Entity, "entity", "1"))
-                .ChangesResult(result => new ResourceAddress(
-                    ResourceKind.Entity,
-                    "result",
-                    result
-                ));
+            var effect = new WriteEffect<string>(
+                new ResourceAddress(ResourceKind.Entity, "entity", "1")
+            ).ChangesResult(result => new ResourceAddress(
+                ResourceKind.Entity,
+                "result",
+                result
+            ));
 
             var result = await ctx.Apply(
                 async () =>
@@ -196,9 +195,9 @@ public sealed class ChangeContextTests
         public async Task Void_Form_Throws_Nothing_If_Work_Throws()
         {
             var ctx = new ChangeContext();
-            var effect = WriteEffect
-                .For()
-                .Changes(new ResourceAddress(ResourceKind.Entity, "entity", "1"));
+            var effect = new WriteEffect(
+                new ResourceAddress(ResourceKind.Entity, "entity", "1")
+            );
 
             var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
                 ctx.Apply(() => throw new InvalidOperationException("boom"), effect)
@@ -212,9 +211,9 @@ public sealed class ChangeContextTests
         public async Task Typed_Form_Throws_Nothing_If_Work_Throws()
         {
             var ctx = new ChangeContext();
-            var effect = WriteEffect<int>
-                .For()
-                .Changes(new ResourceAddress(ResourceKind.Entity, "entity", "1"));
+            var effect = new WriteEffect<int>(
+                new ResourceAddress(ResourceKind.Entity, "entity", "1")
+            );
 
             var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
                 ctx.Apply(
@@ -256,11 +255,7 @@ public sealed class ChangeContextTests
                 return Task.CompletedTask;
             });
 
-            var effect = WriteEffect
-                .For()
-                .Changes(staticAddrs[0])
-                .Changes(staticAddrs[1])
-                .Changes(staticAddrs[2]);
+            var effect = new WriteEffect(staticAddrs[0], staticAddrs[1], staticAddrs[2]);
 
             await highLevelCtx.Apply(async () => await Task.CompletedTask, effect);
 
@@ -291,7 +286,7 @@ public sealed class ChangeContextTests
                 return Task.CompletedTask;
             });
 
-            var effect = WriteEffect.For().Changes(staticAddrs[0]).Changes(staticAddrs[1]);
+            var effect = new WriteEffect(staticAddrs[0], staticAddrs[1]);
 
             // For equivalence test with void high-level, the low-level must declare
             // the same static addresses + one result-derived. Since high-level void
@@ -324,11 +319,9 @@ public sealed class ChangeContextTests
                 return resultValue;
             });
 
-            var effect = WriteEffect<string>
-                .For()
-                .Changes(staticAddrs[0])
-                .Changes(staticAddrs[1])
-                .ChangesResult(r => new ResourceAddress(ResourceKind.Entity, "created", r));
+            var effect = new WriteEffect<string>(staticAddrs[0], staticAddrs[1]).ChangesResult(
+                r => new ResourceAddress(ResourceKind.Entity, "created", r)
+            );
 
             var highResult = await highLevelCtx.Apply(
                 async () =>

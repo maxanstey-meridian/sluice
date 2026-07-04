@@ -2,122 +2,66 @@ namespace Sluice.Tests;
 
 public sealed class WriteEffectTests
 {
-    public sealed class WriteEffect_Factory
+    public sealed class WriteEffect_Construction
     {
         [Fact]
-        public void For_Returns_NonNull_Instance()
+        public void Empty_Construction_Has_No_Addresses()
         {
-            var effect = WriteEffect.For();
+            var effect = new WriteEffect();
 
-            effect.Should().NotBeNull();
+            effect.Addresses.Should().BeEmpty();
         }
 
         [Fact]
-        public void For_Returns_Fresh_Instance_Each_Time()
+        public void Params_Construction_Preserves_Addresses()
         {
-            var a = WriteEffect.For();
-            var b = WriteEffect.For();
+            var effect = new WriteEffect(
+                new ResourceAddress(ResourceKind.Entity, "a", "1"),
+                new ResourceAddress(ResourceKind.Entity, "b", "2"),
+                new ResourceAddress(ResourceKind.Entity, "c", "3")
+            );
 
-            a.Should().NotBe(b);
+            var addresses = effect.Addresses.ToList();
+
+            addresses.Should().HaveCount(3);
+            addresses[0].Should().Be(new ResourceAddress(ResourceKind.Entity, "a", "1"));
+            addresses[1].Should().Be(new ResourceAddress(ResourceKind.Entity, "b", "2"));
+            addresses[2].Should().Be(new ResourceAddress(ResourceKind.Entity, "c", "3"));
         }
 
         [Fact]
-        public void New_Instance_Has_No_Addresses()
+        public void Each_Construction_Is_A_Fresh_Instance()
         {
-            var effect = WriteEffect.For();
-
-            effect.Resolve().Should().BeEmpty();
-        }
-    }
-
-    public sealed class WriteEffect_Changes
-    {
-        [Fact]
-        public void Changes_Accumulates_Addresses()
-        {
-            var effect = WriteEffect
-                .For()
-                .Changes(new ResourceAddress(ResourceKind.Entity, "a", "1"))
-                .Changes(new ResourceAddress(ResourceKind.Entity, "b", "2"))
-                .Changes(new ResourceAddress(ResourceKind.Entity, "c", "3"));
-
-            var resolved = effect.Resolve().ToList();
-
-            resolved.Should().HaveCount(3);
-            resolved[0].Should().Be(new ResourceAddress(ResourceKind.Entity, "a", "1"));
-            resolved[1].Should().Be(new ResourceAddress(ResourceKind.Entity, "b", "2"));
-            resolved[2].Should().Be(new ResourceAddress(ResourceKind.Entity, "c", "3"));
-        }
-
-        [Fact]
-        public void Changes_Returns_Self_For_Chaining()
-        {
-            var effect = WriteEffect.For();
-            var result = effect.Changes(new ResourceAddress(ResourceKind.Entity, "a", "1"));
-
-            result.Should().Be(effect);
-        }
-
-        [Fact]
-        public void Changes_Preserves_Order()
-        {
-            var effect = WriteEffect.For();
-
-            effect.Changes(new ResourceAddress(ResourceKind.Entity, "first", "1"));
-            effect.Changes(new ResourceAddress(ResourceKind.Entity, "second", "2"));
-            effect.Changes(new ResourceAddress(ResourceKind.Entity, "third", "3"));
-
-            var resolved = effect.Resolve().ToList();
-            resolved[0].Should().Be(new ResourceAddress(ResourceKind.Entity, "first", "1"));
-            resolved[1].Should().Be(new ResourceAddress(ResourceKind.Entity, "second", "2"));
-            resolved[2].Should().Be(new ResourceAddress(ResourceKind.Entity, "third", "3"));
-        }
-    }
-
-    public sealed class WriteEffect_Generic
-    {
-        [Fact]
-        public void For_Returns_NonNull_Instance()
-        {
-            var effect = WriteEffect<string>.For();
-
-            effect.Should().NotBeNull();
-        }
-
-        [Fact]
-        public void For_Returns_Fresh_Instance_Each_Time()
-        {
-            var a = WriteEffect<string>.For();
-            var b = WriteEffect<string>.For();
+            var a = new WriteEffect();
+            var b = new WriteEffect();
 
             a.Should().NotBe(b);
         }
     }
 
-    public sealed class WriteEffect_Generic_Changes
+    public sealed class WriteEffect_Generic_Construction
     {
         [Fact]
-        public void Changes_Accumulates_Static_Addresses()
+        public void Empty_Construction_Has_No_Static_Addresses()
         {
-            var effect = WriteEffect<int>
-                .For()
-                .Changes(new ResourceAddress(ResourceKind.Entity, "a", "1"))
-                .Changes(new ResourceAddress(ResourceKind.Collection, "b", "2"));
+            var effect = new WriteEffect<int>();
+
+            effect.Resolve(0).Should().BeEmpty();
+        }
+
+        [Fact]
+        public void Params_Construction_Preserves_Static_Addresses()
+        {
+            var effect = new WriteEffect<int>(
+                new ResourceAddress(ResourceKind.Entity, "a", "1"),
+                new ResourceAddress(ResourceKind.Collection, "b", "2")
+            );
 
             var resolved = effect.Resolve(42).ToList();
 
             resolved.Should().HaveCount(2);
             resolved[0].Should().Be(new ResourceAddress(ResourceKind.Entity, "a", "1"));
             resolved[1].Should().Be(new ResourceAddress(ResourceKind.Collection, "b", "2"));
-        }
-
-        [Fact]
-        public void Changes_Returns_Self_For_Chaining()
-        {
-            var effect = WriteEffect<int>.For();
-            var result = effect.Changes(new ResourceAddress(ResourceKind.Entity, "a", "1"));
-
-            result.Should().Be(effect);
         }
     }
 
@@ -126,25 +70,25 @@ public sealed class WriteEffectTests
         [Fact]
         public void ChangesResult_Accumulates_Resolvers()
         {
-            var effect = WriteEffect<string>
-                .For()
-                .ChangesResult(r => new ResourceAddress(ResourceKind.Entity, "created", r));
+            var effect = new WriteEffect<string>().ChangesResult(
+                r => new ResourceAddress(ResourceKind.Entity, "created", r)
+            );
 
             var resolved = effect.Resolve("myId").ToList();
 
             resolved.Should().HaveCount(1);
-            resolved[0].Should().Be(new ResourceAddress(ResourceKind.Entity, "created", "myId"));
+            resolved[0]
+                .Should()
+                .Be(new ResourceAddress(ResourceKind.Entity, "created", "myId"));
         }
 
         [Fact]
         public void ChangesResult_Returns_Self_For_Chaining()
         {
-            var effect = WriteEffect<string>.For();
-            var result = effect.ChangesResult(_ => new ResourceAddress(
-                ResourceKind.Entity,
-                "x",
-                "0"
-            ));
+            var effect = new WriteEffect<string>();
+            var result = effect.ChangesResult(_ =>
+                new ResourceAddress(ResourceKind.Entity, "x", "0")
+            );
 
             result.Should().Be(effect);
         }
@@ -152,10 +96,10 @@ public sealed class WriteEffectTests
         [Fact]
         public void Resolve_Returns_Static_Then_Result_Addresses()
         {
-            var effect = WriteEffect<string>
-                .For()
-                .Changes(new ResourceAddress(ResourceKind.Entity, "static1", "1"))
-                .Changes(new ResourceAddress(ResourceKind.Collection, "static2", "2"))
+            var effect = new WriteEffect<string>(
+                new ResourceAddress(ResourceKind.Entity, "static1", "1"),
+                new ResourceAddress(ResourceKind.Collection, "static2", "2")
+            )
                 .ChangesResult(r => new ResourceAddress(ResourceKind.Entity, "dynamic", r))
                 .ChangesResult(r => new ResourceAddress(ResourceKind.External, "ext", r));
 
@@ -167,14 +111,6 @@ public sealed class WriteEffectTests
             resolved[2].Should().Be(new ResourceAddress(ResourceKind.Entity, "dynamic", "val"));
             resolved[3].Should().Be(new ResourceAddress(ResourceKind.External, "ext", "val"));
         }
-
-        [Fact]
-        public void Resolve_With_No_Addresses_Returns_Empty()
-        {
-            var effect = WriteEffect<int>.For();
-
-            effect.Resolve(0).Should().BeEmpty();
-        }
     }
 
     public sealed class TypeSafety
@@ -182,18 +118,20 @@ public sealed class WriteEffectTests
         [Fact]
         public void NonGeneric_WriteEffect_Has_No_ChangesResult_Method()
         {
-            // Compile-time check: WriteEffect (non-generic) only has .Changes(), not .ChangesResult().
-            WriteEffect effect = WriteEffect.For();
-            effect.Changes(new ResourceAddress(ResourceKind.Entity, "x", "0"));
+            // Compile-time check: WriteEffect (non-generic) has no .ChangesResult().
+            // Only WriteEffect<T> has it.
+            WriteEffect effect = new(
+                new ResourceAddress(ResourceKind.Entity, "x", "0")
+            );
             // effect.ChangesResult(...) would not compile — compiler error, no assertion needed.
         }
 
         [Fact]
-        public void Generic_WriteEffect_Has_Changes_And_ChangesResult()
+        public void Generic_WriteEffect_Has_ChangesResult()
         {
-            WriteEffect<string> effect = WriteEffect<string>.For();
-            effect.Changes(new ResourceAddress(ResourceKind.Entity, "x", "0"));
-            effect.ChangesResult(_ => new ResourceAddress(ResourceKind.Entity, "y", ""));
+            WriteEffect<string> effect = new WriteEffect<string>().ChangesResult(_ =>
+                new ResourceAddress(ResourceKind.Entity, "y", "")
+            );
         }
     }
 }
