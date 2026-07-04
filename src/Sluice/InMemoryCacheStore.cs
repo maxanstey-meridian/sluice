@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
+
 namespace Sluice;
 
 public sealed class InMemoryCacheStore : ICacheStore
 {
-    private readonly Dictionary<string, object> _store = [];
+    private readonly ConcurrentDictionary<string, object> _store = new();
 
     public Task<CacheEntry<TValue>?> GetAsync<TValue>(string key, CancellationToken ct)
     {
@@ -20,7 +22,7 @@ public sealed class InMemoryCacheStore : ICacheStore
     }
 
     public Task<bool> RemoveAsync(string key, CancellationToken ct) =>
-        Task.FromResult(_store.Remove(key));
+        Task.FromResult(_store.TryRemove(key, out _));
 
     public Task ClearAsync(CancellationToken ct)
     {

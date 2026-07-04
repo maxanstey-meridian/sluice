@@ -1,9 +1,11 @@
+using System.Collections.Concurrent;
+
 namespace Sluice;
 
-public sealed class SluiceKernel(ICacheStore cacheStore) : ISluice
+public sealed class SluiceKernel(ICacheStore cacheStore) : ISluice, IDisposable
 {
     private readonly OperationRegistry _registry = new(cacheStore);
-    private readonly HashSet<object> _registeredQueries = [];
+    private readonly ConcurrentDictionary<object, byte> _registeredQueries = new();
 
     public async Task<TValue> Get<TKey, TValue>(
         Query<TKey, TValue> query,
@@ -11,7 +13,7 @@ public sealed class SluiceKernel(ICacheStore cacheStore) : ISluice
         CancellationToken ct
     )
     {
-        if (_registeredQueries.Add(query))
+        if (_registeredQueries.TryAdd(query, 0))
         {
             _registry.Register(query.Operation);
         }
@@ -50,4 +52,6 @@ public sealed class SluiceKernel(ICacheStore cacheStore) : ISluice
     public string DumpGraph() => _registry.DumpGraph();
 
     public SystemManifest Describe() => _registry.Describe();
+
+    public void Dispose() => _registry.Dispose();
 }

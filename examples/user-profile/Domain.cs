@@ -11,7 +11,13 @@ public sealed record User(UserId Id, string Name, string Email);
 
 public sealed record UserSettings(UserId Id, bool DarkMode, string Language);
 
-public sealed record UserProfile(UserId Id, string Name, string Email, bool DarkMode, string Language);
+public sealed record UserProfile(
+    UserId Id,
+    string Name,
+    string Email,
+    bool DarkMode,
+    string Language
+);
 
 public interface IUserStore
 {

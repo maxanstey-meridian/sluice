@@ -29,7 +29,9 @@ Console.WriteLine();
 Console.WriteLine("3. Get profile for Alice (cache miss, reads user + settings)");
 var profile1 = await sluice.Get(queries.Profile, alice, CancellationToken.None);
 Console.WriteLine($"   {profile1.Name}, darkMode={profile1.DarkMode}, lang={profile1.Language}");
-Console.WriteLine($"   Store calls: GetUser={store.GetUserCallCount}, GetSettings={store.GetSettingsCallCount}");
+Console.WriteLine(
+    $"   Store calls: GetUser={store.GetUserCallCount}, GetSettings={store.GetSettingsCallCount}"
+);
 Console.WriteLine();
 
 Console.WriteLine("4. Get profile for Bob (different key, cache miss)");
@@ -55,7 +57,9 @@ Console.WriteLine();
 Console.WriteLine("8. Get user for Alice (STILL CACHED, user entity didn't change)");
 var user3 = await sluice.Get(queries.User, alice, CancellationToken.None);
 Console.WriteLine($"   {user3.Name} <{user3.Email}>");
-Console.WriteLine($"   Store calls: GetUser={store.GetUserCallCount} (cache hit, no new store call)");
+Console.WriteLine(
+    $"   Store calls: GetUser={store.GetUserCallCount} (cache hit, no new store call)"
+);
 Console.WriteLine();
 
 Console.WriteLine("=== Done ===");
