@@ -1,15 +1,12 @@
 using System.Collections.Concurrent;
-using System.Text;
 
 namespace Sluice;
 
-public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
+public sealed class OperationRegistry(ICacheStore cacheStore, IGraphStore? graphStore = null)
+    : IDisposable
 {
-    private readonly ReaderWriterLockSlim _lock = new();
+    private readonly IGraphStore _graphStore = graphStore ?? new InMemoryGraphStore();
     private readonly ConcurrentBag<IOperation> _operationMetadata = [];
-    private readonly ConcurrentDictionary<ResourceAddress, HashSet<string>> _reverseIndex = new();
-    private readonly ConcurrentDictionary<string, HashSet<ResourceAddress>> _forwardIndex = new();
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _cachedAt = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _inFlight = new();
 
     public OperationRegistry Register<TKey, TValue>(CachedOperation<TKey, TValue> operation)
@@ -56,32 +53,7 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
                 }
             }
 
-            _lock.EnterWriteLock();
-            try
-            {
-                if (_forwardIndex.TryGetValue(entryKey, out var oldEdges))
-                {
-                    _cachedAt.TryRemove(entryKey, out _);
-                    foreach (var address in oldEdges)
-                    {
-                        if (!_reverseIndex.TryGetValue(address, out var entryKeys))
-                        {
-                            continue;
-                        }
-
-                        entryKeys.Remove(entryKey);
-                        if (entryKeys.Count == 0)
-                        {
-                            _reverseIndex.TryRemove(address, out _);
-                        }
-                    }
-                    _forwardIndex.TryRemove(entryKey, out _);
-                }
-            }
-            finally
-            {
-                _lock.ExitWriteLock();
-            }
+            await _graphStore.ClearEntryEdges(entryKey, ct);
 
             var ctx = new OperationContext(ct);
             var value = await operation.RunCompute(key, ctx);
@@ -92,20 +64,7 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
 
             await cacheStore.SetAsync(entryKey, entry, ct);
 
-            _lock.EnterWriteLock();
-            try
-            {
-                foreach (var address in ctx.ObservedReads)
-                {
-                    _reverseIndex.GetOrAdd(address, _ => new HashSet<string>()).Add(entryKey);
-                }
-                _forwardIndex[entryKey] = [.. ctx.ObservedReads];
-                _cachedAt[entryKey] = now;
-            }
-            finally
-            {
-                _lock.ExitWriteLock();
-            }
+            await _graphStore.RecordEntry(entryKey, ctx.ObservedReads, now, ct);
 
             return value;
         }
@@ -133,19 +92,8 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
     public async Task FlushAllAsync(CancellationToken ct)
     {
         await cacheStore.ClearAsync(ct);
-
-        _lock.EnterWriteLock();
-        try
-        {
-            _reverseIndex.Clear();
-            _forwardIndex.Clear();
-            _cachedAt.Clear();
-            _inFlight.Clear();
-        }
-        finally
-        {
-            _lock.ExitWriteLock();
-        }
+        await _graphStore.FlushAsync(ct);
+        _inFlight.Clear();
     }
 
     private async Task InvalidateAsync(
@@ -153,80 +101,7 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
         CancellationToken ct
     )
     {
-        HashSet<string> affectedEntryKeys;
-
-        _lock.EnterWriteLock();
-        try
-        {
-            affectedEntryKeys = [];
-
-            foreach (var address in changedAddresses)
-            {
-                if (address.Key == "*")
-                {
-                    foreach (var storedAddress in _reverseIndex.Keys.ToArray())
-                    {
-                        if (
-                            storedAddress.Kind != address.Kind
-                            || storedAddress.Name != address.Name
-                        )
-                        {
-                            continue;
-                        }
-
-                        if (!_reverseIndex.TryGetValue(storedAddress, out var entryKeys))
-                        {
-                            continue;
-                        }
-
-                        foreach (var entryKey in entryKeys)
-                        {
-                            affectedEntryKeys.Add(entryKey);
-                        }
-                    }
-                }
-                else
-                {
-                    if (!_reverseIndex.TryGetValue(address, out var entryKeys))
-                    {
-                        continue;
-                    }
-
-                    foreach (var entryKey in entryKeys)
-                    {
-                        affectedEntryKeys.Add(entryKey);
-                    }
-                }
-            }
-
-            foreach (var entryKey in affectedEntryKeys)
-            {
-                _cachedAt.TryRemove(entryKey, out _);
-                if (!_forwardIndex.TryGetValue(entryKey, out var observedAddresses))
-                {
-                    continue;
-                }
-
-                foreach (var address in observedAddresses)
-                {
-                    if (!_reverseIndex.TryGetValue(address, out var entryKeys))
-                    {
-                        continue;
-                    }
-
-                    entryKeys.Remove(entryKey);
-                    if (entryKeys.Count == 0)
-                    {
-                        _reverseIndex.TryRemove(address, out _);
-                    }
-                }
-                _forwardIndex.TryRemove(entryKey, out _);
-            }
-        }
-        finally
-        {
-            _lock.ExitWriteLock();
-        }
+        var affectedEntryKeys = await _graphStore.InvalidateEntries(changedAddresses, ct);
 
         foreach (var entryKey in affectedEntryKeys)
         {
@@ -234,70 +109,27 @@ public sealed class OperationRegistry(ICacheStore cacheStore) : IDisposable
         }
     }
 
-    public string DumpGraph()
-    {
-        _lock.EnterReadLock();
-        try
-        {
-            var sb = new StringBuilder();
-
-            sb.AppendLine("OPERATIONS:");
-            foreach (var (entryKey, reads) in _forwardIndex)
-            {
-                sb.AppendLine($"  {entryKey}");
-                sb.AppendLine("    reads:");
-                foreach (var addr in reads)
-                {
-                    sb.AppendLine($"      {addr}");
-                }
-                if (_cachedAt.TryGetValue(entryKey, out var ts))
-                {
-                    sb.AppendLine($"    cached: {ts:O}");
-                }
-                sb.AppendLine();
-            }
-
-            sb.AppendLine("RESOURCE ADDRESSES:");
-            foreach (var (address, entryKeys) in _reverseIndex)
-            {
-                sb.AppendLine($"  {address}");
-                sb.AppendLine("    invalidates:");
-                foreach (var ek in entryKeys)
-                {
-                    sb.AppendLine($"      {ek}");
-                }
-                sb.AppendLine();
-            }
-
-            return sb.ToString();
-        }
-        finally
-        {
-            _lock.ExitReadLock();
-        }
-    }
+    public Task<string> DumpGraphAsync(CancellationToken ct) => _graphStore.DumpGraphAsync(ct);
 
     public SystemManifest Describe()
     {
-        _lock.EnterReadLock();
-        try
-        {
-            var operations = _operationMetadata
-                .Select(op => new OperationInfo(
-                    op.Name,
-                    op.KeyType.Name,
-                    op.ValueType.Name,
-                    op.GetType().Name
-                ))
-                .OrderBy(op => op.DefinedBy)
-                .ToList();
-            return new SystemManifest(operations);
-        }
-        finally
-        {
-            _lock.ExitReadLock();
-        }
+        var operations = _operationMetadata
+            .Select(op => new OperationInfo(
+                op.Name,
+                op.KeyType.Name,
+                op.ValueType.Name,
+                op.GetType().Name
+            ))
+            .OrderBy(op => op.DefinedBy)
+            .ToList();
+        return new SystemManifest(operations);
     }
 
-    public void Dispose() => _lock.Dispose();
+    public void Dispose()
+    {
+        if (_graphStore is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+    }
 }

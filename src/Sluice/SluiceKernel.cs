@@ -2,9 +2,11 @@ using System.Collections.Concurrent;
 
 namespace Sluice;
 
-public sealed class SluiceKernel(ICacheStore cacheStore) : ISluice, IDisposable
+public sealed class SluiceKernel(ICacheStore cacheStore, IGraphStore? graphStore = null)
+    : ISluice,
+        IDisposable
 {
-    private readonly OperationRegistry _registry = new(cacheStore);
+    private readonly OperationRegistry _registry = new(cacheStore, graphStore);
     private readonly ConcurrentDictionary<object, byte> _registeredQueries = new();
 
     public async Task<TValue> Get<TKey, TValue>(
@@ -70,7 +72,7 @@ public sealed class SluiceKernel(ICacheStore cacheStore) : ISluice, IDisposable
 
     public Task FlushAllAsync(CancellationToken ct) => _registry.FlushAllAsync(ct);
 
-    public string DumpGraph() => _registry.DumpGraph();
+    public Task<string> DumpGraphAsync(CancellationToken ct) => _registry.DumpGraphAsync(ct);
 
     public SystemManifest Describe() => _registry.Describe();
 

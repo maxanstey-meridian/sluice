@@ -141,7 +141,7 @@ public sealed class OverlayTests
 
         await sluice.Get(queries.CustomerScore, id, CancellationToken.None);
 
-        var graph = sluice.DumpGraph();
+        var graph = await sluice.DumpGraphAsync(CancellationToken.None);
 
         graph.Should().Contain("entity:customer:c1");
         graph.Should().Contain("collection:orders.byCustomer:c1");
@@ -193,7 +193,7 @@ public sealed class OverlayTests
         var customer = await sluice.Get(queries.CustomerScoreDirect, id, CancellationToken.None);
         customer.Id.Should().Be(id);
 
-        var graph = sluice.DumpGraph();
+        var graph = await sluice.DumpGraphAsync(CancellationToken.None);
         graph.Should().Contain("entity:customer:c1");
     }
 

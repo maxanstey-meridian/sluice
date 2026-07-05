@@ -3,12 +3,12 @@ namespace Sluice.Tests;
 public sealed class DumpGraphTests
 {
     [Fact]
-    public void Empty_Graph_Shows_Empty_Sections()
+    public async Task Empty_Graph_Shows_Empty_Sections()
     {
         var cacheStore = new InMemoryCacheStore();
         var registry = new OperationRegistry(cacheStore);
 
-        var graph = registry.DumpGraph();
+        var graph = await registry.DumpGraphAsync(CancellationToken.None);
 
         graph.Should().Contain("OPERATIONS:");
         graph.Should().Contain("RESOURCE ADDRESSES:");
@@ -28,7 +28,7 @@ public sealed class DumpGraphTests
         var customerId = new CustomerId("c1");
         await registry.ExecuteAsync(operation, customerId, CancellationToken.None);
 
-        var graph = registry.DumpGraph();
+        var graph = await registry.DumpGraphAsync(CancellationToken.None);
 
         graph.Should().Contain("customer.score:v1:{\"customerId\":\"c1\"}");
         graph.Should().Contain("entity:customer:c1");
@@ -54,7 +54,7 @@ public sealed class DumpGraphTests
         await registry.ExecuteAsync(operation, customerA, CancellationToken.None);
         await registry.ExecuteAsync(operation, customerB, CancellationToken.None);
 
-        var graph = registry.DumpGraph();
+        var graph = await registry.DumpGraphAsync(CancellationToken.None);
 
         graph.Should().Contain("customer.score:v1:{\"customerId\":\"A\"}");
         graph.Should().Contain("customer.score:v1:{\"customerId\":\"B\"}");
@@ -80,7 +80,7 @@ public sealed class DumpGraphTests
             CancellationToken.None
         );
 
-        var graph = registry.DumpGraph();
+        var graph = await registry.DumpGraphAsync(CancellationToken.None);
 
         graph.Should().NotContain("customer.score:v1:{\"customerId\":\"c1\"}");
     }
@@ -98,7 +98,7 @@ public sealed class DumpGraphTests
         var customerId = new CustomerId("c1");
         await registry.ExecuteAsync(operation, customerId, CancellationToken.None);
 
-        var graph1 = registry.DumpGraph();
+        var graph1 = await registry.DumpGraphAsync(CancellationToken.None);
         graph1.Should().Contain("customer.score:v1:{\"customerId\":\"c1\"}");
 
         await registry.ApplyAsync(
@@ -106,13 +106,13 @@ public sealed class DumpGraphTests
             CancellationToken.None
         );
 
-        var graph2 = registry.DumpGraph();
+        var graph2 = await registry.DumpGraphAsync(CancellationToken.None);
         graph2.Should().NotContain("customer.score:v1:{\"customerId\":\"c1\"}");
 
         var result = await registry.ExecuteAsync(operation, customerId, CancellationToken.None);
         result.Score.Should().Be(90);
 
-        var graph3 = registry.DumpGraph();
+        var graph3 = await registry.DumpGraphAsync(CancellationToken.None);
         graph3.Should().Contain("customer.score:v1:{\"customerId\":\"c1\"}");
         graph3.Should().Contain("entity:customer:c1");
         graph3.Should().Contain("collection:orders.byCustomer:c1");

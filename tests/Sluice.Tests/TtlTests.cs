@@ -201,7 +201,7 @@ public sealed class TtlTests
         await sluice.Get(query, customerA, CancellationToken.None);
         store.GetCustomerCallCount.Should().Be(1);
 
-        var graphBefore = sluice.DumpGraph();
+        var graphBefore = await sluice.DumpGraphAsync(CancellationToken.None);
         graphBefore.Should().Contain("customer.score:v1:{\"customerId\":\"A\"}");
         graphBefore.Should().Contain("entity:customer:A");
         graphBefore.Should().Contain("collection:orders.byCustomer:A");
@@ -216,7 +216,7 @@ public sealed class TtlTests
 
         cacheStore.RemoveCallCount.Should().Be(1);
 
-        var graphDuringRefresh = sluice.DumpGraph();
+        var graphDuringRefresh = await sluice.DumpGraphAsync(CancellationToken.None);
         graphDuringRefresh.Should().NotContain("customer.score:v1:{\"customerId\":\"A\"}");
         graphDuringRefresh.Should().NotContain("entity:customer:A");
         graphDuringRefresh.Should().NotContain("collection:orders.byCustomer:A");
@@ -225,7 +225,7 @@ public sealed class TtlTests
         await refreshTask;
         store.GetCustomerCallCount.Should().Be(2);
 
-        var graphAfter = sluice.DumpGraph();
+        var graphAfter = await sluice.DumpGraphAsync(CancellationToken.None);
         graphAfter.Should().Contain("customer.score:v1:{\"customerId\":\"A\"}");
         graphAfter.Should().Contain("entity:customer:A");
         graphAfter.Should().Contain("collection:orders.byCustomer:A");

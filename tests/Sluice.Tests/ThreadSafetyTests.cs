@@ -79,7 +79,7 @@ public sealed class ThreadSafetyTests
         entryA.Should().NotBeNull();
         entryA!.Value.Score.Should().Be(expectedA);
 
-        var graph = registry.DumpGraph();
+        var graph = await registry.DumpGraphAsync(CancellationToken.None);
         graph.Should().Contain("customer.score:v1:{\"customerId\":\"A\"}");
         graph.Should().Contain("entity:customer:A");
         graph.Should().Contain("collection:orders.byCustomer:A");

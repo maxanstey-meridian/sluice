@@ -46,7 +46,7 @@ Console.WriteLine();
 // --- Dependency graph ---
 Console.WriteLine("5. Dependency graph:");
 Console.WriteLine();
-Console.WriteLine(sluice.DumpGraph());
+Console.WriteLine(await sluice.DumpGraphAsync(CancellationToken.None));
 
 // --- Use-case invalidation: one write changes multiple backing resources ---
 Console.WriteLine("6. Update Alice (name, dark mode, preferences)");
