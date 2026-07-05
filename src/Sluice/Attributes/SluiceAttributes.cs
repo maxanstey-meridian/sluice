@@ -23,6 +23,7 @@ public sealed class ReadCollectionAttribute(string collection, string byKey) : A
 public sealed class WriteEntityAttribute(string name) : Attribute
 {
     public string Name { get; } = name;
+    public string? ResultKey { get; set; }
 }
 
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
@@ -30,4 +31,5 @@ public sealed class WriteCollectionAttribute(string collection, string byKey) : 
 {
     public string Collection { get; } = collection;
     public string ByKey { get; } = byKey;
+    public string? ResultKey { get; set; }
 }

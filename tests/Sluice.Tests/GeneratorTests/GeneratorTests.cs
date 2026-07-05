@@ -115,6 +115,38 @@ public sealed class GeneratorTests
     }
 
     [Fact]
+    public async Task Write_With_ResultKey_Invalidates_Result_Derived_Address()
+    {
+        var store = new FakeWidgetStore();
+        var sluiceKernel = new SluiceKernel(new InMemoryCacheStore());
+        var widgetSluice = new WidgetStoreSluice(sluiceKernel, store);
+
+        var query = new Query<WidgetId, Widget>(
+            "test.widget",
+            id => new { id = id.Value },
+            async (id, scope) => await widgetSluice.Widget.Get(id, scope)
+        );
+
+        var w2 = new WidgetId("w2");
+
+        var result1 = await sluiceKernel.Get(query, w2, CancellationToken.None);
+        result1.Name.Should().Be("Widget2");
+        store.GetWidgetCallCount.Should().Be(1);
+
+        var created = await widgetSluice.CreateWidget(
+            new WidgetId("w2"),
+            new WidgetInput("NewWidget"),
+            CancellationToken.None
+        );
+        store.CreateWidgetCallCount.Should().Be(1);
+        created.Id.Should().Be(w2);
+
+        var result2 = await sluiceKernel.Get(query, w2, CancellationToken.None);
+        result2.Name.Should().Be("NewWidget");
+        store.GetWidgetCallCount.Should().Be(2);
+    }
+
+    [Fact]
     public async Task Generated_Sluice_Invalidate_Directly_Evicts_Cache()
     {
         var store = new FakeWidgetStore();

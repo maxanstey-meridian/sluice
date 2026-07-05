@@ -25,6 +25,9 @@ public interface IWidgetStore
 
     [WriteCollection("widgets", "byGroup")]
     public Task UpdateWidgetsByGroup(WidgetId id, WidgetInput input, CancellationToken ct);
+
+    [WriteEntity("widget", ResultKey = nameof(Widget.Id))]
+    public Task<Widget> CreateWidget(WidgetId id, WidgetInput input, CancellationToken ct);
 }
 
 public sealed class FakeWidgetStore : IWidgetStore
@@ -37,6 +40,7 @@ public sealed class FakeWidgetStore : IWidgetStore
     private readonly Dictionary<WidgetId, Widget> _widgets = new()
     {
         [new WidgetId("w1")] = new Widget(new WidgetId("w1"), "Widget1"),
+        [new WidgetId("w2")] = new Widget(new WidgetId("w2"), "Widget2"),
     };
 
     public Task<Widget> GetWidget(WidgetId id, CancellationToken ct)
@@ -49,7 +53,10 @@ public sealed class FakeWidgetStore : IWidgetStore
     {
         GetWidgetsByGroupCallCount++;
         return Task.FromResult<IReadOnlyList<Widget>>(
-            _widgets.Values.OrderBy(widget => widget.Id.Value).ToArray()
+            _widgets
+                .Values.Where(w => w.Id.Value == id.Value)
+                .OrderBy(widget => widget.Id.Value)
+                .ToArray()
         );
     }
 
@@ -65,5 +72,15 @@ public sealed class FakeWidgetStore : IWidgetStore
         UpdateWidgetsByGroupCallCount++;
         _widgets[id] = _widgets[id] with { Name = input.Name };
         return Task.CompletedTask;
+    }
+
+    public int CreateWidgetCallCount { get; private set; }
+
+    public Task<Widget> CreateWidget(WidgetId id, WidgetInput input, CancellationToken ct)
+    {
+        CreateWidgetCallCount++;
+        var widget = new Widget(id, input.Name);
+        _widgets[id] = widget;
+        return Task.FromResult(widget);
     }
 }

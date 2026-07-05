@@ -29,7 +29,8 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         string InterfaceName,
         string GeneratedClassName,
         List<MethodData> ReadMethods,
-        List<MethodData> WriteMethods
+        List<MethodData> WriteMethods,
+        List<string> Diagnostics
     );
 
     private sealed record MethodData(
@@ -41,7 +42,13 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         List<string> ExtraParameterNames
     );
 
-    private sealed record ResourceAttribute(bool IsCollection, string Name, string FieldName);
+    private sealed record ResourceAttribute(
+        bool IsCollection,
+        string Name,
+        string FieldName,
+        string KeyType,
+        string? ResultKey = null
+    );
 
     private static InterfaceData? Transform(GeneratorAttributeSyntaxContext ctx)
     {
@@ -50,6 +57,9 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         var typeSymbol = model.GetDeclaredSymbol(syntax) as INamedTypeSymbol;
         if (typeSymbol is null)
             return null;
+
+        var compilation = model.Compilation;
+        var resourceKeySymbol = compilation.GetTypeByMetadataName("Sluice.IResourceKey");
 
         var interfaceName = typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
         var simpleName = typeSymbol.Name;
@@ -66,6 +76,7 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         }
 
         var finalClassName = customName ?? className;
+        var diagnostics = new List<string>();
         var readMethods = new List<MethodData>();
         var writeMethods = new List<MethodData>();
 
@@ -80,7 +91,7 @@ public sealed class SluiceGenerator : IIncrementalGenerator
 
             bool isRead = false;
             bool isWrite = false;
-            var resources = new List<ResourceAttribute>();
+            var tempResources = new List<(bool IsCollection, string Name, string? ResultKey)>();
 
             foreach (var ma in methodAttrs)
             {
@@ -92,7 +103,7 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                 {
                     isRead = true;
                     var name = (string)ma.ConstructorArguments[0].Value!;
-                    resources.Add(new ResourceAttribute(false, name, ToIdentifier(name)));
+                    tempResources.Add((false, name, null));
                 }
                 else if (fullName is "Sluice.ReadCollectionAttribute")
                 {
@@ -100,15 +111,17 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                     var collection = (string)ma.ConstructorArguments[0].Value!;
                     var byKey = (string)ma.ConstructorArguments[1].Value!;
                     var resourceName = $"{collection}.{byKey}";
-                    resources.Add(
-                        new ResourceAttribute(true, resourceName, ToIdentifier(resourceName))
-                    );
+                    tempResources.Add((true, resourceName, null));
                 }
                 else if (fullName is "Sluice.WriteEntityAttribute")
                 {
                     isWrite = true;
                     var name = (string)ma.ConstructorArguments[0].Value!;
-                    resources.Add(new ResourceAttribute(false, name, ToIdentifier(name)));
+                    string? resultKey = null;
+                    foreach (var kv in ma.NamedArguments)
+                        if (kv.Key is "ResultKey" && kv.Value.Value is string s)
+                            resultKey = s;
+                    tempResources.Add((false, name, resultKey));
                 }
                 else if (fullName is "Sluice.WriteCollectionAttribute")
                 {
@@ -116,9 +129,11 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                     var collection = (string)ma.ConstructorArguments[0].Value!;
                     var byKey = (string)ma.ConstructorArguments[1].Value!;
                     var resourceName = $"{collection}.{byKey}";
-                    resources.Add(
-                        new ResourceAttribute(true, resourceName, ToIdentifier(resourceName))
-                    );
+                    string? resultKey = null;
+                    foreach (var kv in ma.NamedArguments)
+                        if (kv.Key is "ResultKey" && kv.Value.Value is string s)
+                            resultKey = s;
+                    tempResources.Add((true, resourceName, resultKey));
                 }
             }
 
@@ -154,12 +169,118 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                 }
 
                 var valueType = returnType.TypeArguments[0].ToDisplayString();
+                var resources = tempResources
+                    .Select(t => new ResourceAttribute(
+                        t.IsCollection,
+                        t.Name,
+                        ToIdentifier(t.Name),
+                        keyType
+                    ))
+                    .ToList();
                 readMethods.Add(new MethodData(method.Name, keyType, valueType, resources, [], []));
             }
             else if (isWrite)
             {
                 if (!hasCancellationToken)
                     continue;
+
+                string? valueType = null;
+                INamedTypeSymbol? resultTypeSymbol = null;
+                var returnType = method.ReturnType as INamedTypeSymbol;
+                if (
+                    returnType is not null
+                    && returnType.Name == "Task"
+                    && returnType.TypeArguments.Length == 1
+                )
+                {
+                    valueType = returnType.TypeArguments[0].ToDisplayString();
+                    resultTypeSymbol = returnType.TypeArguments[0] as INamedTypeSymbol;
+                }
+
+                bool hasResultKey = tempResources.Any(t => t.ResultKey is not null);
+
+                if (hasResultKey && valueType is null)
+                {
+                    diagnostics.Add(
+                        $"Method '{method.Name}' has ResultKey on a write attribute but returns Task (not Task<T>). Skipping method."
+                    );
+                    continue;
+                }
+
+                if (hasResultKey && valueType is not null && resultTypeSymbol is not null)
+                {
+                    bool valid = true;
+                    foreach (var (_, _, rk) in tempResources)
+                    {
+                        if (rk is null)
+                            continue;
+
+                        var prop = resultTypeSymbol
+                            .GetMembers()
+                            .OfType<IPropertySymbol>()
+                            .FirstOrDefault(p => p.Name == rk);
+
+                        if (prop is null)
+                        {
+                            diagnostics.Add(
+                                $"Method '{method.Name}': ResultKey property '{rk}' not found on type '{valueType}'. Skipping method."
+                            );
+                            valid = false;
+                            break;
+                        }
+
+                        var propType = prop.Type;
+                        bool implementsIResourceKey = false;
+                        if (resourceKeySymbol is not null && propType is INamedTypeSymbol propNamed)
+                        {
+                            implementsIResourceKey = propNamed.AllInterfaces.Any(iface =>
+                                iface is not null
+                                && SymbolEqualityComparer.Default.Equals(iface, resourceKeySymbol)
+                            );
+                        }
+
+                        if (!implementsIResourceKey)
+                        {
+                            var propTypeName = prop.Type.ToDisplayString();
+                            diagnostics.Add(
+                                $"Method '{method.Name}': ResultKey property '{rk}' type '{propTypeName}' does not implement IResourceKey. Skipping method."
+                            );
+                            valid = false;
+                            break;
+                        }
+                    }
+
+                    if (!valid)
+                        continue;
+                }
+
+                var resources = new List<ResourceAttribute>();
+                foreach (var (isCollection, name, resultKey) in tempResources)
+                {
+                    if (resultKey is not null && resultTypeSymbol is not null)
+                    {
+                        var prop = resultTypeSymbol
+                            .GetMembers()
+                            .OfType<IPropertySymbol>()
+                            .First(p => p.Name == resultKey);
+                        var propType = prop.Type.ToDisplayString();
+                        resources.Add(
+                            new ResourceAttribute(
+                                isCollection,
+                                name,
+                                ToIdentifier(name),
+                                propType,
+                                resultKey
+                            )
+                        );
+                    }
+                    else
+                    {
+                        resources.Add(
+                            new ResourceAttribute(isCollection, name, ToIdentifier(name), keyType)
+                        );
+                    }
+                }
 
                 var extraParams = new List<string>();
                 var extraNames = new List<string>();
@@ -170,19 +291,61 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                 }
 
                 writeMethods.Add(
-                    new MethodData(method.Name, keyType, null, resources, extraParams, extraNames)
+                    new MethodData(
+                        method.Name,
+                        keyType,
+                        valueType,
+                        resources,
+                        extraParams,
+                        extraNames
+                    )
                 );
             }
         }
 
         if (readMethods.Count == 0 && writeMethods.Count == 0)
-            return null;
+        {
+            if (diagnostics.Count == 0)
+                return null;
 
-        return new InterfaceData(interfaceName, finalClassName, readMethods, writeMethods);
+            return new InterfaceData(
+                interfaceName,
+                finalClassName,
+                readMethods,
+                writeMethods,
+                diagnostics
+            );
+        }
+
+        return new InterfaceData(
+            interfaceName,
+            finalClassName,
+            readMethods,
+            writeMethods,
+            diagnostics
+        );
     }
 
     private static void Emit(SourceProductionContext context, InterfaceData data)
     {
+        foreach (var d in data.Diagnostics)
+            context.ReportDiagnostic(
+                Diagnostic.Create(
+                    new DiagnosticDescriptor(
+                        "SLUICE001",
+                        "Generator",
+                        d,
+                        "Sluice",
+                        DiagnosticSeverity.Warning,
+                        true
+                    ),
+                    location: null
+                )
+            );
+
+        if (data.ReadMethods.Count == 0 && data.WriteMethods.Count == 0)
+            return;
+
         var interfaceName = data.InterfaceName;
         var className = data.GeneratedClassName;
         var resourcesName = $"{className}Resources";
@@ -196,29 +359,23 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         resourceSb.AppendLine($"public static class {resourcesName}");
         resourceSb.AppendLine("{");
 
-        var allResources = new List<(ResourceAttribute Res, bool IsRead)>();
+        var allResources = new List<ResourceAttribute>();
         foreach (var rm in data.ReadMethods)
         foreach (var r in rm.Resources)
-            if (!allResources.Any(x => x.Res.Name == r.Name))
-                allResources.Add((r, true));
+            if (!allResources.Any(x => x.Name == r.Name))
+                allResources.Add(r);
 
         foreach (var wm in data.WriteMethods)
         foreach (var r in wm.Resources)
-            if (!allResources.Any(x => x.Res.Name == r.Name))
-                allResources.Add((r, false));
+            if (!allResources.Any(x => x.Name == r.Name))
+                allResources.Add(r);
 
-        var commonKeyType =
-            data.ReadMethods.Select(m => m.KeyType)
-                .Concat(data.WriteMethods.Select(m => m.KeyType))
-                .FirstOrDefault()
-            ?? "TKey";
-
-        foreach (var (res, _) in allResources)
+        foreach (var res in allResources)
         {
             var kind = res.IsCollection ? "CollectionResource" : "EntityResource";
             var escapedName = res.Name.Replace("\"", "\\\"");
             resourceSb.AppendLine(
-                $"    public static readonly {kind}<{commonKeyType}> {res.FieldName} = new(\"{escapedName}\");"
+                $"    public static readonly {kind}<{res.KeyType}> {res.FieldName} = new(\"{escapedName}\");"
             );
         }
 
@@ -254,12 +411,42 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         {
             var fieldName = $"_{ToCamelCase(wm.MethodName)}";
             var keyType = wm.KeyType;
-            var resourceFields = wm.Resources.Select(r => $"{resourcesName}.{r.FieldName}.For");
-            var resourceList = string.Join(", ", resourceFields);
+            var valueType = wm.ValueType;
+            bool hasResult = valueType is not null;
 
-            sluiceSb.AppendLine($"    private readonly TrackedWrite<{keyType}> {fieldName} = new(");
+            var staticResources = wm.Resources.Where(r => r.ResultKey is null).ToList();
+            var resultResources = wm.Resources.Where(r => r.ResultKey is not null).ToList();
+
+            var writeType = hasResult
+                ? $"TrackedWrite<{keyType}, {valueType}>"
+                : $"TrackedWrite<{keyType}>";
+
+            sluiceSb.AppendLine($"    private readonly {writeType} {fieldName} = new(");
             sluiceSb.AppendLine($"        sluice,");
-            sluiceSb.AppendLine($"        {resourceList});");
+
+            var staticAddresses = staticResources.Select(r => $"{resourcesName}.{r.FieldName}.For");
+            var hasResultResources = resultResources.Count > 0;
+            if (staticAddresses.Any())
+            {
+                sluiceSb.AppendLine(
+                    $"        [{string.Join(", ", staticAddresses)}]{(hasResultResources ? "," : "")}"
+                );
+            }
+            else
+            {
+                sluiceSb.AppendLine($"        []{(hasResultResources ? "," : "")}");
+            }
+
+            for (int i = 0; i < resultResources.Count; i++)
+            {
+                var r = resultResources[i];
+                var resolver = $"result => {resourcesName}.{r.FieldName}.For(result.{r.ResultKey})";
+                sluiceSb.AppendLine(
+                    $"        {resolver}{(i < resultResources.Count - 1 ? "," : "")}"
+                );
+            }
+
+            sluiceSb.AppendLine("    );");
             sluiceSb.AppendLine();
 
             var extraParamList = new StringBuilder();
@@ -280,8 +467,9 @@ public sealed class SluiceGenerator : IIncrementalGenerator
             if (extraCallList.Length > 0)
                 extraCallList.Append(", ");
 
+            var returnType = hasResult ? $"Task<{valueType}>" : "Task";
             sluiceSb.AppendLine(
-                $"    public Task {wm.MethodName}({keyType} id, {extraParamList}CancellationToken ct) =>"
+                $"    public {returnType} {wm.MethodName}({keyType} id, {extraParamList}CancellationToken ct) =>"
             );
             sluiceSb.AppendLine(
                 $"        {fieldName}.Write(id, ct => store.{wm.MethodName}(id, {extraCallList}ct), ct);"
