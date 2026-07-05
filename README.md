@@ -228,17 +228,6 @@ await sluice.Apply(
     ct);
 ```
 
-For dynamic cases where addresses depend on runtime conditions, use `Action<ChangeBuilder>` as an inline escape hatch:
-
-```csharp
-// Action<ChangeBuilder> is inline syntax for building a WriteEffect.
-// Use for one-off writes where a TrackedWrite field would be overkill.
-await sluice.Apply(
-    _ => store.UpdateUserName(id, "Alice Smith"),
-    changes => changes.Changed(UserResources.User.For(id)),
-    ct);
-```
-
 For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID), use `WriteEffect<T>`:
 
 ```csharp
@@ -398,17 +387,10 @@ Primary app-facing types:
 - `IReadScope`
 - `WriteEffect`
 - `WriteEffect<T>`
-- `Resource`
 - `EntityResource<TKey>`
 - `CollectionResource<TKey>`
-- `ExternalResource`
 - `ResourceAddress`
 - `IResourceKey`
-
-Inline/escape-hatch types:
-
-- `ChangeBuilder`
-- `ChangeBuilder<T>`
 
 Kernel types still exist and are tested directly:
 
@@ -416,8 +398,7 @@ Kernel types still exist and are tested directly:
 - `OperationRegistry`
 - `OperationContext`
 - `ChangeContext`
-- `TrackedResource`
-- `ICacheStore`
+- `TrackedResource`- `ICacheStore`
 - `InMemoryCacheStore`
 
 The overlay is the intended application API. The kernel remains useful for lower-level testing and future integrations.

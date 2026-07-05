@@ -15,7 +15,7 @@ internal interface ITrackedOrders
 }
 
 internal sealed class TrackedCustomers(IStore store)
-    : TrackedResource("customers"),
+    : TrackedResource,
         ITrackedCustomers
 {
     public Task<Customer> Get(CustomerId id, OperationContext ctx) =>
@@ -25,7 +25,7 @@ internal sealed class TrackedCustomers(IStore store)
         ctx.Apply(() => store.UpdateCustomer(id, patch), CustomerWriteEffects.Updated(id));
 }
 
-internal sealed class TrackedOrders(IStore store) : TrackedResource("orders"), ITrackedOrders
+internal sealed class TrackedOrders(IStore store) : TrackedResource, ITrackedOrders
 {
     public Task<IReadOnlyList<Order>> ByCustomer(CustomerId id, OperationContext ctx) =>
         Read(ctx, OrderResources.OrdersByCustomer.For(id), () => store.GetOrdersByCustomer(id));

@@ -1,9 +1,7 @@
 namespace Sluice;
 
-public abstract class TrackedResource(string scope)
+public abstract class TrackedResource
 {
-    public string Scope { get; } = scope;
-
     protected async Task<T> Read<T>(
         OperationContext ctx,
         ResourceAddress address,

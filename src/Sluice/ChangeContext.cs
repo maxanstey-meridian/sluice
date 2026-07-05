@@ -8,30 +8,6 @@ public sealed class ChangeContext(CancellationToken cancellationToken)
 
     public CancellationToken CancellationToken { get; } = cancellationToken;
 
-    public ChangeContext()
-        : this(CancellationToken.None) { }
-
-    public async Task Apply(Func<ChangeSet, Task> work)
-    {
-        var changeSet = new ChangeSet();
-        await work(changeSet);
-        foreach (var address in changeSet.ChangedAddresses)
-        {
-            _changedAddresses.Add(address);
-        }
-    }
-
-    public async Task<T> Apply<T>(Func<ChangeSet, Task<T>> work)
-    {
-        var changeSet = new ChangeSet();
-        var result = await work(changeSet);
-        foreach (var address in changeSet.ChangedAddresses)
-        {
-            _changedAddresses.Add(address);
-        }
-        return result;
-    }
-
     public async Task Apply(Func<Task> work, WriteEffect effect)
     {
         await work();

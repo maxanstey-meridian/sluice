@@ -10,9 +10,6 @@ public sealed class OperationContext(TimeProvider clock, CancellationToken cance
 
     public CancellationToken CancellationToken { get; } = cancellationToken;
 
-    public OperationContext()
-        : this(TimeProvider.System, CancellationToken.None) { }
-
     public OperationContext(CancellationToken cancellationToken)
         : this(TimeProvider.System, cancellationToken) { }
 
