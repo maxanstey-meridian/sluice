@@ -15,68 +15,67 @@ public static class UserResources
     );
 }
 
-public sealed class UserReads(IUserStore store)
+public sealed class UserSluice
 {
-    public readonly TrackedRead<UserId, User> User = new(
-        UserResources.User.For,
-        (id, ct) => store.GetUser(id, ct)
-    );
+    public readonly TrackedRead<UserId, User> User;
+    public readonly TrackedRead<UserId, UserSettings> Settings;
+    public readonly TrackedRead<UserId, UserPreferences> Preferences;
+    public readonly Query<UserId, User> UserById;
+    public readonly Query<UserId, UserProfile> Profile;
+    public readonly TrackedWrite<UserId> UpdateUser;
 
-    public readonly TrackedRead<UserId, UserSettings> Settings = new(
-        UserResources.Settings.For,
-        (id, ct) => store.GetSettings(id, ct)
-    );
-
-    public readonly TrackedRead<UserId, UserPreferences> Preferences = new(
-        UserResources.Preferences.For,
-        (id, ct) => store.GetPreferences(id, ct)
-    );
-}
-
-public static class UserWriteEffects
-{
-    public static WriteEffect Updated(UserId id) =>
-        new(
-            UserResources.User.For(id),
-            UserResources.Settings.For(id),
-            UserResources.Preferences.For(id)
+    public UserSluice(ISluice sluice, IUserStore store)
+    {
+        User = new(
+            UserResources.User.For,
+            (id, ct) => store.GetUser(id, ct)
         );
+        Settings = new(
+            UserResources.Settings.For,
+            (id, ct) => store.GetSettings(id, ct)
+        );
+        Preferences = new(
+            UserResources.Preferences.For,
+            (id, ct) => store.GetPreferences(id, ct)
+        );
+
+        UserById = new(
+            "user.byId",
+            id => id.Value,
+            async (id, scope) => await User.Get(id, scope)
+        );
+
+        Profile = new(
+            "user.profile",
+            id => id.Value,
+            async (id, scope) =>
+            {
+                var user = await User.Get(id, scope);
+                var settings = await Settings.Get(id, scope);
+                var preferences = await Preferences.Get(id, scope);
+
+                return new UserProfile(
+                    id,
+                    user.Name,
+                    user.Email,
+                    settings.DarkMode,
+                    settings.Language,
+                    preferences.Theme
+                );
+            }
+        );
+
+        UpdateUser = new(
+            sluice,
+            UserResources.User.For,
+            UserResources.Settings.For,
+            UserResources.Preferences.For
+        );
+    }
 }
 
-public sealed class UserQueries(UserReads reads)
-{
-    public readonly Query<UserId, User> User = new(
-        "user.byId",
-        id => id.Value,
-        async (id, scope) =>
-        {
-            return await reads.User.Get(id, scope);
-        }
-    );
-
-    public readonly Query<UserId, UserProfile> Profile = new(
-        "user.profile",
-        id => id.Value,
-        async (id, scope) =>
-        {
-            var user = await reads.User.Get(id, scope);
-            var settings = await reads.Settings.Get(id, scope);
-            var preferences = await reads.Preferences.Get(id, scope);
-
-            return new UserProfile(
-                id,
-                user.Name,
-                user.Email,
-                settings.DarkMode,
-                settings.Language,
-                preferences.Theme
-            );
-        }
-    );
-}
-
-public sealed class UpdateUserUseCase(ISluice sluice, IUserStore store)
+public sealed class UpdateUserUseCase(UserSluice users, IUserStore store)
 {
     public Task Execute(UserId id, UpdateUserInput input, CancellationToken ct) =>
-        sluice.Apply(ct => store.UpdateUser(id, input, ct), UserWriteEffects.Updated(id), ct);
+        users.UpdateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct);
 }
