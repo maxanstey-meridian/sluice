@@ -100,7 +100,7 @@ public sealed class OperationRegistry(
         _inFlight.Clear();
     }
 
-    private async Task InvalidateAsync(
+    internal async Task InvalidateAsync(
         IReadOnlyList<ResourceAddress> changedAddresses,
         CancellationToken ct
     )

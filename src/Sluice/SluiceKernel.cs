@@ -45,6 +45,9 @@ public sealed class SluiceKernel(
         );
     }
 
+    public Task Invalidate(WriteEffect effect, CancellationToken ct) =>
+        _registry.InvalidateAsync(effect.Addresses, ct);
+
     public Task FlushAllAsync(CancellationToken ct) => _registry.FlushAllAsync(ct);
 
     public Task<string> DumpGraphAsync(CancellationToken ct) => _registry.DumpGraphAsync(ct);

@@ -16,5 +16,7 @@ public interface ISluice
         CancellationToken ct
     );
 
+    public Task Invalidate(WriteEffect effect, CancellationToken ct);
+
     public Task FlushAllAsync(CancellationToken ct);
 }
