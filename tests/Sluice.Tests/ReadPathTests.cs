@@ -154,7 +154,7 @@ public sealed class ReadPathTests
         {
             var store = new FakeStore();
             var customers = new TrackedCustomers(store);
-            var ctx = new OperationContext(CancellationToken.None);
+            var ctx = new OperationContext(TimeProvider.System, CancellationToken.None);
 
             var customerId = new CustomerId("c1");
             await customers.Get(customerId, ctx);

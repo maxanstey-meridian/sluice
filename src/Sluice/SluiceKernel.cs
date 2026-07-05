@@ -2,11 +2,14 @@ using System.Collections.Concurrent;
 
 namespace Sluice;
 
-public sealed class SluiceKernel(ICacheStore cacheStore, IGraphStore? graphStore = null)
-    : ISluice,
-        IDisposable
+public sealed class SluiceKernel(
+    ICacheStore cacheStore,
+    IGraphStore? graphStore = null,
+    TimeProvider? clock = null
+) : ISluice,
+    IDisposable
 {
-    private readonly OperationRegistry _registry = new(cacheStore, graphStore);
+    private readonly OperationRegistry _registry = new(cacheStore, graphStore, clock);
     private readonly ConcurrentDictionary<object, byte> _registeredQueries = new();
 
     public async Task<TValue> Get<TKey, TValue>(

@@ -2,10 +2,14 @@ using System.Collections.Concurrent;
 
 namespace Sluice;
 
-public sealed class OperationRegistry(ICacheStore cacheStore, IGraphStore? graphStore = null)
-    : IDisposable
+public sealed class OperationRegistry(
+    ICacheStore cacheStore,
+    IGraphStore? graphStore = null,
+    TimeProvider? clock = null
+) : IDisposable
 {
     private readonly IGraphStore _graphStore = graphStore ?? new InMemoryGraphStore();
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly ConcurrentBag<IOperation> _operationMetadata = [];
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _inFlight = new();
 
@@ -26,7 +30,7 @@ public sealed class OperationRegistry(ICacheStore cacheStore, IGraphStore? graph
         var cached = await cacheStore.GetAsync<TValue>(entryKey, ct);
         if (cached is not null)
         {
-            if (cached.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
+            if (cached.ExpiresAt is { } expiresAt && expiresAt <= _clock.GetUtcNow())
             {
                 await cacheStore.RemoveAsync(entryKey, ct);
             }
@@ -55,10 +59,10 @@ public sealed class OperationRegistry(ICacheStore cacheStore, IGraphStore? graph
 
             await _graphStore.ClearEntryEdges(entryKey, ct);
 
-            var ctx = new OperationContext(ct);
+            var ctx = new OperationContext(_clock, ct);
             var value = await operation.RunCompute(key, ctx);
 
-            var now = DateTimeOffset.UtcNow;
+            var now = _clock.GetUtcNow();
             DateTimeOffset? entryExpiresAt = operation.Ttl is { } ttl ? now + ttl : null;
             var entry = new CacheEntry<TValue>(value, [.. ctx.ObservedReads], now, entryExpiresAt);
 

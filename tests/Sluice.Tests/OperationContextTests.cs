@@ -5,7 +5,7 @@ public sealed class OperationContextTests
     [Fact]
     public void ObservedReads_Starts_Empty()
     {
-        var ctx = new OperationContext(CancellationToken.None);
+        var ctx = new OperationContext(TimeProvider.System, CancellationToken.None);
 
         ctx.ObservedReads.Should().BeEmpty();
     }
@@ -13,7 +13,7 @@ public sealed class OperationContextTests
     [Fact]
     public void RecordRead_Adds_In_Order()
     {
-        var ctx = new OperationContext(CancellationToken.None);
+        var ctx = new OperationContext(TimeProvider.System, CancellationToken.None);
 
         ctx.RecordRead(new ResourceAddress(ResourceKind.Entity, "a", "1"));
         ctx.RecordRead(new ResourceAddress(ResourceKind.Entity, "b", "2"));
@@ -28,7 +28,7 @@ public sealed class OperationContextTests
     [Fact]
     public void Clock_Defaults_To_System()
     {
-        var ctx = new OperationContext(CancellationToken.None);
+        var ctx = new OperationContext(TimeProvider.System, CancellationToken.None);
 
         ctx.Clock.Should().Be(TimeProvider.System);
     }
@@ -46,7 +46,7 @@ public sealed class OperationContextTests
     public void CancellationToken_Flows_Through_Constructor()
     {
         var ct = new CancellationToken(canceled: true);
-        var ctx = new OperationContext(ct);
+        var ctx = new OperationContext(TimeProvider.System, ct);
 
         ctx.CancellationToken.Should().Be(ct);
         ctx.CancellationToken.IsCancellationRequested.Should().BeTrue();
