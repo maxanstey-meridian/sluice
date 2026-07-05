@@ -166,11 +166,7 @@ public sealed class ChangeContextTests
             var ctx = new ChangeContext();
             var effect = new WriteEffect<string>(
                 new ResourceAddress(ResourceKind.Entity, "entity", "1")
-            ).ChangesResult(result => new ResourceAddress(
-                ResourceKind.Entity,
-                "result",
-                result
-            ));
+            ).ChangesResult(result => new ResourceAddress(ResourceKind.Entity, "result", result));
 
             var result = await ctx.Apply(
                 async () =>
@@ -195,9 +191,7 @@ public sealed class ChangeContextTests
         public async Task Void_Form_Throws_Nothing_If_Work_Throws()
         {
             var ctx = new ChangeContext();
-            var effect = new WriteEffect(
-                new ResourceAddress(ResourceKind.Entity, "entity", "1")
-            );
+            var effect = new WriteEffect(new ResourceAddress(ResourceKind.Entity, "entity", "1"));
 
             var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
                 ctx.Apply(() => throw new InvalidOperationException("boom"), effect)

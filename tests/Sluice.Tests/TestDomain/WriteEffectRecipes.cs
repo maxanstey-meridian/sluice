@@ -13,10 +13,7 @@ internal static class OrderWriteEffects
         );
 
     public static WriteEffect Deleted(OrderId orderId, CustomerId customerId) =>
-        new(
-            OrderResources.Order.For(orderId),
-            OrderResources.OrdersByCustomer.For(customerId)
-        );
+        new(OrderResources.Order.For(orderId), OrderResources.OrdersByCustomer.For(customerId));
 
     public static WriteEffect Reassigned(
         OrderId orderId,

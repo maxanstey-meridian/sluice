@@ -3,11 +3,7 @@ namespace Sluice.Tests;
 internal sealed class OverlayCommands(ISluice sluice, IStore store)
 {
     public Task UpdateCustomer(CustomerId id, CustomerPatch patch, CancellationToken ct) =>
-        sluice.Apply(
-            _ => store.UpdateCustomer(id, patch),
-            CustomerWriteEffects.Updated(id),
-            ct
-        );
+        sluice.Apply(_ => store.UpdateCustomer(id, patch), CustomerWriteEffects.Updated(id), ct);
 
     public Task<Order> CreateOrder(
         CustomerId customerId,

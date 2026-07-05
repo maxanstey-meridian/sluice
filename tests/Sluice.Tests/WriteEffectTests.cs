@@ -70,25 +70,27 @@ public sealed class WriteEffectTests
         [Fact]
         public void ChangesResult_Accumulates_Resolvers()
         {
-            var effect = new WriteEffect<string>().ChangesResult(
-                r => new ResourceAddress(ResourceKind.Entity, "created", r)
-            );
+            var effect = new WriteEffect<string>().ChangesResult(r => new ResourceAddress(
+                ResourceKind.Entity,
+                "created",
+                r
+            ));
 
             var resolved = effect.Resolve("myId").ToList();
 
             resolved.Should().HaveCount(1);
-            resolved[0]
-                .Should()
-                .Be(new ResourceAddress(ResourceKind.Entity, "created", "myId"));
+            resolved[0].Should().Be(new ResourceAddress(ResourceKind.Entity, "created", "myId"));
         }
 
         [Fact]
         public void ChangesResult_Returns_Self_For_Chaining()
         {
             var effect = new WriteEffect<string>();
-            var result = effect.ChangesResult(_ =>
-                new ResourceAddress(ResourceKind.Entity, "x", "0")
-            );
+            var result = effect.ChangesResult(_ => new ResourceAddress(
+                ResourceKind.Entity,
+                "x",
+                "0"
+            ));
 
             result.Should().Be(effect);
         }
@@ -120,17 +122,15 @@ public sealed class WriteEffectTests
         {
             // Compile-time check: WriteEffect (non-generic) has no .ChangesResult().
             // Only WriteEffect<T> has it.
-            WriteEffect effect = new(
-                new ResourceAddress(ResourceKind.Entity, "x", "0")
-            );
+            WriteEffect effect = new(new ResourceAddress(ResourceKind.Entity, "x", "0"));
             // effect.ChangesResult(...) would not compile — compiler error, no assertion needed.
         }
 
         [Fact]
         public void Generic_WriteEffect_Has_ChangesResult()
         {
-            WriteEffect<string> effect = new WriteEffect<string>().ChangesResult(_ =>
-                new ResourceAddress(ResourceKind.Entity, "y", "")
+            WriteEffect<string> effect = new WriteEffect<string>().ChangesResult(
+                _ => new ResourceAddress(ResourceKind.Entity, "y", "")
             );
         }
     }

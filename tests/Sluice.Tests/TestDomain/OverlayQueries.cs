@@ -7,10 +7,7 @@ internal sealed class OverlayQueries(IStore store)
         id => new { customerId = id.Value },
         async (id, read) =>
         {
-            _ = await read.Track(
-                CustomerResources.Customer.For(id),
-                _ => store.GetCustomer(id)
-            );
+            _ = await read.Track(CustomerResources.Customer.For(id), _ => store.GetCustomer(id));
             var orders = await read.Track(
                 OrderResources.OrdersByCustomer.For(id),
                 _ => store.GetOrdersByCustomer(id)

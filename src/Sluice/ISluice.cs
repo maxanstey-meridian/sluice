@@ -14,11 +14,7 @@ public interface ISluice
         CancellationToken ct
     );
 
-    public Task Apply(
-        Func<CancellationToken, Task> work,
-        WriteEffect effect,
-        CancellationToken ct
-    );
+    public Task Apply(Func<CancellationToken, Task> work, WriteEffect effect, CancellationToken ct);
 
     public Task<T> Apply<T>(
         Func<CancellationToken, Task<T>> work,

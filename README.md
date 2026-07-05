@@ -7,9 +7,10 @@ Instead of invalidating cached operations with broad tags, a query records the r
 The app-facing API is deliberately small:
 
 - `sluice.Get(query, key, ct)` reads through the cache.
-- `sluice.Apply(work, writeEffect, ct)` runs a write and invalidates affected cached entries.
 - `TrackedRead<TKey, TValue>` bundles a resource address with its store read delegate — `.Get(key, scope)` records the dependency and fetches the value.
-- `new WriteEffect(address)` declares what a write changed.
+- `TrackedWrite<TKey>` captures `ISluice` + resource address delegates — `.Write(key, work, ct)` runs the write and invalidates affected cached entries.
+- `sluice.Apply(work, writeEffect, ct)` is the lower-level write path when you don't have a `TrackedWrite` — runs a write and invalidates affected cached entries.
+- `new WriteEffect(address)` declares what a write changed (used with `sluice.Apply`).
 - `changes.Changed(address)` is the inline escape hatch for one-off writes.
 
 ## Status
@@ -61,48 +62,70 @@ public static class UserResources
 }
 ```
 
-Bundle each resource with its store read delegate — `TrackedRead` handles tracking automatically:
+Bundle resources, reads, queries, and writes into one `<Domain>Sluice` class. A static `Register` factory makes the declaration read like registration, not instantiation:
 
 ```csharp
-// Each TrackedRead is a one-liner: resource + store delegate.
-// The store is captured in the closure — no DI into the read itself.
-// .Get(key, scope) records the dependency and runs the store call.
-// The cancellation token from IReadScope is passed to the store delegate internally.
-public sealed class UserReads(IUserStore store)
+// The domain sluice: one class that declares what exists, how to read it,
+// how to compose it, and what writes invalidate.
+// Private constructor — callers use Register.
+public sealed class UserSluice
 {
-    public readonly TrackedRead<UserId, User> User = new(
-        UserResources.User.For, (id, ct) => store.GetUser(id, ct));
+    public TrackedRead<UserId, User> User { get; }
+    public TrackedRead<UserId, UserSettings> Settings { get; }
+    public TrackedRead<UserId, UserPreferences> Preferences { get; }
+    public Query<UserId, UserProfile> Profile { get; }
+    public TrackedWrite<UserId> UpdateUser { get; }
 
-    public readonly TrackedRead<UserId, UserSettings> Settings = new(
-        UserResources.Settings.For, (id, ct) => store.GetSettings(id, ct));
+    private UserSluice(
+        TrackedRead<UserId, User> user,
+        TrackedRead<UserId, UserSettings> settings,
+        TrackedRead<UserId, UserPreferences> preferences,
+        Query<UserId, UserProfile> profile,
+        TrackedWrite<UserId> updateUser)
+    {
+        User = user;
+        Settings = settings;
+        Preferences = preferences;
+        Profile = profile;
+        UpdateUser = updateUser;
+    }
 
-    public readonly TrackedRead<UserId, UserPreferences> Preferences = new(
-        UserResources.Preferences.For, (id, ct) => store.GetPreferences(id, ct));
-}
-```
+    public static UserSluice Register(ISluice sluice, IUserStore store)
+    {
+        // Reads — method groups, not lambdas. Each line registers a cached
+        // read backed by the store, tracked against the resource address.
+        var user = new TrackedRead<UserId, User>(
+            UserResources.User.For, store.GetUser);
+        var settings = new TrackedRead<UserId, UserSettings>(
+            UserResources.Settings.For, store.GetSettings);
+        var preferences = new TrackedRead<UserId, UserPreferences>(
+            UserResources.Preferences.For, store.GetPreferences);
 
-Define a query — the compute body reads through the tracked reads, no Sluice vocabulary at the read site:
+        // Query — cached composition of tracked reads.
+        var profile = new Query<UserId, UserProfile>(
+            "user.profile",
+            id => id.Value,
+            async (id, scope) =>
+            {
+                var u = await user.Get(id, scope);
+                var s = await settings.Get(id, scope);
+                var p = await preferences.Get(id, scope);
 
-```csharp
-public sealed class UserQueries(UserReads reads)
-{
-    public readonly Query<UserId, UserProfile> Profile = new(
-        "user.profile",
-        id => id.Value,
-        async (id, scope) =>
-        {
-            var user = await reads.User.Get(id, scope);
-            var settings = await reads.Settings.Get(id, scope);
-            var preferences = await reads.Preferences.Get(id, scope);
+                return new UserProfile(
+                    id, u.Name, u.Email, s.DarkMode, s.Language, p.Theme);
+            });
 
-            return new UserProfile(
-                id,
-                user.Name,
-                user.Email,
-                settings.DarkMode,
-                settings.Language,
-                preferences.Theme);
-        });
+        // Write — TrackedWrite captures ISluice + address delegates.
+        // .Write(key, work, ct) resolves the key into addresses, builds a WriteEffect,
+        // and calls sluice.Apply internally. The use case never sees the WriteEffect.
+        var updateUser = new TrackedWrite<UserId>(
+            sluice,
+            UserResources.User.For,
+            UserResources.Settings.For,
+            UserResources.Preferences.For);
+
+        return new(user, settings, preferences, profile, updateUser);
+    }
 }
 ```
 
@@ -110,37 +133,24 @@ Read through Sluice — first call computes and caches, second call returns the 
 
 ```csharp
 var sluice = new SluiceKernel(new InMemoryCacheStore());
-var reads = new UserReads(store);
-var queries = new UserQueries(reads);
+var users = UserSluice.Register(sluice, store);
 
 // Cache miss on first call: runs Compute, tracks reads, stores the result.
 // Cache hit on second call with the same key: returns immediately, no store calls.
-var profile = await sluice.Get(queries.Profile, new UserId("alice"), ct);
+var profile = await sluice.Get(users.Profile, new UserId("alice"), ct);
 ```
 
-Declare changed resources on writes — Sluice runs the write, then evicts any cached entry whose tracked reads intersect the changed addresses:
+Write through the TrackedWrite field — one line, no WriteEffect at the call site:
 
 ```csharp
 public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
 
-public static class UserWriteEffects
+public sealed class UpdateUserUseCase(UserSluice users, IUserStore store)
 {
-    public static WriteEffect Updated(UserId id) =>
-        new(
-            UserResources.User.For(id),
-            UserResources.Settings.For(id),
-            UserResources.Preferences.For(id));
-}
-
-public sealed class UpdateUserUseCase(ISluice sluice, IUserStore store)
-{
-    // One application use case can update multiple backing records.
-    // The WriteEffect recipe is the invalidation contract for the use case.
+    // The use case passes the runtime value (id) and the store call (work).
+    // TrackedWrite handles the WriteEffect internally.
     public Task Execute(UserId id, UpdateUserInput input, CancellationToken ct) =>
-        sluice.Apply(
-            ct => store.UpdateUser(id, input, ct),
-            UserWriteEffects.Updated(id),
-            ct);
+        users.UpdateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct);
 }
 ```
 
@@ -187,77 +197,67 @@ Queries are registered lazily when first passed to `SluiceKernel.Get`. That mean
 
 ### Writes
 
-`ISluice.Apply` runs the write first, then invalidates affected cached entries before returning. The primary form takes a pre-built `WriteEffect`; the `Action<ChangeBuilder>` overload is inline syntax for the same thing.
-
-The recommended pattern is to pre-build `WriteEffect` recipes in a static class. This names the intent of each write and keeps call sites readable:
+The recommended path is `TrackedWrite<TKey>` — a field on your `<Domain>Sluice` class that captures `ISluice` and the resource address delegates. The use case calls `.Write(key, work, ct)`, which resolves the key into addresses, builds a `WriteEffect` internally, and calls `sluice.Apply`:
 
 ```csharp
-// WriteEffect recipes encapsulate the resource addresses a use case changes.
-// One recipe per use case, grouped in a static class for discoverability.
-public static class UserWriteEffects
+// TrackedWrite field — declared in UserSluice.Register.
+var updateUser = new TrackedWrite<UserId>(
+    sluice,
+    UserResources.User.For,
+    UserResources.Settings.For,
+    UserResources.Preferences.For);
+
+// Call site — the use case passes the key and the store call.
+// TrackedWrite handles the WriteEffect. One line.
+public sealed class UpdateUserUseCase(UserSluice users, IUserStore store)
 {
-    // Each address is a resource the write changed.
-    // Entries that read ANY of these addresses are evicted.
-    public static WriteEffect Updated(UserId id) =>
-        new(
-            UserResources.User.For(id),
-            UserResources.Settings.For(id),
-            UserResources.Preferences.For(id));
-}
-```
-
-Call sites pass the recipe as the second argument to `Apply`:
-
-```csharp
-public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
-
-public sealed class UpdateUserUseCase(ISluice sluice, IUserStore store)
-{
-    // The store call is the write. It can update multiple backing rows.
-    // The WriteEffect recipe tells Sluice which resources those rows represent.
     public Task Execute(UserId id, UpdateUserInput input, CancellationToken ct) =>
-        sluice.Apply(
-            ct => store.UpdateUser(id, input, ct),
-            UserWriteEffects.Updated(id),
-            ct);
+        users.UpdateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct);
 }
 ```
 
-The cached profile is one query, but it reads several resources. The update is one use case, but it changes several resources. The `WriteEffect` recipe is the explicit bridge between those two facts.
-
-For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID), use `WriteEffect<T>`:
+For writes without a `TrackedWrite` field, use `sluice.Apply` directly with a `WriteEffect`:
 
 ```csharp
-// WriteEffect<T> takes static addresses as constructor params,
-// then .ChangesResult() adds result-derived resolvers that run after the write completes.
-public static class OrderWriteEffects
-{
-    // Declares a static address (the collection) AND a result-derived one
-    // (the individual order, whose ID isn't known until the store assigns it).
-    public static WriteEffect<Order> Created(CustomerId customerId) =>
-        new WriteEffect<Order>(OrderResources.OrdersByCustomer.For(customerId))
-            .ChangesResult(order => OrderResources.Order.For(order.Id));
-}
-
-// The generic Apply<T> returns the write's result so the caller can use it.
-var order = await sluice.Apply(
-    ct => store.CreateOrder(customerId, input, ct),
-    OrderWriteEffects.Created(customerId),
+// The WriteEffect lists every resource address the write changed.
+// Sluice runs the work first, then evicts cached entries whose tracked reads
+// intersect any of these addresses.
+await sluice.Apply(
+    ct => store.UpdateUser(id, input, ct),
+    new WriteEffect(
+        UserResources.User.For(id),
+        UserResources.Settings.For(id),
+        UserResources.Preferences.For(id)),
     ct);
 ```
 
-For dynamic cases where addresses depend on runtime conditions, use `Action<ChangeBuilder>` as an escape hatch:
+For dynamic cases where addresses depend on runtime conditions, use `Action<ChangeBuilder>` as an inline escape hatch:
 
 ```csharp
-// The Action<ChangeBuilder> overload is inline syntax for building a WriteEffect.
-// Use it for one-off writes where a named recipe would be overkill.
+// Action<ChangeBuilder> is inline syntax for building a WriteEffect.
+// Use for one-off writes where a TrackedWrite field would be overkill.
 await sluice.Apply(
     _ => store.UpdateUserName(id, "Alice Smith"),
     changes => changes.Changed(UserResources.User.For(id)),
     ct);
 ```
 
-Reads done during writes are not tracked. If a write needs existing state to declare the correct changed addresses, read it from the store directly before calling `Apply`.
+For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID), use `WriteEffect<T>`:
+
+```csharp
+// WriteEffect<T> takes static addresses as constructor params,
+// then .ChangesResult() adds result-derived resolvers that run after the write completes.
+var effect = new WriteEffect<Order>(OrderResources.OrdersByCustomer.For(customerId))
+    .ChangesResult(order => OrderResources.Order.For(order.Id));
+
+// The generic Apply<T> returns the write's result so the caller can use it.
+var order = await sluice.Apply(
+    ct => store.CreateOrder(customerId, input, ct),
+    effect,
+    ct);
+```
+
+Reads done during writes are not tracked. If a write needs existing state to declare the correct changed addresses, read it from the store directly before calling `Apply` or inside the work delegate.
 
 ### Wildcards
 
@@ -372,7 +372,7 @@ The example demonstrates:
 Key files:
 
 - `examples/user-profile/Domain.cs` — IDs, DTOs, store port, in-memory store
-- `examples/user-profile/UserApi.cs` — resources, tracked reads, queries, write-effect recipe, use case
+- `examples/user-profile/UserApi.cs` — resources, UserSluice (reads, queries, writes), use case
 - `examples/user-profile/Program.cs` — runnable walkthrough
 
 ## Build And Test
@@ -397,6 +397,7 @@ Primary app-facing types:
 - `ISluice`
 - `Query<TKey, TValue>`
 - `TrackedRead<TKey, TValue>`
+- `TrackedWrite<TKey>`
 - `IReadScope`
 - `WriteEffect`
 - `WriteEffect<T>`

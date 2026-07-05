@@ -3,7 +3,7 @@ using SluiceExample;
 
 var store = new InMemoryUserStore();
 var sluice = new SluiceKernel(new InMemoryCacheStore());
-var users = new UserSluice(sluice, store);
+var users = UserSluice.Register(sluice, store);
 var updateUser = new UpdateUserUseCase(users, store);
 
 var alice = new UserId("alice");
