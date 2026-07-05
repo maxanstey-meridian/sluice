@@ -9,3 +9,11 @@ internal sealed record CustomerScore(CustomerId CustomerId, int Score);
 internal sealed record CustomerPatch(string? Name, string? Email);
 
 internal sealed record CreateOrderInput(decimal Total);
+
+internal sealed record DeletedOrder(OrderId OrderId, CustomerId CustomerId);
+
+internal sealed record ReassignedOrder(
+    OrderId OrderId,
+    CustomerId OldCustomerId,
+    CustomerId NewCustomerId
+);

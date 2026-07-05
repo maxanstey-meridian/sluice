@@ -6,13 +6,13 @@ public sealed class OverlayTests
         FakeStore store,
         OverlayQueries queries,
         SluiceKernel sluice,
-        OverlayCommands commands
+        OrderSluice commands
     ) CreateSut()
     {
         var store = new FakeStore();
         var queries = new OverlayQueries(store);
         var sluice = new SluiceKernel(new InMemoryCacheStore());
-        var commands = new OverlayCommands(sluice, store);
+        var commands = new OrderSluice(sluice, store);
         return (store, queries, sluice, commands);
     }
 
