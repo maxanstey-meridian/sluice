@@ -23,9 +23,7 @@ public sealed class TrackedWrite<TKey, TResult>(
         CancellationToken ct
     )
     {
-        var effect = new WriteEffect<TResult>(
-            staticAddresses.Select(f => f(key)).ToArray()
-        );
+        var effect = new WriteEffect<TResult>(staticAddresses.Select(f => f(key)).ToArray());
         foreach (var resolver in resultAddresses)
         {
             effect.ChangesResult(resolver);

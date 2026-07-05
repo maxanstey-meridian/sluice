@@ -4,15 +4,11 @@ using Sluice;
 
 public static class UserResources
 {
-    public static readonly EntityResource<UserId> User = Resource.Entity<UserId>("user");
+    public static readonly EntityResource<UserId> User = new("user");
 
-    public static readonly EntityResource<UserId> Settings = Resource.Entity<UserId>(
-        "userSettings"
-    );
+    public static readonly EntityResource<UserId> Settings = new("userSettings");
 
-    public static readonly EntityResource<UserId> Preferences = Resource.Entity<UserId>(
-        "userPreferences"
-    );
+    public static readonly EntityResource<UserId> Preferences = new("userPreferences");
 }
 
 public sealed class UserSluice

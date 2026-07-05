@@ -1,11 +1,11 @@
 namespace Sluice.Tests;
 
-internal sealed class OrderSluice(
-    ISluice sluice,
-    IStore store
-)
+internal sealed class OrderSluice(ISluice sluice, IStore store)
 {
-    private readonly TrackedWrite<CustomerId> _updateCustomer = new(sluice, CustomerResources.Customer.For);
+    private readonly TrackedWrite<CustomerId> _updateCustomer = new(
+        sluice,
+        CustomerResources.Customer.For
+    );
 
     private readonly TrackedWrite<CustomerId, Order> _createOrder = new(
         sluice,
@@ -33,8 +33,7 @@ internal sealed class OrderSluice(
         CustomerId customerId,
         CreateOrderInput input,
         CancellationToken ct
-    ) =>
-        _createOrder.Write(customerId, _ => store.CreateOrder(customerId, input), ct);
+    ) => _createOrder.Write(customerId, _ => store.CreateOrder(customerId, input), ct);
 
     public Task DeleteOrder(OrderId orderId, CancellationToken ct) =>
         _deleteOrder.Write(
@@ -48,11 +47,7 @@ internal sealed class OrderSluice(
             ct
         );
 
-    public Task ReassignOrder(
-        OrderId orderId,
-        CustomerId newCustomerId,
-        CancellationToken ct
-    ) =>
+    public Task ReassignOrder(OrderId orderId, CustomerId newCustomerId, CancellationToken ct) =>
         _reassignOrder.Write(
             orderId,
             async ct2 =>

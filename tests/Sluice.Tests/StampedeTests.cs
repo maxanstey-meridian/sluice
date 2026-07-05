@@ -65,7 +65,11 @@ public sealed class StampedeTests
         firstException.Should().NotBeNull();
         store.GetCustomerCallCount.Should().Be(1);
 
-        var secondResult = await sluice.Get(queries.CustomerScore, customerId, CancellationToken.None);
+        var secondResult = await sluice.Get(
+            queries.CustomerScore,
+            customerId,
+            CancellationToken.None
+        );
         secondResult.Score.Should().Be(20);
         store.GetCustomerCallCount.Should().Be(2);
     }
@@ -221,7 +225,11 @@ public sealed class StampedeTests
         leaderResult.Score.Should().Be(20);
         store.GetCustomerCallCount.Should().Be(1);
 
-        var freshResult = await sluice.Get(queries.CustomerScore, customerId, CancellationToken.None);
+        var freshResult = await sluice.Get(
+            queries.CustomerScore,
+            customerId,
+            CancellationToken.None
+        );
         freshResult.Score.Should().Be(20);
     }
 
@@ -251,7 +259,11 @@ public sealed class StampedeTests
         var result = await compute;
         result.Score.Should().Be(20);
 
-        var freshResult = await sluice.Get(queries.CustomerScore, customerId, CancellationToken.None);
+        var freshResult = await sluice.Get(
+            queries.CustomerScore,
+            customerId,
+            CancellationToken.None
+        );
         freshResult.Score.Should().Be(20);
     }
 
