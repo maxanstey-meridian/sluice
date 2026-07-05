@@ -14,9 +14,7 @@ internal interface ITrackedOrders
     public Task Reassign(OrderId orderId, CustomerId newCustomerId, ChangeContext ctx);
 }
 
-internal sealed class TrackedCustomers(IStore store)
-    : TrackedResource,
-        ITrackedCustomers
+internal sealed class TrackedCustomers(IStore store) : TrackedResource, ITrackedCustomers
 {
     public Task<Customer> Get(CustomerId id, OperationContext ctx) =>
         Read(ctx, CustomerResources.Customer.For(id), () => store.GetCustomer(id));

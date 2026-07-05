@@ -61,7 +61,17 @@ public sealed class TtlTests
         }
     }
 
-    private static SluiceKernel CreateKernel(ICacheStore cacheStore) => new(cacheStore);
+    private sealed class FakeClock(DateTimeOffset? start = null) : TimeProvider
+    {
+        private DateTimeOffset _now = start ?? DateTimeOffset.UtcNow;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan duration) => _now += duration;
+    }
+
+    private static SluiceKernel CreateKernel(ICacheStore cacheStore, TimeProvider? clock = null) =>
+        new(cacheStore, clock: clock);
 
     private static Query<CustomerId, CustomerScore> ScoreQuery(
         IStore store,
@@ -91,7 +101,8 @@ public sealed class TtlTests
         var store = new FakeStore();
         var query = ScoreQuery(store, TimeSpan.FromMilliseconds(100));
         var cacheStore = new TrackingCacheStore(new InMemoryCacheStore());
-        var sluice = CreateKernel(cacheStore);
+        var clock = new FakeClock();
+        var sluice = CreateKernel(cacheStore, clock);
 
         var customerA = new CustomerId("A");
 
@@ -105,10 +116,10 @@ public sealed class TtlTests
             CancellationToken.None
         );
         entryBefore.Should().NotBeNull();
-        entryBefore!.ExpiresAt.Should().BeAfter(DateTimeOffset.UtcNow);
+        entryBefore!.ExpiresAt.Should().BeAfter(clock.GetUtcNow());
         var cachedAtBefore = entryBefore.CachedAt;
 
-        await Task.Delay(150);
+        clock.Advance(TimeSpan.FromMilliseconds(150));
 
         var result2 = await sluice.Get(query, customerA, CancellationToken.None);
         result2.Score.Should().Be(20);
@@ -118,7 +129,7 @@ public sealed class TtlTests
         var entryAfter = await cacheStore.GetAsync<CustomerScore>(entryKey, CancellationToken.None);
         entryAfter.Should().NotBeNull();
         entryAfter!.CachedAt.Should().BeAfter(cachedAtBefore);
-        entryAfter.ExpiresAt.Should().BeAfter(DateTimeOffset.UtcNow);
+        entryAfter.ExpiresAt.Should().BeAfter(clock.GetUtcNow());
     }
 
     [Fact]
@@ -146,7 +157,8 @@ public sealed class TtlTests
         var store = new FakeStore();
         var query = ScoreQuery(store, TimeSpan.FromMilliseconds(100));
         var cacheStore = new TrackingCacheStore(new InMemoryCacheStore());
-        var sluice = CreateKernel(cacheStore);
+        var clock = new FakeClock();
+        var sluice = CreateKernel(cacheStore, clock);
 
         var customerA = new CustomerId("A");
 
@@ -160,9 +172,9 @@ public sealed class TtlTests
         );
         entryBefore.Should().NotBeNull();
         entryBefore!.ExpiresAt.Should().NotBeNull();
-        entryBefore.ExpiresAt.Should().BeAfter(DateTimeOffset.UtcNow);
+        entryBefore.ExpiresAt.Should().BeAfter(clock.GetUtcNow());
 
-        await Task.Delay(150);
+        clock.Advance(TimeSpan.FromMilliseconds(150));
 
         cacheStore.BlockNextSet();
 
@@ -185,7 +197,7 @@ public sealed class TtlTests
         var entryAfter = await cacheStore.GetAsync<CustomerScore>(entryKey, CancellationToken.None);
         entryAfter.Should().NotBeNull();
         entryAfter.ExpiresAt.Should().NotBeNull();
-        entryAfter.ExpiresAt.Should().BeAfter(DateTimeOffset.UtcNow);
+        entryAfter.ExpiresAt.Should().BeAfter(clock.GetUtcNow());
     }
 
     [Fact]
@@ -194,7 +206,8 @@ public sealed class TtlTests
         var store = new FakeStore();
         var query = ScoreQuery(store, TimeSpan.FromMilliseconds(100));
         var cacheStore = new TrackingCacheStore(new InMemoryCacheStore());
-        var sluice = CreateKernel(cacheStore);
+        var clock = new FakeClock();
+        var sluice = CreateKernel(cacheStore, clock);
 
         var customerA = new CustomerId("A");
 
@@ -207,7 +220,7 @@ public sealed class TtlTests
         graphBefore.Should().Contain("collection:orders.byCustomer:A");
         graphBefore.Should().Contain("cached:");
 
-        await Task.Delay(150);
+        clock.Advance(TimeSpan.FromMilliseconds(150));
 
         cacheStore.BlockNextSet();
 

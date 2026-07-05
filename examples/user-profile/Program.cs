@@ -1,4 +1,5 @@
 using Sluice;
+
 using SluiceExample;
 
 var store = new InMemoryUserStore();
