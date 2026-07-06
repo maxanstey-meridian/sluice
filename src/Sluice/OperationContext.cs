@@ -10,5 +10,5 @@ public sealed class OperationContext(TimeProvider clock, CancellationToken cance
 
     public CancellationToken CancellationToken { get; } = cancellationToken;
 
-    internal void RecordRead(ResourceAddress address) => _observedReads.Add(address);
+    public void RecordRead(ResourceAddress address) => _observedReads.Add(address);
 }

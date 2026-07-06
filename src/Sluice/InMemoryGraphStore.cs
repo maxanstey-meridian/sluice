@@ -67,7 +67,7 @@ public sealed class InMemoryGraphStore : IGraphStore, IDisposable
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<string>> InvalidateEntries(
+    public Task<IReadOnlyList<string>> FindAffectedEntries(
         IReadOnlyList<ResourceAddress> changedAddresses,
         CancellationToken ct
     )
@@ -116,30 +116,6 @@ public sealed class InMemoryGraphStore : IGraphStore, IDisposable
                         affectedEntryKeys.Add(entryKey);
                     }
                 }
-            }
-
-            foreach (var entryKey in affectedEntryKeys)
-            {
-                _cachedAt.TryRemove(entryKey, out _);
-                if (!_forwardIndex.TryGetValue(entryKey, out var observedAddresses))
-                {
-                    continue;
-                }
-
-                foreach (var address in observedAddresses)
-                {
-                    if (!_reverseIndex.TryGetValue(address, out var entryKeys))
-                    {
-                        continue;
-                    }
-
-                    entryKeys.Remove(entryKey);
-                    if (entryKeys.Count == 0)
-                    {
-                        _reverseIndex.TryRemove(address, out _);
-                    }
-                }
-                _forwardIndex.TryRemove(entryKey, out _);
             }
         }
         finally

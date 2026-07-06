@@ -9,7 +9,7 @@ public interface IGraphStore
         DateTimeOffset cachedAt,
         CancellationToken ct
     );
-    public Task<IReadOnlyList<string>> InvalidateEntries(
+    public Task<IReadOnlyList<string>> FindAffectedEntries(
         IReadOnlyList<ResourceAddress> changedAddresses,
         CancellationToken ct
     );

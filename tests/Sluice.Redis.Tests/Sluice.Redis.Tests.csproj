@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <IsTestProject>true</IsTestProject>
+    </PropertyGroup>
+    <ItemGroup>
+        <PackageReference Include="Testcontainers.Redis" Version="4.*" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+        <PackageReference Include="xunit" Version="2.9.0" />
+        <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+        <PackageReference Include="FluentAssertions" Version="7.*" />
+    </ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Sluice.Redis\Sluice.Redis.csproj" />
+        <ProjectReference Include="..\..\src\Sluice\Sluice.csproj" />
+    </ItemGroup>
+</Project>

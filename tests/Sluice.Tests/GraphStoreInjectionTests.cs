@@ -13,7 +13,7 @@ public sealed class GraphStoreInjectionTests
         var entry = new CacheEntry<string>("value", [], DateTimeOffset.UtcNow, null);
         await cacheStore.SetAsync(entryKey, entry, CancellationToken.None);
 
-        graphStore.InvalidateEntriesResult = [entryKey];
+        graphStore.FindAffectedEntriesResult = [entryKey];
 
         var address = new ResourceAddress(ResourceKind.Entity, "test", "key");
         await registry.ApplyAsync(
@@ -21,7 +21,7 @@ public sealed class GraphStoreInjectionTests
             CancellationToken.None
         );
 
-        graphStore.InvalidateEntriesCalled.Should().BeTrue();
+        graphStore.FindAffectedEntriesCalled.Should().BeTrue();
 
         var removed = await cacheStore.GetAsync<string>(entryKey, CancellationToken.None);
         removed.Should().BeNull();
@@ -43,8 +43,8 @@ public sealed class GraphStoreInjectionTests
 
     private sealed class SpyingGraphStore : IGraphStore
     {
-        public bool InvalidateEntriesCalled { get; private set; }
-        public IReadOnlyList<string> InvalidateEntriesResult { get; set; } = [];
+        public bool FindAffectedEntriesCalled { get; private set; }
+        public IReadOnlyList<string> FindAffectedEntriesResult { get; set; } = [];
         public string DumpGraphAsyncResult { get; set; } = "";
 
         public Task ClearEntryEdges(string entryKey, CancellationToken ct) => Task.CompletedTask;
@@ -56,13 +56,13 @@ public sealed class GraphStoreInjectionTests
             CancellationToken ct
         ) => Task.CompletedTask;
 
-        public Task<IReadOnlyList<string>> InvalidateEntries(
+        public Task<IReadOnlyList<string>> FindAffectedEntries(
             IReadOnlyList<ResourceAddress> changedAddresses,
             CancellationToken ct
         )
         {
-            InvalidateEntriesCalled = true;
-            return Task.FromResult(InvalidateEntriesResult);
+            FindAffectedEntriesCalled = true;
+            return Task.FromResult(FindAffectedEntriesResult);
         }
 
         public Task FlushAsync(CancellationToken ct) => Task.CompletedTask;

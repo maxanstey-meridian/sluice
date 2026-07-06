@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <RootNamespace>Sluice.Redis</RootNamespace>
+    </PropertyGroup>
+    <ItemGroup>
+        <PackageReference Include="StackExchange.Redis" Version="2.*" />
+    </ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\Sluice\Sluice.csproj" />
+    </ItemGroup>
+</Project>

@@ -105,11 +105,12 @@ public sealed class OperationRegistry(
         CancellationToken ct
     )
     {
-        var affectedEntryKeys = await _graphStore.InvalidateEntries(changedAddresses, ct);
+        var affectedEntryKeys = await _graphStore.FindAffectedEntries(changedAddresses, ct);
 
         foreach (var entryKey in affectedEntryKeys)
         {
             await cacheStore.RemoveAsync(entryKey, ct);
+            await _graphStore.ClearEntryEdges(entryKey, ct);
         }
     }
 
