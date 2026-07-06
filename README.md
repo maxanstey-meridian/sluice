@@ -446,6 +446,43 @@ dotnet build Sluice.sln
 dotnet test Sluice.sln
 ```
 
+## Redis Backing
+
+Sluice ships two Redis-backed stores in the separate `Sluice.Redis` package:
+
+- `RedisCacheStore` — replaces `InMemoryCacheStore` for distributed caching. Serializes `CacheEntry<TValue>` as JSON using `System.Text.Json` with configurable `JsonSerializerOptions`.
+- `RedisGraphStore` — replaces `InMemoryGraphStore` for distributed invalidation. Stores resource addresses as Redis SET members via `SADD`/`SMEMBERS`/`SREM`.
+
+Minimal wiring:
+
+```csharp
+var redis = await ConnectionMultiplexer.ConnectAsync("redis://localhost:6379");
+var cacheStore = new RedisCacheStore(redis, "sluice");
+var graphStore = new RedisGraphStore(redis, "sluice");
+var sluice = new SluiceKernel(cacheStore, graphStore);
+```
+
+Both `RedisCacheStore` and `RedisGraphStore` must be passed together to `SluiceKernel` for distributed deployments. Passing only `RedisCacheStore` produces distributed cache + in-process graph — a hybrid that causes invalidation misses across processes.
+
+The caller owns the `ConnectionMultiplexer` and its disposal lifecycle. Sluice does not dispose it.
+
+Serialization uses `System.Text.Json` with default options. Pass `JsonSerializerOptions` to the `RedisCacheStore` constructor for camelCase property naming, string-valued enums, or other customization:
+
+```csharp
+var options = new JsonSerializerOptions
+{
+    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    Converters = { new JsonStringEnumConverter() },
+};
+var cacheStore = new RedisCacheStore(redis, "sluice", options);
+```
+
+Topology: single-node or managed endpoint (e.g. Azure Cache for Redis non-cluster mode, AWS ElastiCache non-cluster mode). Primary/replica managed endpoints are acceptable — `StackExchange.Redis` routes writes such as `KeyDeleteAsync` to the primary. Redis Cluster is not supported — `SCAN`-based clear and flush assume single-node key distribution.
+
+Consistency is eventual. TTL is the backstop for distributed recompute and invalidation races. Distributed stampede prevention is not yet implemented — concurrent processes can independently recompute the same expired entry.
+
+For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameters (default `"sluice"`) on both `RedisCacheStore` and `RedisGraphStore`.
+
 ## API Surface
 
 **App-facing:**
@@ -475,6 +512,8 @@ dotnet test Sluice.sln
 - Invalidation only knows about reads through `TrackedRead.Get` or `scope.Track`.
 - Writes must declare every resource address they changed. Missing addresses leave stale entries.
 - If a write succeeds and the process crashes before invalidation, stale entries remain until TTL or flush.
-- In-memory cache/graph stores are for tests and single-process apps. Redis backing exists for distributed caching but does not yet provide distributed stampede prevention.
+- In-memory cache/graph stores are for tests and single-process apps.
+- Distributed stampede prevention is not yet implemented. Concurrent processes hitting the same expired cache entry will independently recompute and write.
+- Redis backing is single-node or managed endpoint only. Redis Cluster topology is not supported.
 - The dependency graph is process-local. Cross-process invalidation requires Redis backing.
 - Benchmark overhead is dominated by fixed tracking cost for tiny in-memory operations; Sluice is intended for cached operations expensive enough to justify dependency tracking.

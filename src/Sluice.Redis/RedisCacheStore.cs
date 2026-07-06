@@ -3,10 +3,15 @@ using StackExchange.Redis;
 
 namespace Sluice.Redis;
 
-public sealed class RedisCacheStore(IConnectionMultiplexer redis, string keyPrefix = "sluice")
-    : ICacheStore
+public sealed class RedisCacheStore(
+    IConnectionMultiplexer redis,
+    string keyPrefix = "sluice",
+    JsonSerializerOptions? serializerOptions = null,
+    TimeProvider? clock = null
+) : ICacheStore
 {
     private readonly IDatabase _db = redis.GetDatabase();
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
 
     public async Task<CacheEntry<TValue>?> GetAsync<TValue>(string key, CancellationToken ct)
     {
@@ -16,15 +21,15 @@ public sealed class RedisCacheStore(IConnectionMultiplexer redis, string keyPref
             return null;
         }
         var json = (string?)value!;
-        return JsonSerializer.Deserialize<CacheEntry<TValue>>(json ?? "");
+        return JsonSerializer.Deserialize<CacheEntry<TValue>>(json ?? "", serializerOptions);
     }
 
     public async Task SetAsync<TValue>(string key, CacheEntry<TValue> entry, CancellationToken ct)
     {
-        var serialized = JsonSerializer.Serialize(entry);
+        var serialized = JsonSerializer.Serialize(entry, serializerOptions);
         if (entry.ExpiresAt is { } expiresAt)
         {
-            var diff = expiresAt - DateTimeOffset.UtcNow;
+            var diff = expiresAt - _clock.GetUtcNow();
             if (diff <= TimeSpan.Zero)
             {
                 await _db.KeyDeleteAsync($"{keyPrefix}:cache:{key}");

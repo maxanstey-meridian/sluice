@@ -158,6 +158,115 @@ public sealed class RedisIntegrationTests
     private static string EntryKey(string name, int version, string key) =>
         $"{name}:v{version}:{CacheKey.From(key).Value}";
 
+    private sealed record NestedItem(Guid Id, string Label, DateTimeOffset CreatedAt);
+
+    private sealed record ComplexDto(
+        Guid Id,
+        string Name,
+        DateTimeOffset Timestamp,
+        NestedItem Primary,
+        List<NestedItem> Items
+    );
+
+    [RequireDockerFact]
+    public async Task Dto_RoundTrips_ThroughRedis()
+    {
+        await using var container = new RedisBuilder("redis:7").Build();
+        await container.StartAsync();
+        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var cacheStore = new RedisCacheStore(redis);
+        var graphStore = new RedisGraphStore(redis);
+        var registry = new OperationRegistry(cacheStore, graphStore);
+        var op = new CachedDtoOp("test-dto-roundtrip");
+        registry.Register(op);
+
+        var result1 = await registry.ExecuteAsync(op, "key1", CancellationToken.None);
+        result1.Should().NotBeNull();
+        result1!.Id.Should().Be(Guid.Parse("11111111-2222-3333-4444-555555555555"));
+        result1.Name.Should().Be("test-dto");
+        result1.Timestamp.Should().Be(new DateTimeOffset(2025, 3, 1, 12, 0, 0, TimeSpan.Zero));
+        result1.Primary.Label.Should().Be("primary-item");
+        result1
+            .Primary.CreatedAt.Should()
+            .Be(new DateTimeOffset(2025, 6, 15, 10, 30, 0, TimeSpan.Zero));
+        result1.Items.Should().HaveCount(2);
+        result1.Items[0].Label.Should().Be("item-a");
+        result1.Items[1].Label.Should().Be("item-b");
+
+        var result2 = await registry.ExecuteAsync(op, "key1", CancellationToken.None);
+        result2.Should().BeEquivalentTo(result1);
+
+        var entryKey = EntryKey("test-dto-roundtrip", 1, "key1");
+        var cached = await cacheStore.GetAsync<ComplexDto>(entryKey, CancellationToken.None);
+        cached.Should().NotBeNull();
+        cached!.Value.Id.Should().Be(Guid.Parse("11111111-2222-3333-4444-555555555555"));
+        cached.Value.Name.Should().Be("test-dto");
+        cached.Value.Timestamp.Should().Be(new DateTimeOffset(2025, 3, 1, 12, 0, 0, TimeSpan.Zero));
+        cached.Value.Primary.Id.Should().Be(op.TestPrimary.Id);
+        cached.Value.Primary.Label.Should().Be("primary-item");
+        cached
+            .Value.Primary.CreatedAt.Should()
+            .Be(new DateTimeOffset(2025, 6, 15, 10, 30, 0, TimeSpan.Zero));
+        cached.Value.Items.Should().HaveCount(2);
+        cached.Value.Items[0].Label.Should().Be("item-a");
+        cached.Value.Items[1].Label.Should().Be("item-b");
+        cached.ObservedReads.Should().HaveCount(3);
+        cached.ObservedReads[0].Kind.Should().Be(ResourceKind.Entity);
+        cached.ObservedReads[0].Name.Should().Be("user");
+        cached.ObservedReads[0].Key.Should().Be("key1");
+        cached.ObservedReads[1].Kind.Should().Be(ResourceKind.Collection);
+        cached.ObservedReads[1].Name.Should().Be("orders");
+        cached.ObservedReads[1].Key.Should().Be("customer-1");
+        cached.ObservedReads[2].Kind.Should().Be(ResourceKind.External);
+        cached.ObservedReads[2].Name.Should().Be("stripe");
+        cached.ObservedReads[2].Key.Should().Be("cus_abc");
+    }
+
+    private sealed class CachedDtoOp : CachedOperation<string, ComplexDto>
+    {
+        public NestedItem TestPrimary { get; }
+
+        public CachedDtoOp(string name)
+            : base(name, 1)
+        {
+            TestPrimary = new NestedItem(
+                Guid.Parse("11111111-2222-3333-4444-555555555555"),
+                "primary-item",
+                new DateTimeOffset(2025, 6, 15, 10, 30, 0, TimeSpan.Zero)
+            );
+        }
+
+        protected override CacheKey Key(string key) => CacheKey.From(key);
+
+        protected override ValueTask<ComplexDto> Compute(string key, OperationContext ctx)
+        {
+            ctx.RecordRead(new ResourceAddress(ResourceKind.Entity, "user", key));
+            ctx.RecordRead(new ResourceAddress(ResourceKind.Collection, "orders", "customer-1"));
+            ctx.RecordRead(new ResourceAddress(ResourceKind.External, "stripe", "cus_abc"));
+            return new ValueTask<ComplexDto>(
+                new ComplexDto(
+                    Guid.Parse("11111111-2222-3333-4444-555555555555"),
+                    "test-dto",
+                    new DateTimeOffset(2025, 3, 1, 12, 0, 0, TimeSpan.Zero),
+                    TestPrimary,
+                    new List<NestedItem>
+                    {
+                        new(
+                            Guid.NewGuid(),
+                            "item-a",
+                            DateTimeOffset.Parse("2025-01-01T00:00:00+00:00")
+                        ),
+                        new(
+                            Guid.NewGuid(),
+                            "item-b",
+                            DateTimeOffset.Parse("2025-02-01T00:00:00+00:00")
+                        ),
+                    }
+                )
+            );
+        }
+    }
+
     private sealed class ComputeOp : CachedOperation<string, string>
     {
         public int ComputeCount { get; private set; }

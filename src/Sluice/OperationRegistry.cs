@@ -47,7 +47,7 @@ public sealed class OperationRegistry(
             var rechecked = await cacheStore.GetAsync<TValue>(entryKey, ct);
             if (rechecked is not null)
             {
-                if (rechecked.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
+                if (rechecked.ExpiresAt is { } expiresAt && expiresAt <= _clock.GetUtcNow())
                 {
                     await cacheStore.RemoveAsync(entryKey, ct);
                 }
