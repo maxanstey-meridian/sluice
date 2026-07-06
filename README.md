@@ -423,7 +423,9 @@ Resources are canonicalised by name. `[ReadEntity("user")]` and `[WriteEntity("u
 produce a single `User` field — not duplicates.
 
 Generated naming: strip the `I` prefix from the interface, append `Sluice`.
-`IUserStore` → `UserStoreSluice`. Override with `[Sluice(Name = "UserSluice")]`.
+`IUserStore` → `UserStoreSluice`. Override with `[Sluice("User")]` → `UserSluice`.
+A custom name ending in `Sluice` (e.g. `[Sluice("UserSluice")]`) is treated as invalid
+base-name input and emits `SLUICE002` - no source is generated.
 
 ---
 

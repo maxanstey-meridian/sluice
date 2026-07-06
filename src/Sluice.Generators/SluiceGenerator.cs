@@ -25,12 +25,18 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         context.RegisterSourceOutput(interfaces, Emit);
     }
 
+    private sealed record DiagnosticInfo(
+        string Id,
+        string Message
+    );
+
     private sealed record InterfaceData(
         string InterfaceName,
         string GeneratedClassName,
+        string Namespace,
         List<MethodData> ReadMethods,
         List<MethodData> WriteMethods,
-        List<string> Diagnostics
+        List<DiagnosticInfo> Diagnostics
     );
 
     private sealed record MethodData(
@@ -65,20 +71,47 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         var simpleName = typeSymbol.Name;
         var className = simpleName.StartsWith("I") ? simpleName.Substring(1) : simpleName;
 
+        var ns = typeSymbol.ContainingNamespace;
+        var namespaceStr = ns.IsGlobalNamespace ? "" : ns.ToDisplayString();
+
         string? customName = null;
         foreach (var attr in ctx.Attributes)
         {
-            foreach (var kv in attr.NamedArguments)
+            if (customName is null && attr.ConstructorArguments.Length > 0)
             {
-                if (kv.Key is "Name" && kv.Value.Value is string s)
+                var ctorArg = attr.ConstructorArguments[0];
+                if (ctorArg.Kind == TypedConstantKind.Primitive && ctorArg.Value is string s)
                     customName = s;
             }
         }
 
-        var finalClassName = customName ?? className;
-        var diagnostics = new List<string>();
+        var diagnostics = new List<DiagnosticInfo>();
+        string? suppressedName = null;
+        if (customName is not null && customName.EndsWith("Sluice", StringComparison.Ordinal))
+        {
+            diagnostics.Add(new DiagnosticInfo(
+                "SLUICE002",
+                $"Custom name '{customName}' already ends with 'Sluice' - use the base name instead."
+            ));
+            suppressedName = customName;
+        }
+
+        var finalClassName = suppressedName is not null ? className : (customName ?? className);
+
         var readMethods = new List<MethodData>();
         var writeMethods = new List<MethodData>();
+
+        if (suppressedName is not null)
+        {
+            return new InterfaceData(
+                interfaceName,
+                finalClassName,
+                namespaceStr,
+                readMethods,
+                writeMethods,
+                diagnostics
+            );
+        }
 
         foreach (var member in typeSymbol.GetMembers())
         {
@@ -141,11 +174,35 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                 continue;
 
             var parameters = method.Parameters;
-            if (parameters.Length < 2)
+
+            if (parameters.Length == 0)
+            {
+                diagnostics.Add(new DiagnosticInfo(
+                    "SLUICE003",
+                    $"Method '{method.Name}' has fewer than 2 parameters. Expected at least a key parameter and CancellationToken."
+                ));
                 continue;
+            }
 
             var keyParam = parameters[0];
             var keyType = keyParam.Type.ToDisplayString();
+
+            if (resourceKeySymbol is not null)
+            {
+                bool implementsIResourceKey = keyParam.Type.Equals(resourceKeySymbol, SymbolEqualityComparer.Default)
+                    || keyParam.Type.AllInterfaces.Any(iface =>
+                        iface is not null
+                        && SymbolEqualityComparer.Default.Equals(iface, resourceKeySymbol)
+                    );
+                if (!implementsIResourceKey)
+                {
+                    diagnostics.Add(new DiagnosticInfo(
+                        "SLUICE004",
+                        $"Method '{method.Name}': first parameter type '{keyType}' does not implement IResourceKey."
+                    ));
+                    continue;
+                }
+            }
 
             var lastParam = parameters[parameters.Length - 1];
             bool hasCancellationToken =
@@ -155,8 +212,23 @@ public sealed class SluiceGenerator : IIncrementalGenerator
 
             if (isRead)
             {
-                if (!hasCancellationToken || parameters.Length != 2)
+                if (parameters.Length != 2)
+                {
+                    diagnostics.Add(new DiagnosticInfo(
+                        "SLUICE003",
+                        $"Method '{method.Name}': read method must have exactly 2 parameters (key + CancellationToken). Has {parameters.Length}."
+                    ));
                     continue;
+                }
+
+                if (!hasCancellationToken)
+                {
+                    diagnostics.Add(new DiagnosticInfo(
+                        "SLUICE003",
+                        $"Method '{method.Name}': read method is missing a final CancellationToken parameter."
+                    ));
+                    continue;
+                }
 
                 var returnType = method.ReturnType as INamedTypeSymbol;
                 if (
@@ -165,10 +237,33 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                     || returnType.TypeArguments.Length != 1
                 )
                 {
+                    diagnostics.Add(new DiagnosticInfo(
+                        "SLUICE003",
+                        $"Method '{method.Name}': read method must return Task<T>. Has {method.ReturnType}."
+                    ));
                     continue;
                 }
 
                 var valueType = returnType.TypeArguments[0].ToDisplayString();
+
+                bool readHasColon = false;
+                foreach (var (_, name, _) in tempResources)
+                {
+                    if (name.Contains(':'))
+                    {
+                        readHasColon = true;
+                        diagnostics.Add(new DiagnosticInfo(
+                            "SLUICE005",
+                            $"Method '{method.Name}': resource name '{name}' contains ':' which is not allowed (address delimiter)."
+                        ));
+                    }
+                }
+
+                if (readHasColon)
+                {
+                    continue;
+                }
+
                 var resources = tempResources
                     .Select(t => new ResourceAttribute(
                         t.IsCollection,
@@ -182,7 +277,13 @@ public sealed class SluiceGenerator : IIncrementalGenerator
             else if (isWrite)
             {
                 if (!hasCancellationToken)
+                {
+                    diagnostics.Add(new DiagnosticInfo(
+                        "SLUICE003",
+                        $"Method '{method.Name}': write method is missing a final CancellationToken parameter."
+                    ));
                     continue;
+                }
 
                 string? valueType = null;
                 INamedTypeSymbol? resultTypeSymbol = null;
@@ -201,9 +302,10 @@ public sealed class SluiceGenerator : IIncrementalGenerator
 
                 if (hasResultKey && valueType is null)
                 {
-                    diagnostics.Add(
+                    diagnostics.Add(new DiagnosticInfo(
+                        "SLUICE001",
                         $"Method '{method.Name}' has ResultKey on a write attribute but returns Task (not Task<T>). Skipping method."
-                    );
+                    ));
                     continue;
                 }
 
@@ -222,9 +324,10 @@ public sealed class SluiceGenerator : IIncrementalGenerator
 
                         if (prop is null)
                         {
-                            diagnostics.Add(
+                            diagnostics.Add(new DiagnosticInfo(
+                                "SLUICE001",
                                 $"Method '{method.Name}': ResultKey property '{rk}' not found on type '{valueType}'. Skipping method."
-                            );
+                            ));
                             valid = false;
                             break;
                         }
@@ -233,18 +336,20 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                         bool implementsIResourceKey = false;
                         if (resourceKeySymbol is not null && propType is INamedTypeSymbol propNamed)
                         {
-                            implementsIResourceKey = propNamed.AllInterfaces.Any(iface =>
-                                iface is not null
-                                && SymbolEqualityComparer.Default.Equals(iface, resourceKeySymbol)
-                            );
+                            implementsIResourceKey = propNamed.Equals(resourceKeySymbol, SymbolEqualityComparer.Default)
+                                || propNamed.AllInterfaces.Any(iface =>
+                                    iface is not null
+                                    && SymbolEqualityComparer.Default.Equals(iface, resourceKeySymbol)
+                                );
                         }
 
                         if (!implementsIResourceKey)
                         {
                             var propTypeName = prop.Type.ToDisplayString();
-                            diagnostics.Add(
+                            diagnostics.Add(new DiagnosticInfo(
+                                "SLUICE001",
                                 $"Method '{method.Name}': ResultKey property '{rk}' type '{propTypeName}' does not implement IResourceKey. Skipping method."
-                            );
+                            ));
                             valid = false;
                             break;
                         }
@@ -254,9 +359,30 @@ public sealed class SluiceGenerator : IIncrementalGenerator
                         continue;
                 }
 
+                bool hasColonResource = false;
+                foreach (var (isCollection, name, resultKey) in tempResources)
+                {
+                    if (name.Contains(':'))
+                    {
+                        hasColonResource = true;
+                        diagnostics.Add(new DiagnosticInfo(
+                            "SLUICE005",
+                            $"Method '{method.Name}': resource name '{name}' contains ':' which is not allowed (address delimiter)."
+                        ));
+                    }
+                }
+
+                if (hasColonResource)
+                    continue;
+
                 var resources = new List<ResourceAttribute>();
                 foreach (var (isCollection, name, resultKey) in tempResources)
                 {
+                    if (name.Contains(':'))
+                    {
+                        continue;
+                    }
+
                     if (resultKey is not null && resultTypeSymbol is not null)
                     {
                         var prop = resultTypeSymbol
@@ -303,6 +429,50 @@ public sealed class SluiceGenerator : IIncrementalGenerator
             }
         }
 
+        var identifierToResourceName = new Dictionary<string, string>(StringComparer.Ordinal);
+        var hasCollision = false;
+        foreach (var rm in readMethods)
+            foreach (var r in rm.Resources)
+            {
+                CheckCollision(r.FieldName, r.Name);
+            }
+        foreach (var wm in writeMethods)
+            foreach (var r in wm.Resources)
+            {
+                CheckCollision(r.FieldName, r.Name);
+            }
+
+        void CheckCollision(string fieldName, string resourceName)
+        {
+            if (identifierToResourceName.TryGetValue(fieldName, out var existingName))
+            {
+                if (!StringComparer.Ordinal.Equals(existingName, resourceName))
+                {
+                    diagnostics.Add(new DiagnosticInfo(
+                        "SLUICE006",
+                        $"Generated field identifier '{fieldName}' is a collision (from resource names '{existingName}' and '{resourceName}'). Use distinct resource names."
+                    ));
+                    hasCollision = true;
+                }
+            }
+            else
+            {
+                identifierToResourceName[fieldName] = resourceName;
+            }
+        }
+
+        if (hasCollision)
+        {
+            return new InterfaceData(
+                interfaceName,
+                finalClassName,
+                namespaceStr,
+                [],
+                [],
+                diagnostics
+            );
+        }
+
         if (readMethods.Count == 0 && writeMethods.Count == 0)
         {
             if (diagnostics.Count == 0)
@@ -311,6 +481,7 @@ public sealed class SluiceGenerator : IIncrementalGenerator
             return new InterfaceData(
                 interfaceName,
                 finalClassName,
+                namespaceStr,
                 readMethods,
                 writeMethods,
                 diagnostics
@@ -320,6 +491,7 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         return new InterfaceData(
             interfaceName,
             finalClassName,
+            namespaceStr,
             readMethods,
             writeMethods,
             diagnostics
@@ -329,19 +501,19 @@ public sealed class SluiceGenerator : IIncrementalGenerator
     private static void Emit(SourceProductionContext context, InterfaceData data)
     {
         foreach (var d in data.Diagnostics)
-            context.ReportDiagnostic(
-                Diagnostic.Create(
-                    new DiagnosticDescriptor(
-                        "SLUICE001",
-                        "Generator",
-                        d,
-                        "Sluice",
-                        DiagnosticSeverity.Warning,
-                        true
-                    ),
-                    location: null
-                )
+        {
+            var descriptor = new DiagnosticDescriptor(
+                d.Id,
+                "Sluice",
+                d.Message,
+                "Sluice",
+                DiagnosticSeverity.Warning,
+                true
             );
+            context.ReportDiagnostic(
+                Diagnostic.Create(descriptor, location: null)
+            );
+        }
 
         if (data.ReadMethods.Count == 0 && data.WriteMethods.Count == 0)
             return;
@@ -356,19 +528,26 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         resourceSb.AppendLine();
         resourceSb.AppendLine("using Sluice;");
         resourceSb.AppendLine();
+
+        if (data.Namespace.Length > 0)
+        {
+            resourceSb.AppendLine($"namespace {data.Namespace}");
+            resourceSb.AppendLine("{");
+        }
+
         resourceSb.AppendLine($"public static class {resourcesName}");
         resourceSb.AppendLine("{");
 
         var allResources = new List<ResourceAttribute>();
         foreach (var rm in data.ReadMethods)
-        foreach (var r in rm.Resources)
-            if (!allResources.Any(x => x.Name == r.Name))
-                allResources.Add(r);
+            foreach (var r in rm.Resources)
+                if (!allResources.Any(x => x.Name == r.Name))
+                    allResources.Add(r);
 
         foreach (var wm in data.WriteMethods)
-        foreach (var r in wm.Resources)
-            if (!allResources.Any(x => x.Name == r.Name))
-                allResources.Add(r);
+            foreach (var r in wm.Resources)
+                if (!allResources.Any(x => x.Name == r.Name))
+                    allResources.Add(r);
 
         foreach (var res in allResources)
         {
@@ -382,11 +561,24 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         resourceSb.AppendLine("}");
         resourceSb.AppendLine();
 
+        if (data.Namespace.Length > 0)
+        {
+            resourceSb.AppendLine("}");
+            resourceSb.AppendLine();
+        }
+
         var sluiceSb = new StringBuilder();
         sluiceSb.AppendLine("#pragma warning disable CS1591");
         sluiceSb.AppendLine();
         sluiceSb.AppendLine("using Sluice;");
         sluiceSb.AppendLine();
+
+        if (data.Namespace.Length > 0)
+        {
+            sluiceSb.AppendLine($"namespace {data.Namespace}");
+            sluiceSb.AppendLine("{");
+        }
+
         sluiceSb.AppendLine(
             $"public sealed class {sluiceName}(ISluice sluice, {interfaceName} store)"
         );
@@ -478,6 +670,12 @@ public sealed class SluiceGenerator : IIncrementalGenerator
         }
 
         sluiceSb.AppendLine("}");
+
+        if (data.Namespace.Length > 0)
+        {
+            sluiceSb.AppendLine("}");
+            sluiceSb.AppendLine();
+        }
 
         context.AddSource(
             $"{resourcesName}.g.cs",
