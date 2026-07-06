@@ -180,7 +180,7 @@ public sealed class RedisStampedeTests
         private TaskCompletionSource<bool>? _gateRelease;
 
         public GatedComputeOp(string name)
-            : base(name, 1) { }
+            : base(name, 1, allowUntracked: true) { }
 
         public Task GateEntered => _gateEntered?.Task ?? Task.CompletedTask;
 

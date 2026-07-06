@@ -5,8 +5,9 @@ internal sealed class DelegateCachedOperation<TKey, TValue>(
     int version,
     Func<TKey, CacheKey> keyFunc,
     Func<TKey, IReadScope, ValueTask<TValue>> computeFunc,
-    TimeSpan? ttl = null
-) : CachedOperation<TKey, TValue>(name, version, ttl)
+    TimeSpan? ttl = null,
+    bool allowUntracked = false
+) : CachedOperation<TKey, TValue>(name, version, ttl, allowUntracked)
 {
     protected override CacheKey Key(TKey key) => keyFunc(key);
 
@@ -22,7 +23,8 @@ public sealed class CachedQuery<TKey, TValue>(
     Func<TKey, object> keySelector,
     Func<TKey, IReadScope, ValueTask<TValue>> compute,
     int version = 1,
-    TimeSpan? ttl = null
+    TimeSpan? ttl = null,
+    bool allowUntracked = false
 )
 {
     internal CachedOperation<TKey, TValue> Operation { get; } =
@@ -31,6 +33,7 @@ public sealed class CachedQuery<TKey, TValue>(
             version,
             key => CacheKey.From(keySelector(key)),
             compute,
-            ttl
+            ttl,
+            allowUntracked
         );
 }

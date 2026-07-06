@@ -3,7 +3,8 @@ namespace Sluice;
 public abstract class CachedOperation<TKey, TValue>(
     string name,
     int version = 1,
-    TimeSpan? ttl = null
+    TimeSpan? ttl = null,
+    bool allowUntracked = false
 ) : IOperation
 {
     public string Name { get; } = name;
@@ -11,6 +12,8 @@ public abstract class CachedOperation<TKey, TValue>(
     public int Version { get; } = version;
 
     internal TimeSpan? Ttl { get; } = ttl;
+
+    internal bool AllowUntracked { get; } = allowUntracked;
 
     public Type KeyType => typeof(TKey);
 

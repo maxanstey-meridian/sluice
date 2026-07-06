@@ -134,6 +134,15 @@ public sealed class OperationRegistry(
         var ctx = new OperationContext(_clock, ct);
         var value = await operation.RunCompute(key, ctx);
 
+        if (ctx.ObservedReads.Count == 0 && !operation.AllowUntracked)
+        {
+            throw new InvalidOperationException(
+                $"Cached operation '{operation.Name}' recorded no observed reads. "
+                    + "The cached value cannot be invalidated by writes. "
+                    + "If this is intentional, set allowUntracked: true on the operation."
+            );
+        }
+
         var now = _clock.GetUtcNow();
         DateTimeOffset? entryExpiresAt = operation.Ttl is { } ttl ? now + ttl : null;
         var entry = new CacheEntry<TValue>(
@@ -144,9 +153,9 @@ public sealed class OperationRegistry(
             epochBefore
         );
 
-        await cacheStore.SetAsync(entryKey, entry, ct);
-
         await _graphStore.RecordEntry(entryKey, ctx.ObservedReads, now, ct);
+
+        await cacheStore.SetAsync(entryKey, entry, ct);
 
         var snapshot = _recentInvalidations.ToArray();
         var epochAfter = Interlocked.Read(ref _writeEpoch);

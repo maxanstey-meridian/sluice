@@ -5,7 +5,8 @@ public sealed class EntityResource<TKey>(string name)
 {
     public string Name { get; } = name;
 
-    public ResourceAddress For(TKey key) => new(ResourceKind.Entity, Name, key.ResourceKey);
+    public ResourceAddress For(TKey key) =>
+        new(ResourceKind.Entity, Name, ResourceKeyGuard.RequireRealKey(key.ResourceKey));
 
     public ResourceAddress Wildcard() => new(ResourceKind.Entity, Name, "*");
 

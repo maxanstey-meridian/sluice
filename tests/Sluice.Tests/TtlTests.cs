@@ -230,9 +230,11 @@ public sealed class TtlTests
         cacheStore.RemoveCallCount.Should().Be(1);
 
         var graphDuringRefresh = await sluice.DumpGraphAsync(CancellationToken.None);
-        graphDuringRefresh.Should().NotContain("customer.score:v1:{\"customerId\":\"A\"}");
-        graphDuringRefresh.Should().NotContain("entity:customer:A");
-        graphDuringRefresh.Should().NotContain("collection:orders.byCustomer:A");
+        graphDuringRefresh.Should().Contain("customer.score:v1:{\"customerId\":\"A\"}");
+        graphDuringRefresh.Should().Contain("entity:customer:A");
+        graphDuringRefresh.Should().Contain("collection:orders.byCustomer:A");
+        graphDuringRefresh.Should().Contain("cached:");
+        graphDuringRefresh.Should().NotBe(graphBefore);
 
         cacheStore.ReleaseSet();
         await refreshTask;
