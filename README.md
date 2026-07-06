@@ -455,7 +455,16 @@ Sluice ships two Redis-backed stores in the separate `Sluice.Redis` package:
 - `RedisCacheStore` — replaces `InMemoryCacheStore` for distributed caching. Serializes `CacheEntry<TValue>` as JSON using `System.Text.Json` with configurable `JsonSerializerOptions`.
 - `RedisGraphStore` — replaces `InMemoryGraphStore` for distributed invalidation. Stores resource addresses as Redis SET members via `SADD`/`SMEMBERS`/`SREM`.
 
-Minimal wiring:
+Primary wiring uses `SluiceRedis.Create`, which automatically wires all three Redis components with a shared circuit breaker for resilience:
+
+```csharp
+var redis = await ConnectionMultiplexer.ConnectAsync("redis://localhost:6379");
+var sluice = SluiceRedis.Create(redis);
+```
+
+`SluiceRedis.Create` wraps `RedisCacheStore`, `RedisGraphStore`, and `RedisStampedeCoordinator` in resilient decorators that share one circuit breaker. When Redis is unavailable, cache reads return misses, cache writes are silently dropped, and no Redis exceptions propagate to the caller. The circuit opens after 5 consecutive failures and recovers after a 10-second cooldown with a single probe call.
+
+For custom configurations (different key prefix, serializer options, stampede options, or circuit breaker settings), construct the stores manually:
 
 ```csharp
 var redis = await ConnectionMultiplexer.ConnectAsync("redis://localhost:6379");
