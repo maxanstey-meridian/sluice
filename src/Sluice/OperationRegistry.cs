@@ -5,13 +5,17 @@ namespace Sluice;
 public sealed class OperationRegistry(
     ICacheStore cacheStore,
     IGraphStore? graphStore = null,
-    TimeProvider? clock = null
+    TimeProvider? clock = null,
+    IStampedeCoordinator? stampedeCoordinator = null,
+    StampedeOptions? stampedeOptions = null
 ) : IDisposable
 {
     private readonly IGraphStore _graphStore = graphStore ?? new InMemoryGraphStore();
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private readonly IStampedeCoordinator _stampede =
+        stampedeCoordinator ?? new InMemoryStampedeCoordinator();
+    private readonly StampedeOptions _stampedeOptions = stampedeOptions ?? new StampedeOptions();
     private readonly ConcurrentBag<IOperation> _operationMetadata = [];
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _inFlight = new();
     private long _writeEpoch;
     private readonly ConcurrentQueue<InvalidationRecord> _recentInvalidations = new();
     private const int MaxRecentInvalidations = 256;
@@ -45,90 +49,146 @@ public sealed class OperationRegistry(
             }
         }
 
-        var semaphore = _inFlight.GetOrAdd(entryKey, _ => new SemaphoreSlim(1, 1));
-        await semaphore.WaitAsync(ct);
+        var lease = await _stampede.TryAcquireAsync(entryKey, _stampedeOptions.LeaseTtl, ct);
+
+        if (lease is null)
+        {
+            var polled = await PollForEntry<TValue>(entryKey, ct);
+            if (polled is not null)
+            {
+                return polled.Value;
+            }
+
+            lease = await _stampede.TryAcquireAsync(entryKey, _stampedeOptions.LeaseTtl, ct);
+            if (lease is null)
+            {
+                return await ComputeAndStoreAsync(operation, entryKey, key, ct);
+            }
+        }
+
         try
         {
             var rechecked = await cacheStore.GetAsync<TValue>(entryKey, ct);
-            if (rechecked is not null)
+            if (rechecked is null)
             {
-                if (rechecked.ExpiresAt is { } expiresAt && expiresAt <= _clock.GetUtcNow())
+                return await ComputeAndStoreAsync(operation, entryKey, key, ct);
+            }
+
+            if (rechecked.ExpiresAt is { } expiresAt && expiresAt <= _clock.GetUtcNow())
+            {
+                await cacheStore.RemoveAsync(entryKey, ct);
+            }
+            else
+            {
+                return rechecked.Value;
+            }
+
+            return await ComputeAndStoreAsync(operation, entryKey, key, ct);
+        }
+        finally
+        {
+            await lease.DisposeAsync();
+        }
+    }
+
+    private async Task<CacheEntry<TValue>?> PollForEntry<TValue>(
+        string entryKey,
+        CancellationToken ct
+    )
+    {
+        var deadline = _clock.GetUtcNow() + _stampedeOptions.WaitTimeout;
+        var delay = TimeSpan.FromMilliseconds(1);
+        while (_clock.GetUtcNow() < deadline)
+        {
+            var entry = await cacheStore.GetAsync<TValue>(entryKey, ct);
+            if (entry is not null)
+            {
+                if (entry.ExpiresAt is { } expiresAt && expiresAt <= _clock.GetUtcNow())
                 {
                     await cacheStore.RemoveAsync(entryKey, ct);
                 }
                 else
                 {
-                    return rechecked.Value;
+                    return entry;
                 }
             }
 
-            var epochBefore = Interlocked.Read(ref _writeEpoch);
+            await Task.Delay(delay, _clock, ct);
+            var doubled = TimeSpan.FromTicks(delay.Ticks * 2);
+            delay = doubled < _stampedeOptions.MaxBackoff ? doubled : _stampedeOptions.MaxBackoff;
+        }
+        return null;
+    }
 
-            await _graphStore.ClearEntryEdges(entryKey, ct);
+    private async Task<TValue> ComputeAndStoreAsync<TKey, TValue>(
+        CachedOperation<TKey, TValue> operation,
+        string entryKey,
+        TKey key,
+        CancellationToken ct
+    )
+    {
+        var epochBefore = Interlocked.Read(ref _writeEpoch);
 
-            var ctx = new OperationContext(_clock, ct);
-            var value = await operation.RunCompute(key, ctx);
+        await _graphStore.ClearEntryEdges(entryKey, ct);
 
-            var now = _clock.GetUtcNow();
-            DateTimeOffset? entryExpiresAt = operation.Ttl is { } ttl ? now + ttl : null;
-            var entry = new CacheEntry<TValue>(
-                value,
-                [.. ctx.ObservedReads],
-                now,
-                entryExpiresAt,
-                epochBefore
-            );
+        var ctx = new OperationContext(_clock, ct);
+        var value = await operation.RunCompute(key, ctx);
 
-            await cacheStore.SetAsync(entryKey, entry, ct);
+        var now = _clock.GetUtcNow();
+        DateTimeOffset? entryExpiresAt = operation.Ttl is { } ttl ? now + ttl : null;
+        var entry = new CacheEntry<TValue>(
+            value,
+            [.. ctx.ObservedReads],
+            now,
+            entryExpiresAt,
+            epochBefore
+        );
 
-            await _graphStore.RecordEntry(entryKey, ctx.ObservedReads, now, ct);
+        await cacheStore.SetAsync(entryKey, entry, ct);
 
-            var snapshot = _recentInvalidations.ToArray();
-            var epochAfter = Interlocked.Read(ref _writeEpoch);
+        await _graphStore.RecordEntry(entryKey, ctx.ObservedReads, now, ct);
 
-            if (epochAfter <= epochBefore)
-            {
-                return value;
-            }
+        var snapshot = _recentInvalidations.ToArray();
+        var epochAfter = Interlocked.Read(ref _writeEpoch);
 
-            var shouldInvalidate = false;
-            if (epochAfter - epochBefore >= MaxRecentInvalidations)
-            {
-                shouldInvalidate = true;
-            }
-            else
-            {
-                foreach (var record in snapshot)
-                {
-                    if (record.Epoch <= epochBefore)
-                    {
-                        continue;
-                    }
-
-                    if (!record.Addresses.Any(changed => Overlaps(changed, ctx.ObservedReads)))
-                    {
-                        continue;
-                    }
-
-                    shouldInvalidate = true;
-                    break;
-                }
-            }
-
-            if (!shouldInvalidate)
-            {
-                return value;
-            }
-
-            await cacheStore.RemoveAsync(entryKey, ct);
-            await _graphStore.ClearEntryEdges(entryKey, ct);
-
+        if (epochAfter <= epochBefore)
+        {
             return value;
         }
-        finally
+
+        var shouldInvalidate = false;
+        if (epochAfter - epochBefore >= MaxRecentInvalidations)
         {
-            semaphore.Release();
+            shouldInvalidate = true;
         }
+        else
+        {
+            foreach (var record in snapshot)
+            {
+                if (record.Epoch <= epochBefore)
+                {
+                    continue;
+                }
+
+                if (!record.Addresses.Any(changed => Overlaps(changed, ctx.ObservedReads)))
+                {
+                    continue;
+                }
+
+                shouldInvalidate = true;
+                break;
+            }
+        }
+
+        if (!shouldInvalidate)
+        {
+            return value;
+        }
+
+        await cacheStore.RemoveAsync(entryKey, ct);
+        await _graphStore.ClearEntryEdges(entryKey, ct);
+
+        return value;
     }
 
     public async Task ApplyAsync(Func<ChangeContext, Task> write, CancellationToken ct)
@@ -150,7 +210,7 @@ public sealed class OperationRegistry(
     {
         await cacheStore.ClearAsync(ct);
         await _graphStore.FlushAsync(ct);
-        _inFlight.Clear();
+        await _stampede.ClearAsync(ct);
     }
 
     internal async Task InvalidateAsync(

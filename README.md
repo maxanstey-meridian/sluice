@@ -459,10 +459,13 @@ Minimal wiring:
 var redis = await ConnectionMultiplexer.ConnectAsync("redis://localhost:6379");
 var cacheStore = new RedisCacheStore(redis, "sluice");
 var graphStore = new RedisGraphStore(redis, "sluice");
-var sluice = new SluiceKernel(cacheStore, graphStore);
+var stampede = new RedisStampedeCoordinator(redis);
+var sluice = new SluiceKernel(cacheStore, graphStore, stampedeCoordinator: stampede);
 ```
 
 Both `RedisCacheStore` and `RedisGraphStore` must be passed together to `SluiceKernel` for distributed deployments. Passing only `RedisCacheStore` produces distributed cache + in-process graph — a hybrid that causes invalidation misses across processes.
+
+Stampede protection coalesces redundant recompute across processes. When multiple processes miss the same cache entry simultaneously, only one computes while others poll the cache with backoff until the entry appears. The `RedisStampedeCoordinator` uses `SET NX PX` for lease acquisition and an atomic Lua compare-and-delete for release. The Lua constraint (no Lua scripts in Redis backing) is relaxed specifically for this release script — `RedisCacheStore` and `RedisGraphStore` remain Lua-free. Lease TTL (default 30s) bounds how long one process may own a recompute; it is separate from cache entry TTL, which may be minutes or hours.
 
 The caller owns the `ConnectionMultiplexer` and its disposal lifecycle. Sluice does not dispose it.
 
@@ -479,7 +482,7 @@ var cacheStore = new RedisCacheStore(redis, "sluice", options);
 
 Topology: single-node or managed endpoint (e.g. Azure Cache for Redis non-cluster mode, AWS ElastiCache non-cluster mode). Primary/replica managed endpoints are acceptable — `StackExchange.Redis` routes writes such as `KeyDeleteAsync` to the primary. Redis Cluster is not supported — `SCAN`-based clear and flush assume single-node key distribution.
 
-Consistency is eventual. TTL is the backstop for distributed recompute and invalidation races. Distributed stampede prevention is not yet implemented — concurrent processes can independently recompute the same expired entry.
+Consistency is eventual. TTL is the backstop for distributed recompute and invalidation races.
 
 For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameters (default `"sluice"`) on both `RedisCacheStore` and `RedisGraphStore`.
 
@@ -505,7 +508,7 @@ For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameter
 
 **Redis backing (separate package):**
 
-- `RedisCacheStore`, `RedisGraphStore` (in `src/Sluice.Redis/`)
+- `RedisCacheStore`, `RedisGraphStore`, `RedisStampedeCoordinator` (in `src/Sluice.Redis/`)
 
 ## Limitations
 
@@ -513,7 +516,7 @@ For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameter
 - Writes must declare every resource address they changed. Missing addresses leave stale entries.
 - If a write succeeds and the process crashes before invalidation, stale entries remain until TTL or flush.
 - In-memory cache/graph stores are for tests and single-process apps.
-- Distributed stampede prevention is not yet implemented. Concurrent processes hitting the same expired cache entry will independently recompute and write.
+- Distributed stampede prevention coalesces redundant recompute but does not prevent all cross-process invalidation races. Those remain bounded by TTL unless distributed epoch fencing is added (future work).
 - Redis backing is single-node or managed endpoint only. Redis Cluster topology is not supported.
 - The dependency graph is process-local. Cross-process invalidation requires Redis backing.
 - Benchmark overhead is dominated by fixed tracking cost for tiny in-memory operations; Sluice is intended for cached operations expensive enough to justify dependency tracking.
