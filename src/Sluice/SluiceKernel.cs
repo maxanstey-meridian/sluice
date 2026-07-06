@@ -12,7 +12,7 @@ public sealed class SluiceKernel(
     private readonly ConcurrentDictionary<object, byte> _registeredQueries = new();
 
     public async Task<TValue> Get<TKey, TValue>(
-        Query<TKey, TValue> query,
+        CachedQuery<TKey, TValue> query,
         TKey key,
         CancellationToken ct
     )

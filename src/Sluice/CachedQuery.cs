@@ -17,7 +17,7 @@ internal sealed class DelegateCachedOperation<TKey, TValue>(
     }
 }
 
-public sealed class Query<TKey, TValue>(
+public sealed class CachedQuery<TKey, TValue>(
     string name,
     Func<TKey, object> keySelector,
     Func<TKey, IReadScope, ValueTask<TValue>> compute,

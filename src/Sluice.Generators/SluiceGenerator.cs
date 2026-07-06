@@ -399,10 +399,10 @@ public sealed class SluiceGenerator : IIncrementalGenerator
             var valueType = rm.ValueType!;
             var resourceField = rm.Resources[0].FieldName;
             sluiceSb.AppendLine(
-                $"    public readonly TrackedRead<{keyType}, {valueType}> {fieldName} = new("
+                $"    public readonly TrackedRead<{keyType}, {valueType}> {fieldName} ="
             );
             sluiceSb.AppendLine(
-                $"        {resourcesName}.{resourceField}.For, store.{rm.MethodName});"
+                $"        {resourcesName}.{resourceField}.Read(store.{rm.MethodName});"
             );
             sluiceSb.AppendLine();
         }

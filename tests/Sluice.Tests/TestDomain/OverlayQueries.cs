@@ -2,7 +2,7 @@ namespace Sluice.Tests;
 
 internal sealed class OverlayQueries(IStore store)
 {
-    public readonly Query<CustomerId, CustomerScore> CustomerScore = new(
+    public readonly CachedQuery<CustomerId, CustomerScore> CustomerScore = new(
         "customer.score",
         id => new { customerId = id.Value },
         async (id, read) =>
@@ -16,7 +16,7 @@ internal sealed class OverlayQueries(IStore store)
         }
     );
 
-    public readonly Query<CustomerId, Customer> CustomerScoreDirect = new(
+    public readonly CachedQuery<CustomerId, Customer> CustomerScoreDirect = new(
         "customer.score.direct",
         id => new { customerId = id.Value },
         async (id, read) =>

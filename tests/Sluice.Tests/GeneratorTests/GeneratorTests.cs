@@ -41,7 +41,7 @@ public sealed class GeneratorTests
         var sluiceKernel = new SluiceKernel(new InMemoryCacheStore());
         var widgetSluice = new WidgetStoreSluice(sluiceKernel, store);
 
-        var query = new Query<WidgetId, Widget>(
+        var query = new CachedQuery<WidgetId, Widget>(
             "test.widget",
             id => new { id = id.Value },
             async (id, scope) => await widgetSluice.Widget.Get(id, scope)
@@ -63,7 +63,7 @@ public sealed class GeneratorTests
         var sluiceKernel = new SluiceKernel(new InMemoryCacheStore());
         var widgetSluice = new WidgetStoreSluice(sluiceKernel, store);
 
-        var query = new Query<WidgetId, Widget>(
+        var query = new CachedQuery<WidgetId, Widget>(
             "test.widget",
             id => new { id = id.Value },
             async (id, scope) => await widgetSluice.Widget.Get(id, scope)
@@ -92,7 +92,7 @@ public sealed class GeneratorTests
         var sluiceKernel = new SluiceKernel(new InMemoryCacheStore());
         var widgetSluice = new WidgetStoreSluice(sluiceKernel, store);
 
-        var query = new Query<WidgetId, IReadOnlyList<Widget>>(
+        var query = new CachedQuery<WidgetId, IReadOnlyList<Widget>>(
             "test.widgetsByGroup",
             id => new { id = id.Value },
             async (id, scope) => await widgetSluice.WidgetsByGroup.Get(id, scope)
@@ -121,7 +121,7 @@ public sealed class GeneratorTests
         var sluiceKernel = new SluiceKernel(new InMemoryCacheStore());
         var widgetSluice = new WidgetStoreSluice(sluiceKernel, store);
 
-        var query = new Query<WidgetId, Widget>(
+        var query = new CachedQuery<WidgetId, Widget>(
             "test.widget",
             id => new { id = id.Value },
             async (id, scope) => await widgetSluice.Widget.Get(id, scope)
@@ -153,7 +153,7 @@ public sealed class GeneratorTests
         var sluiceKernel = new SluiceKernel(new InMemoryCacheStore());
         var widgetSluice = new WidgetStoreSluice(sluiceKernel, store);
 
-        var query = new Query<WidgetId, Widget>(
+        var query = new CachedQuery<WidgetId, Widget>(
             "test.widget",
             id => new { id = id.Value },
             async (id, scope) => await widgetSluice.Widget.Get(id, scope)

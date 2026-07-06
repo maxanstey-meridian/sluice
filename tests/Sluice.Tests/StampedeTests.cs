@@ -124,7 +124,7 @@ public sealed class StampedeTests
 
         var customerId = new CustomerId("A");
 
-        var customerScoreTtl = new Query<CustomerId, CustomerScore>(
+        var customerScoreTtl = new CachedQuery<CustomerId, CustomerScore>(
             "customer.score",
             id => new { customerId = id.Value },
             async (id, read) =>

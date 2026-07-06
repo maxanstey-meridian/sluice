@@ -73,7 +73,7 @@ public sealed class TtlTests
     private static SluiceKernel CreateKernel(ICacheStore cacheStore, TimeProvider? clock = null) =>
         new(cacheStore, clock: clock);
 
-    private static Query<CustomerId, CustomerScore> ScoreQuery(
+    private static CachedQuery<CustomerId, CustomerScore> ScoreQuery(
         IStore store,
         TimeSpan? ttl = null
     ) =>

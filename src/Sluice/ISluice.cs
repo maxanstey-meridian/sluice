@@ -3,7 +3,7 @@ namespace Sluice;
 public interface ISluice
 {
     public Task<TValue> Get<TKey, TValue>(
-        Query<TKey, TValue> query,
+        CachedQuery<TKey, TValue> query,
         TKey key,
         CancellationToken ct
     );

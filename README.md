@@ -1,413 +1,480 @@
 # Sluice
 
-Sluice is a small .NET library for cache invalidation by observed dependencies.
+Sluice is a .NET cache library that invalidates by observed dependencies, not broad tags.
 
-Instead of invalidating cached operations with broad tags, a query records the resource addresses it actually read. Later, writes declare the resource addresses they changed. Sluice evicts only cached entries whose observed reads intersect those changed addresses.
+A query records the resource addresses it actually read while computing. A write declares the resource addresses it changed. Sluice evicts only cached entries whose observed reads intersect those changed addresses.
 
-The app-facing API is deliberately small:
+**Three tiers, all fully functional:**
 
-- `sluice.Get(query, key, ct)` reads through the cache.
-- `TrackedRead<TKey, TValue>` bundles a resource address with its store read delegate — `.Get(key, scope)` records the dependency and fetches the value.
-- `TrackedWrite<TKey>` captures `ISluice` + resource address delegates — `.Write(key, work, ct)` runs the write and invalidates affected cached entries.
-- `sluice.Apply(work, writeEffect, ct)` is the lower-level write path when you don't have a `TrackedWrite` — runs a write and invalidates affected cached entries.
-- `new WriteEffect(address)` declares what a write changed (used with `sluice.Apply`).
-- `changes.Changed(address)` is the inline escape hatch for one-off writes.
+1. **Hand-written** — resource definitions + `TrackedRead` + `TrackedWrite` + `CachedQuery`. ~30 lines.
+2. **Codegen** — annotate your store interface with attributes. The generator writes Tier 1 for you.
+3. **Escape hatch** — `sluice.Apply(work, effect, ct)` or `sluice.Invalidate(effect, ct)` for one-off writes.
+
+Queries always stay hand-written — projection composition is application logic.
 
 ## Status
 
-Prototype / proof of concept.
+Prototype / proof of concept. Targets `.NET 10` (`net10.0`). The core library has zero third-party dependencies.
 
-Current target framework: `.NET 10` (`net10.0`).
+## The domain
 
-The library project has no third-party package references.
-
-## Why
-
-Manual cache invalidation tends to drift because the cache key and the invalidation site are maintained separately.
-
-Sluice makes the relationship explicit:
-
-- A query tracks the precise resources it read while computing a value.
-- A write declares the precise resources it changed.
-- The registry maintains a dependency graph from resource addresses to cached entries.
-- Invalidation is selective: unchanged dependencies stay cached.
-
-Example: a user profile query reads `entity:user:alice`, `entity:userSettings:alice`, and `entity:userPreferences:alice`. A user update use case declares the resources it changed, and Sluice evicts only cached entries that actually read one of those addresses.
-
-## Quick Start
-
-Create resources — these declare the identity of the data you cache around:
+These types are identical across all tiers. Sluice does not change your domain.
 
 ```csharp
-// Keys implement IResourceKey. The ResourceKey property is used in resource
-// addresses — it must be stable, culture-invariant, and unique within the resource.
+// Keys implement IResourceKey. ResourceKey is used in resource addresses —
+// it must be stable, culture-invariant, and unique within the resource.
 public sealed record UserId(string Value) : IResourceKey
 {
     public string ResourceKey => Value;
 }
 
-// Resources are static — pure data, no store dependency.
-// The name becomes part of the resource address (e.g. entity:user:alice).
-// Writes reference these same resources when declaring what changed.
+public sealed record User(UserId Id, string Name, string Email);
+public sealed record UserSettings(UserId Id, bool DarkMode, string Language);
+public sealed record UserPreferences(UserId Id, string Theme);
+public sealed record UserProfile(
+    UserId Id, string Name, string Email,
+    bool DarkMode, string Language, string Theme);
+public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
+
+// Your store. Nothing changes here in any tier.
+public interface IUserStore
+{
+    Task<User> GetUser(UserId id, CancellationToken ct);
+    Task<UserSettings> GetSettings(UserId id, CancellationToken ct);
+    Task<UserPreferences> GetPreferences(UserId id, CancellationToken ct);
+    Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct);
+}
+```
+
+---
+
+## Tier 0 — No Sluice
+
+Every call hits the store. No cache, no dependency tracking.
+
+```csharp
+public sealed class UserService(IUserStore store)
+{
+    public async Task<UserProfile> GetProfile(UserId id, CancellationToken ct)
+    {
+        var user = await store.GetUser(id, ct);
+        var settings = await store.GetSettings(id, ct);
+        var preferences = await store.GetPreferences(id, ct);
+
+        return new UserProfile(
+            id, user.Name, user.Email,
+            settings.DarkMode, settings.Language, preferences.Theme);
+    }
+
+    public Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct) =>
+        store.UpdateUser(id, input, ct);
+}
+```
+
+```csharp
+var svc = new UserService(store);
+
+await svc.GetProfile(new UserId("alice"), ct);  // 3 store calls
+await svc.GetProfile(new UserId("alice"), ct);  // 3 more — no cache
+```
+
+---
+
+## Tier 1 — Hand-written Sluice
+
+### Resource definitions
+
+Pure data. No store, no sluice. Calling `.For(id)` produces a concrete `ResourceAddress`.
+
+```csharp
+// Static resource definitions — kind + name + key type.
+// These are the identity of the data you cache around.
+// Reads, writes, and wildcards all reference them by name.
 public static class UserResources
 {
     public static readonly EntityResource<UserId> User = new("user");
-
     public static readonly EntityResource<UserId> Settings = new("userSettings");
-
     public static readonly EntityResource<UserId> Preferences = new("userPreferences");
 }
 ```
 
-Bundle resources, reads, queries, and writes into one `<Domain>Sluice` class. A static `Register` factory makes the declaration read like registration, not instantiation:
+### Sluice wrapper
+
+Primary constructor. Field initializers make the derivation from resource definition
+visible at each declaration — `UserResources.User.Read(store.GetUser)` is right there.
 
 ```csharp
-// The domain sluice: one class that declares what exists, how to read it,
-// how to compose it, and what writes invalidate.
-// Private constructor — callers use Register.
-public sealed class UserSluice
+// ISluice captured for writes. IUserStore captured for data access.
+// Each TrackedRead is derived from its resource definition via .Read().
+public sealed class UserSluice(ISluice sluice, IUserStore store)
 {
-    public TrackedRead<UserId, User> User { get; }
-    public TrackedRead<UserId, UserSettings> Settings { get; }
-    public TrackedRead<UserId, UserPreferences> Preferences { get; }
-    public Query<UserId, UserProfile> Profile { get; }
-    public TrackedWrite<UserId> UpdateUser { get; }
+    // .Read(storeMethod) pairs a resource definition with its store delegate.
+    // .Get(key, scope) records the dependency and fetches the value.
+    public readonly TrackedRead<UserId, User> User =
+        UserResources.User.Read(store.GetUser);
 
-    private UserSluice(
-        TrackedRead<UserId, User> user,
-        TrackedRead<UserId, UserSettings> settings,
-        TrackedRead<UserId, UserPreferences> preferences,
-        Query<UserId, UserProfile> profile,
-        TrackedWrite<UserId> updateUser)
-    {
-        User = user;
-        Settings = settings;
-        Preferences = preferences;
-        Profile = profile;
-        UpdateUser = updateUser;
-    }
+    public readonly TrackedRead<UserId, UserSettings> Settings =
+        UserResources.Settings.Read(store.GetSettings);
 
-    public static UserSluice Register(ISluice sluice, IUserStore store)
-    {
-        // Reads — method groups, not lambdas. Each line registers a cached
-        // read backed by the store, tracked against the resource address.
-        var user = new TrackedRead<UserId, User>(
-            UserResources.User.For, store.GetUser);
-        var settings = new TrackedRead<UserId, UserSettings>(
-            UserResources.Settings.For, store.GetSettings);
-        var preferences = new TrackedRead<UserId, UserPreferences>(
-            UserResources.Preferences.For, store.GetPreferences);
+    public readonly TrackedRead<UserId, UserPreferences> Preferences =
+        UserResources.Preferences.Read(store.GetPreferences);
 
-        // Query — cached composition of tracked reads.
-        var profile = new Query<UserId, UserProfile>(
-            "user.profile",
-            id => id.Value,
-            async (id, scope) =>
-            {
-                var u = await user.Get(id, scope);
-                var s = await settings.Get(id, scope);
-                var p = await preferences.Get(id, scope);
-
-                return new UserProfile(
-                    id, u.Name, u.Email, s.DarkMode, s.Language, p.Theme);
-            });
-
-        // Write — TrackedWrite captures ISluice + address delegates.
-        // .Write(key, work, ct) resolves the key into addresses, builds a WriteEffect,
-        // and calls sluice.Apply internally. The use case never sees the WriteEffect.
-        var updateUser = new TrackedWrite<UserId>(
-            sluice,
-            UserResources.User.For,
-            UserResources.Settings.For,
-            UserResources.Preferences.For);
-
-        return new(user, settings, preferences, profile, updateUser);
-    }
+    // TrackedWrite captures ISluice + address delegates.
+    // .Write(key, work, ct) runs the work, then invalidates affected entries.
+    public readonly TrackedWrite<UserId> UpdateUser = new(
+        sluice,
+        UserResources.User.For,
+        UserResources.Settings.For,
+        UserResources.Preferences.For);
 }
 ```
 
-Read through Sluice — first call computes and caches, second call returns the cached value:
+Queries can't be field initializers on `UserSluice` (CS0236: they reference sibling
+reads). They live in a separate class that captures the `UserSluice` instance:
+
+```csharp
+// Queries compose tracked reads into cached projections.
+// The compute body is application logic — always hand-written.
+public sealed class UserQueries(UserSluice users)
+{
+    public readonly CachedQuery<UserId, UserProfile> Profile =
+        new("user.profile", id => id.Value, async (id, scope) =>
+        {
+            var u = await users.User.Get(id, scope);
+            var s = await users.Settings.Get(id, scope);
+            var p = await users.Preferences.Get(id, scope);
+            return new UserProfile(
+                id, u.Name, u.Email, s.DarkMode, s.Language, p.Theme);
+        });
+}
+```
+
+### Call site
 
 ```csharp
 var sluice = new SluiceKernel(new InMemoryCacheStore());
-var users = UserSluice.Register(sluice, store);
+var store  = new InMemoryUserStore();
+var users  = new UserSluice(sluice, store);
+var queries = new UserQueries(users);
 
-// Cache miss on first call: runs Compute, tracks reads, stores the result.
-// Cache hit on second call with the same key: returns immediately, no store calls.
-var profile = await sluice.Get(users.Profile, new UserId("alice"), ct);
+// Cache miss: 3 store calls, tracks 3 dependencies, caches result.
+await sluice.Get(queries.Profile, new UserId("alice"), ct);
+
+// Cache hit: 0 store calls.
+await sluice.Get(queries.Profile, new UserId("alice"), ct);
+
+// Write: runs work delegate, invalidates user/settings/preferences for alice.
+await users.UpdateUser.Write(
+    new UserId("alice"),
+    ct => store.UpdateUser(new UserId("alice"), new("Alice 2", true, "dark"), ct),
+    ct);
+
+// Cache miss: 3 store calls, fresh result.
+await sluice.Get(queries.Profile, new UserId("alice"), ct);
 ```
 
-Write through the TrackedWrite field — one line, no WriteEffect at the call site:
+---
+
+## Tier 2 — Codegen
+
+Annotate your store interface. The generator writes the resource class and sluice wrapper
+for you.
+
+### What you write
 
 ```csharp
-public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
-
-public sealed class UpdateUserUseCase(UserSluice users, IUserStore store)
+[Sluice]
+public interface IUserStore
 {
-    // The use case passes the runtime value (id) and the store call (work).
-    // TrackedWrite handles the WriteEffect internally.
-    public Task Execute(UserId id, UpdateUserInput input, CancellationToken ct) =>
-        users.UpdateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct);
+    [ReadEntity("user")]
+    Task<User> GetUser(UserId id, CancellationToken ct);
+
+    [ReadEntity("userSettings")]
+    Task<UserSettings> GetSettings(UserId id, CancellationToken ct);
+
+    [ReadEntity("userPreferences")]
+    Task<UserPreferences> GetPreferences(UserId id, CancellationToken ct);
+
+    [WriteEntity("user")]
+    [WriteEntity("userSettings")]
+    [WriteEntity("userPreferences")]
+    Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct);
 }
 ```
 
-When the use case changes Alice, Sluice evicts any cached entry that read `entity:user:alice`, `entity:userSettings:alice`, or `entity:userPreferences:alice`.
+### What the generator emits
 
-## Concepts
+```csharp
+// UserStoreResources.g.cs — same as hand-written UserResources.
+public static class UserStoreResources
+{
+    public static readonly EntityResource<UserId> User = new("user");
+    public static readonly EntityResource<UserId> Settings = new("userSettings");
+    public static readonly EntityResource<UserId> Preferences = new("userPreferences");
+}
 
-### Resource Addresses
+// UserStoreSluice.g.cs — same as hand-written UserSluice.
+public sealed class UserStoreSluice(ISluice sluice, IUserStore store)
+{
+    public readonly TrackedRead<UserId, User> User =
+        UserStoreResources.User.Read(store.GetUser);
 
-A `ResourceAddress` is the unit of dependency tracking.
+    public readonly TrackedRead<UserId, UserSettings> Settings =
+        UserStoreResources.Settings.Read(store.GetSettings);
 
-It has three parts:
+    public readonly TrackedRead<UserId, UserPreferences> Preferences =
+        UserStoreResources.Preferences.Read(store.GetPreferences);
 
-- `ResourceKind`: `Entity`, `Collection`, or `External`
-- `Name`: the resource name, such as `product` or `orders.byCustomer`
-- `Key`: the specific resource key
+    private readonly TrackedWrite<UserId> _updateUser = new(
+        sluice,
+        UserStoreResources.User.For,
+        UserStoreResources.Settings.For,
+        UserStoreResources.Preferences.For);
 
-The string form is:
+    // Generated write method mirrors the store signature.
+    // The work delegate (store call) is hidden inside.
+    public Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct) =>
+        _updateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct);
+}
+```
+
+Queries are still hand-written — the generator cannot compose projections:
+
+```csharp
+public sealed class UserQueries(UserStoreSluice users)
+{
+    public readonly CachedQuery<UserId, UserProfile> Profile =
+        new("user.profile", id => id.Value, async (id, scope) =>
+        {
+            var u = await users.User.Get(id, scope);
+            var s = await users.Settings.Get(id, scope);
+            var p = await users.Preferences.Get(id, scope);
+            return new UserProfile(
+                id, u.Name, u.Email, s.DarkMode, s.Language, p.Theme);
+        });
+}
+```
+
+### Call site
+
+```csharp
+var sluice = new SluiceKernel(new InMemoryCacheStore());
+var store  = new InMemoryUserStore();
+var users  = new UserStoreSluice(sluice, store);     // generated
+var queries = new UserQueries(users);                 // hand-written
+
+await sluice.Get(queries.Profile, new UserId("alice"), ct);     // miss
+await sluice.Get(queries.Profile, new UserId("alice"), ct);     // hit
+
+// Generated write: mirrors store signature, hides the work delegate.
+await users.UpdateUser(new UserId("alice"), new("Alice 2", true, "dark"), ct);
+
+await sluice.Get(queries.Profile, new UserId("alice"), ct);     // miss, fresh
+```
+
+---
+
+## Call site comparison
+
+| Operation | Tier 0 (no Sluice) | Tier 1 (hand-written) | Tier 2 (codegen) |
+|---|---|---|---|
+| **Read** | `store.GetUser(id, ct)` | `users.User.Get(id, scope)` | `users.User.Get(id, scope)` |
+| **Query** | `svc.GetProfile(id, ct)` | `sluice.Get(queries.Profile, id, ct)` | `sluice.Get(queries.Profile, id, ct)` |
+| **Write** | `store.UpdateUser(id, input, ct)` | `users.UpdateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct)` | `users.UpdateUser(id, input, ct)` |
+
+Reads and queries are identical between Tier 1 and Tier 2. Writes differ: hand-written
+exposes `.Write(key, work, ct)` (you supply the store call), codegen exposes a method
+that mirrors the store signature (the store call is generated for you).
+
+---
+
+## ResultKey (codegen)
+
+Result-derived invalidation is easier in codegen. The write returns the created entity;
+`ResultKey` derives its address from the return value.
+
+```csharp
+[WriteEntity("widget", ResultKey = nameof(Widget.Id))]
+Task<Widget> CreateWidget(WidgetId id, WidgetInput input, CancellationToken ct);
+```
+
+The generator validates `ResultKey` at compile time — wrong property name, non-
+`IResourceKey` type, or `Task` instead of `Task<T>` all produce `SLUICE001` diagnostics.
+
+---
+
+## Resource Addresses
+
+A `ResourceAddress` is the unit of dependency tracking. It has three parts:
+
+- `ResourceKind`: `Entity` or `Collection`
+- `Name`: the resource name (e.g. `user`, `orders.byCustomer`)
+- `Key`: the specific key (e.g. `alice`, `customer-123`)
 
 ```text
 entity:user:alice
 entity:userSettings:alice
-entity:userPreferences:alice
 collection:orders.byCustomer:customer-123
-external:stripe:price-list
 ```
 
-Resource keys implement `IResourceKey`, which exposes `ResourceKey` — a string that uniquely identifies the key within its resource type. `EntityResource<TKey>.For(key)` and `CollectionResource<TKey>.For(key)` use `key.ResourceKey` as the address key. `ResourceKey` must be stable (same value across process restarts), culture-invariant, and unique within the resource.
-
-### Queries
-
-`Query<TKey, TValue>` defines a cached operation.
-
-- The **name** (first arg) is used in cache keys and the dependency graph.
-- The **key selector** (second arg) builds the cache key shape. Sluice serializes it with `System.Text.Json`.
-- The **compute body** (third arg) receives an `IReadScope`.
-- Optional `version` and `ttl` parameters control cache invalidation and entry expiry.
-
-`TrackedRead<TKey, TValue>` is the recommended way to read inside a compute body. It bundles a resource address with its store delegate — `.Get(key, scope)` records the dependency and runs the store call. The cancellation token from `IReadScope` is passed to the store delegate internally; there's no `ct` parameter at the call site.
-
-For custom tracking (computed addresses, conditional reads), `read.Track(...)` is available directly on `IReadScope` as an escape hatch.
-
-Queries are registered lazily when first passed to `SluiceKernel.Get`. That means `Describe()` is empty until a query has been executed at least once.
-
-### Writes
-
-The recommended path is `TrackedWrite<TKey>` — a field on your `<Domain>Sluice` class that captures `ISluice` and the resource address delegates. The use case calls `.Write(key, work, ct)`, which resolves the key into addresses, builds a `WriteEffect` internally, and calls `sluice.Apply`:
+`EntityResource<TKey>.For(key)` and `CollectionResource<TKey>.For(key)` produce addresses.
+`Wildcard()` produces an address that matches all keys of a resource (for bulk invalidation):
 
 ```csharp
-// TrackedWrite field — declared in UserSluice.Register.
-var updateUser = new TrackedWrite<UserId>(
-    sluice,
-    UserResources.User.For,
-    UserResources.Settings.For,
-    UserResources.Preferences.For);
-
-// Call site — the use case passes the key and the store call.
-// TrackedWrite handles the WriteEffect. One line.
-public sealed class UpdateUserUseCase(UserSluice users, IUserStore store)
-{
-    public Task Execute(UserId id, UpdateUserInput input, CancellationToken ct) =>
-        users.UpdateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct);
-}
+// Invalidate every cached entry that read any user entity.
+await sluice.Invalidate(
+    new WriteEffect(UserResources.User.Wildcard()),
+    ct);
 ```
 
-For writes without a `TrackedWrite` field, use `sluice.Apply` directly with a `WriteEffect`:
+---
+
+## Escape Hatches
+
+For one-off writes without a `TrackedWrite` field:
 
 ```csharp
-// The WriteEffect lists every resource address the write changed.
-// Sluice runs the work first, then evicts cached entries whose tracked reads
-// intersect any of these addresses.
+// Run the work, then invalidate the declared addresses.
 await sluice.Apply(
     ct => store.UpdateUser(id, input, ct),
     new WriteEffect(
         UserResources.User.For(id),
-        UserResources.Settings.For(id),
-        UserResources.Preferences.For(id)),
+        UserResources.Settings.For(id)),
+    ct);
+
+// Or if the work already committed — just invalidate.
+await sluice.Invalidate(
+    new WriteEffect(UserResources.User.For(id)),
     ct);
 ```
 
-For result-derived changed addresses — the address depends on what the write returned (e.g. a database-generated ID), use `WriteEffect<T>`:
+For result-derived addresses (e.g. a database-generated ID):
 
 ```csharp
-// WriteEffect<T> takes static addresses as constructor params,
-// then .ChangesResult() adds result-derived resolvers that run after the write completes.
-var effect = new WriteEffect<Order>(OrderResources.OrdersByCustomer.For(customerId))
-    .ChangesResult(order => OrderResources.Order.For(order.Id));
-
-// The generic Apply<T> returns the write's result so the caller can use it.
 var order = await sluice.Apply(
     ct => store.CreateOrder(customerId, input, ct),
-    effect,
+    new WriteEffect<Order>(OrderResources.OrdersByCustomer.For(customerId))
+        .ChangesResult(order => OrderResources.Order.For(order.Id)),
     ct);
 ```
 
-Reads done during writes are not tracked. If a write needs existing state to declare the correct changed addresses, read it from the store directly before calling `Apply` or inside the work delegate.
-
-### Wildcards
-
-Entity and collection resources support wildcard addresses — useful when a write affects all instances of a resource at once (e.g. a bulk import or schema migration):
+For custom tracking inside a compute body (computed addresses, conditional reads):
 
 ```csharp
-// A wildcard address has "*" as the key segment.
-// It matches any cached entry that read the same resource kind and name,
-// regardless of the specific key value.
-UserResources.User.Wildcard()        // entity:user:*
-UserResources.Settings.Wildcard()    // entity:userSettings:*
-UserResources.Preferences.Wildcard() // entity:userPreferences:*
-
-// Use in a WriteEffect for bulk invalidation:
-new WriteEffect(UserResources.User.Wildcard())
+var query = new CachedQuery<UserId, User>("user.byId", id => id.Value,
+    async (id, scope) =>
+    {
+        // Manual tracking instead of TrackedRead.
+        return await scope.Track(
+            new ResourceAddress(ResourceKind.Entity, "user", id.ResourceKey),
+            ct => store.GetUser(id, ct));
+    });
 ```
 
-A wildcard changed address invalidates all cached entries that read the same resource kind and name, regardless of key.
+---
 
 ## Observability
 
-`SluiceKernel` exposes the registry inspection helpers:
-
 ```csharp
-// Text snapshot of the runtime dependency graph — entries, their tracked reads,
-// and which addresses invalidate which entries. Useful for debugging.
-var graph = sluice.DumpGraph();
+// Text snapshot of the runtime dependency graph.
+var graph = await sluice.DumpGraphAsync(ct);
 
-// Static metadata for lazily registered operations — name, input type, output type.
-// Queries appear here after their first Get call.
+// Static metadata for registered operations.
 var manifest = sluice.Describe();
 ```
 
-`DumpGraph()` returns a text snapshot of the runtime state. Example output after reading the user query for Alice and profile queries for Alice and Bob:
+Example `DumpGraphAsync` output:
 
 ```text
 OPERATIONS:
-  user.byId:v1:"alice"
-    reads:
-      entity:user:alice
-    cached: 2026-07-04T13:36:52+00:00
-
   user.profile:v1:"alice"
     reads:
       entity:user:alice
       entity:userSettings:alice
       entity:userPreferences:alice
-    cached: 2026-07-04T13:36:52+00:00
-
-  user.profile:v1:"bob"
-    reads:
-      entity:user:bob
-      entity:userSettings:bob
-      entity:userPreferences:bob
-    cached: 2026-07-04T13:36:52+00:00
+    cached: 2026-07-06T10:20:01+00:00
 
 RESOURCE ADDRESSES:
   entity:user:alice
     invalidates:
-      user.byId:v1:"alice"
       user.profile:v1:"alice"
-
   entity:userSettings:alice
     invalidates:
       user.profile:v1:"alice"
-
-  entity:userPreferences:alice
-    invalidates:
-      user.profile:v1:"alice"
-
-  entity:user:bob
-    invalidates:
-      user.profile:v1:"bob"
-
-  entity:userSettings:bob
-    invalidates:
-      user.profile:v1:"bob"
-
-  entity:userPreferences:bob
-    invalidates:
-      user.profile:v1:"bob"
 ```
 
-The graph reads top-to-bottom: each cached entry lists the resource addresses it tracked during computation, and each resource address lists the entries it would invalidate. You can see at a glance that `user.profile:v1:"alice"` depends on three backing resources, while `user.byId:v1:"alice"` only depends on the user row.
+Each cached entry lists the resources it tracked. Each resource address lists the entries
+it would invalidate.
 
-`Describe()` returns a `SystemManifest` containing registered operation metadata:
+---
 
-```text
-Operations:
-  user.byId       UserId → User          (delegate-backed query)
-  user.profile    UserId → UserProfile   (delegate-backed query)
-```
+## Codegen Attributes
 
-Because overlay queries are lazily registered, `Describe()` only includes queries that have been executed through `Get`.
+| Attribute | Emits |
+|---|---|
+| `[Sluice]` on interface | `{Name}Resources` + `{Name}Sluice` classes |
+| `[ReadEntity("name")]` | `EntityResource<TKey>` field + `TrackedRead` |
+| `[ReadCollection("name", "byKey")]` | `CollectionResource<TKey>` field + `TrackedRead` |
+| `[WriteEntity("name")]` | Address in generated `TrackedWrite` |
+| `[WriteCollection("name", "byKey")]` | Address in generated `TrackedWrite` |
+| `ResultKey = nameof(X.Id)` (on write attrs) | Result-derived address resolver in `TrackedWrite<TKey, TResult>` |
+
+Resources are canonicalised by name. `[ReadEntity("user")]` and `[WriteEntity("user")]`
+produce a single `User` field — not duplicates.
+
+Generated naming: strip the `I` prefix from the interface, append `Sluice`.
+`IUserStore` → `UserStoreSluice`. Override with `[Sluice(Name = "UserSluice")]`.
+
+---
 
 ## Example
 
-Run the user profile example:
-
 ```bash
-dotnet run --project examples/user-profile/SluiceExample.csproj
+dotnet run --project examples/user-profile
 ```
-
-The example demonstrates:
-
-- first read as a cache miss
-- repeated read as a cache hit
-- a composite query reading three resources
-- graph output via `DumpGraph()`
-- use-case invalidation: one write changes multiple backing resources
 
 Key files:
 
 - `examples/user-profile/Domain.cs` — IDs, DTOs, store port, in-memory store
-- `examples/user-profile/UserApi.cs` — resources, UserSluice (reads, queries, writes), use case
+- `examples/user-profile/UserApi.cs` — resources, UserSluice, UserQueries, use case
 - `examples/user-profile/Program.cs` — runnable walkthrough
 
 ## Build And Test
 
 ```bash
 dotnet build Sluice.sln
-dotnet test Sluice.sln --no-build
+dotnet test Sluice.sln
 ```
 
-Or with Task:
+## API Surface
 
-```bash
-task build
-task test
-```
+**App-facing:**
 
-## Current API Surface
+- `SluiceKernel`, `ISluice`
+- `CachedQuery<TKey, TValue>` — cached operation definition
+- `TrackedRead<TKey, TValue>` — resource address + store delegate
+- `TrackedWrite<TKey>`, `TrackedWrite<TKey, TResult>` — write + invalidation
+- `IReadScope` — dependency tracking context inside a compute body
+- `EntityResource<TKey>`, `CollectionResource<TKey>` — resource definitions
+- `ResourceAddress`, `IResourceKey`, `ResourceKind`
+- `WriteEffect`, `WriteEffect<T>` — escape hatch
+- `[Sluice]`, `[ReadEntity]`, `[ReadCollection]`, `[WriteEntity]`, `[WriteCollection]`
 
-Primary app-facing types:
+**Kernel (tested directly, lower-level):**
 
-- `SluiceKernel`
-- `ISluice`
-- `Query<TKey, TValue>`
-- `TrackedRead<TKey, TValue>`
-- `TrackedWrite<TKey>`
-- `IReadScope`
-- `WriteEffect`
-- `WriteEffect<T>`
-- `EntityResource<TKey>`
-- `CollectionResource<TKey>`
-- `ResourceAddress`
-- `IResourceKey`
+- `CachedOperation<TKey, TValue>`, `OperationRegistry`, `OperationContext`
+- `ICacheStore`, `InMemoryCacheStore`
+- `IGraphStore`, `InMemoryGraphStore`
 
-Kernel types still exist and are tested directly:
+**Redis backing (separate package):**
 
-- `CachedOperation<TKey, TValue>`
-- `OperationRegistry`
-- `OperationContext`
-- `ChangeContext`
-- `TrackedResource`- `ICacheStore`
-- `InMemoryCacheStore`
-
-The overlay is the intended application API. The kernel remains useful for lower-level testing and future integrations.
+- `RedisCacheStore`, `RedisGraphStore` (in `src/Sluice.Redis/`)
 
 ## Limitations
 
-- Invalidation only knows about reads that go through `TrackedRead.Get` or `read.Track`.
-- Writes must declare every resource address they changed. Missing write effects leave stale cached entries.
-- If a write succeeds and the process crashes before invalidation completes, stale cache entries can remain.
-- The in-memory cache store is for tests/examples, not distributed production caching.
-- The dependency graph is process-local.
+- Invalidation only knows about reads through `TrackedRead.Get` or `scope.Track`.
+- Writes must declare every resource address they changed. Missing addresses leave stale entries.
+- If a write succeeds and the process crashes before invalidation, stale entries remain until TTL or flush.
+- In-memory cache/graph stores are for tests and single-process apps. Redis backing exists for distributed caching but does not yet provide distributed stampede prevention.
+- The dependency graph is process-local. Cross-process invalidation requires Redis backing.
 - Benchmark overhead is dominated by fixed tracking cost for tiny in-memory operations; Sluice is intended for cached operations expensive enough to justify dependency tracking.

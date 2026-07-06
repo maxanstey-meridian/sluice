@@ -3,7 +3,8 @@ using SluiceExample;
 
 var store = new InMemoryUserStore();
 var sluice = new SluiceKernel(new InMemoryCacheStore());
-var users = UserSluice.Register(sluice, store);
+var users = new UserSluice(sluice, store);
+var queries = new UserQueries(users);
 var updateUser = new UpdateUserUseCase(users, store);
 
 var alice = new UserId("alice");
@@ -14,20 +15,20 @@ Console.WriteLine();
 
 // --- Simple query: cache miss then hit ---
 Console.WriteLine("1. Get user Alice (cache miss)");
-var user1 = await sluice.Get(users.UserById, alice, CancellationToken.None);
+var user1 = await sluice.Get(queries.UserById, alice, CancellationToken.None);
 Console.WriteLine($"   {user1.Name} <{user1.Email}>");
 Console.WriteLine($"   Store calls: GetUser={store.GetUserCallCount}");
 Console.WriteLine();
 
 Console.WriteLine("2. Get user Alice again (cache hit)");
-var user2 = await sluice.Get(users.UserById, alice, CancellationToken.None);
+var user2 = await sluice.Get(queries.UserById, alice, CancellationToken.None);
 Console.WriteLine($"   {user2.Name} <{user2.Email}>");
 Console.WriteLine($"   Store calls: GetUser={store.GetUserCallCount} (unchanged)");
 Console.WriteLine();
 
 // --- Composite query: reads user + settings + preferences ---
 Console.WriteLine("3. Get profile for Alice (cache miss, reads user + settings + preferences)");
-var profile1 = await sluice.Get(users.Profile, alice, CancellationToken.None);
+var profile1 = await sluice.Get(queries.Profile, alice, CancellationToken.None);
 Console.WriteLine(
     $"   {profile1.Name}, darkMode={profile1.DarkMode}, lang={profile1.Language}, theme={profile1.Theme}"
 );
@@ -37,7 +38,7 @@ Console.WriteLine(
 Console.WriteLine();
 
 Console.WriteLine("4. Get profile for Bob (different key, cache miss)");
-var profile2 = await sluice.Get(users.Profile, bob, CancellationToken.None);
+var profile2 = await sluice.Get(queries.Profile, bob, CancellationToken.None);
 Console.WriteLine(
     $"   {profile2.Name}, darkMode={profile2.DarkMode}, lang={profile2.Language}, theme={profile2.Theme}"
 );
@@ -58,14 +59,14 @@ await updateUser.Execute(
 Console.WriteLine();
 
 Console.WriteLine("7. Get profile for Alice (cache miss, one dependency changed)");
-var profile3 = await sluice.Get(users.Profile, alice, CancellationToken.None);
+var profile3 = await sluice.Get(queries.Profile, alice, CancellationToken.None);
 Console.WriteLine(
     $"   {profile3.Name}, darkMode={profile3.DarkMode}, lang={profile3.Language}, theme={profile3.Theme}"
 );
 Console.WriteLine();
 
 Console.WriteLine("8. Get user for Alice (cache miss, user entity changed)");
-var user3 = await sluice.Get(users.UserById, alice, CancellationToken.None);
+var user3 = await sluice.Get(queries.UserById, alice, CancellationToken.None);
 Console.WriteLine($"   {user3.Name} <{user3.Email}>");
 Console.WriteLine(
     $"   Store calls: GetUser={store.GetUserCallCount} (incremented because entity:user:alice was invalidated)"
