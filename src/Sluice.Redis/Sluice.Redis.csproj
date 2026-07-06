@@ -4,6 +4,7 @@
     </PropertyGroup>
     <ItemGroup>
         <PackageReference Include="StackExchange.Redis" Version="2.*" />
+        <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.*" />
     </ItemGroup>
     <ItemGroup>
         <ProjectReference Include="..\Sluice\Sluice.csproj" />
