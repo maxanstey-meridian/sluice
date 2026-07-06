@@ -1,17 +1,24 @@
 using FluentAssertions;
 using StackExchange.Redis;
-using Testcontainers.Redis;
+using Xunit;
 
 namespace Sluice.Redis.Tests;
 
+[Collection(RedisTestCollection.Name)]
 public sealed class RedisStampedeTests
 {
+    private readonly RedisFixture _fixture;
+
+    public RedisStampedeTests(RedisFixture fixture)
+    {
+        _fixture = fixture;
+        _fixture.FlushDatabase();
+    }
+
     [RequireDockerFact]
     public async Task Stampede_CrossRegistry_DeduplicatesViaRedis()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
 
         var cacheStoreA = new RedisCacheStore(redis);
         var graphStoreA = new RedisGraphStore(redis);
@@ -67,9 +74,7 @@ public sealed class RedisStampedeTests
     [RequireDockerFact]
     public async Task Stampede_FollowerPollsCacheAndReturns()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
 
         // Registry A — leader
         var cacheStoreA = new RedisCacheStore(redis);
@@ -132,9 +137,7 @@ public sealed class RedisStampedeTests
     [RequireDockerFact]
     public async Task Stampede_WaitTimeout_ComputesWithoutLease()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
         var db = redis.GetDatabase();
 
         var entryKey = "wait-timeout-fallback:v1:wait-timeout-test";

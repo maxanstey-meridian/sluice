@@ -27,24 +27,5 @@ public sealed class RequireDockerFact : FactAttribute
             Skip = "Docker is not available";
             return;
         }
-
-        var pull = new ProcessStartInfo("docker", "pull redis:7")
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        try
-        {
-            var p = Process.Start(pull);
-            p?.WaitForExit(30000);
-            if (p is null || p.ExitCode != 0)
-            {
-                Skip = "Docker is not available (image pull failed)";
-            }
-        }
-        catch
-        {
-            Skip = "Docker is not available (image pull failed)";
-        }
     }
 }

@@ -1,17 +1,23 @@
 using FluentAssertions;
-using StackExchange.Redis;
-using Testcontainers.Redis;
+using Xunit;
 
 namespace Sluice.Redis.Tests;
 
+[Collection(RedisTestCollection.Name)]
 public sealed class RedisIntegrationTests
 {
+    private readonly RedisFixture _fixture;
+
+    public RedisIntegrationTests(RedisFixture fixture)
+    {
+        _fixture = fixture;
+        _fixture.FlushDatabase();
+    }
+
     [RequireDockerFact]
     public async Task CacheMiss_ComputesAndStoresInRedis()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
         var registry = new OperationRegistry(cacheStore, graphStore);
@@ -29,9 +35,7 @@ public sealed class RedisIntegrationTests
     [RequireDockerFact]
     public async Task CacheHit_ReadsFromRedis()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
         var registry = new OperationRegistry(cacheStore, graphStore);
@@ -53,9 +57,7 @@ public sealed class RedisIntegrationTests
     [RequireDockerFact]
     public async Task Write_InvalidatesCacheEntry()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
         var registry = new OperationRegistry(cacheStore, graphStore);
@@ -79,9 +81,7 @@ public sealed class RedisIntegrationTests
     [RequireDockerFact]
     public async Task Wildcard_Invalidation_Works()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
         var registry = new OperationRegistry(cacheStore, graphStore);
@@ -111,9 +111,7 @@ public sealed class RedisIntegrationTests
     [RequireDockerFact]
     public async Task Ttl_Expiry_Evicts()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
         var registry = new OperationRegistry(cacheStore, graphStore);
@@ -133,9 +131,7 @@ public sealed class RedisIntegrationTests
     [RequireDockerFact]
     public async Task FlushAllAsync_ClearsBothStores()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
         var registry = new OperationRegistry(cacheStore, graphStore);
@@ -171,9 +167,7 @@ public sealed class RedisIntegrationTests
     [RequireDockerFact]
     public async Task Dto_RoundTrips_ThroughRedis()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
         var registry = new OperationRegistry(cacheStore, graphStore);

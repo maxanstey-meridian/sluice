@@ -1,17 +1,23 @@
 using FluentAssertions;
-using StackExchange.Redis;
-using Testcontainers.Redis;
+using Xunit;
 
 namespace Sluice.Redis.Tests;
 
+[Collection(RedisTestCollection.Name)]
 public sealed class RedisGraphSweeperTests
 {
+    private readonly RedisFixture _fixture;
+
+    public RedisGraphSweeperTests(RedisFixture fixture)
+    {
+        _fixture = fixture;
+        _fixture.FlushDatabase();
+    }
+
     [RequireDockerFact]
     public async Task Sweep_Removes_Orphaned_Edges()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
 
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
@@ -48,9 +54,7 @@ public sealed class RedisGraphSweeperTests
     [RequireDockerFact]
     public async Task Sweep_Preserves_Live_Entries()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
 
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
@@ -77,9 +81,7 @@ public sealed class RedisGraphSweeperTests
     [RequireDockerFact]
     public async Task Sweep_On_Empty_Graph_Returns_Zero()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
 
         var graphStore = new RedisGraphStore(redis);
         var sweeper = new RedisGraphSweeper(redis, graphStore);
@@ -91,9 +93,7 @@ public sealed class RedisGraphSweeperTests
     [RequireDockerFact]
     public async Task Sweep_Removes_Only_Orphaned_Edges()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
 
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
@@ -139,9 +139,7 @@ public sealed class RedisGraphSweeperTests
     [RequireDockerFact]
     public async Task Sweep_CleansUp_Fwd_And_Ts_Keys()
     {
-        await using var container = new RedisBuilder("redis:7").Build();
-        await container.StartAsync();
-        var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
+        var redis = _fixture.Redis;
 
         var cacheStore = new RedisCacheStore(redis);
         var graphStore = new RedisGraphStore(redis);
