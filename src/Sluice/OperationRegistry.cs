@@ -12,6 +12,11 @@ public sealed class OperationRegistry(
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly ConcurrentBag<IOperation> _operationMetadata = [];
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _inFlight = new();
+    private long _writeEpoch;
+    private readonly ConcurrentQueue<InvalidationRecord> _recentInvalidations = new();
+    private const int MaxRecentInvalidations = 256;
+
+    private sealed record InvalidationRecord(long Epoch, IReadOnlyList<ResourceAddress> Addresses);
 
     public OperationRegistry Register<TKey, TValue>(CachedOperation<TKey, TValue> operation)
     {
@@ -57,6 +62,8 @@ public sealed class OperationRegistry(
                 }
             }
 
+            var epochBefore = Interlocked.Read(ref _writeEpoch);
+
             await _graphStore.ClearEntryEdges(entryKey, ct);
 
             var ctx = new OperationContext(_clock, ct);
@@ -64,11 +71,57 @@ public sealed class OperationRegistry(
 
             var now = _clock.GetUtcNow();
             DateTimeOffset? entryExpiresAt = operation.Ttl is { } ttl ? now + ttl : null;
-            var entry = new CacheEntry<TValue>(value, [.. ctx.ObservedReads], now, entryExpiresAt);
+            var entry = new CacheEntry<TValue>(
+                value,
+                [.. ctx.ObservedReads],
+                now,
+                entryExpiresAt,
+                epochBefore
+            );
 
             await cacheStore.SetAsync(entryKey, entry, ct);
 
             await _graphStore.RecordEntry(entryKey, ctx.ObservedReads, now, ct);
+
+            var snapshot = _recentInvalidations.ToArray();
+            var epochAfter = Interlocked.Read(ref _writeEpoch);
+
+            if (epochAfter <= epochBefore)
+            {
+                return value;
+            }
+
+            var shouldInvalidate = false;
+            if (epochAfter - epochBefore >= MaxRecentInvalidations)
+            {
+                shouldInvalidate = true;
+            }
+            else
+            {
+                foreach (var record in snapshot)
+                {
+                    if (record.Epoch <= epochBefore)
+                    {
+                        continue;
+                    }
+
+                    if (!record.Addresses.Any(changed => Overlaps(changed, ctx.ObservedReads)))
+                    {
+                        continue;
+                    }
+
+                    shouldInvalidate = true;
+                    break;
+                }
+            }
+
+            if (!shouldInvalidate)
+            {
+                return value;
+            }
+
+            await cacheStore.RemoveAsync(entryKey, ct);
+            await _graphStore.ClearEntryEdges(entryKey, ct);
 
             return value;
         }
@@ -105,6 +158,13 @@ public sealed class OperationRegistry(
         CancellationToken ct
     )
     {
+        var epoch = Interlocked.Increment(ref _writeEpoch);
+        _recentInvalidations.Enqueue(new InvalidationRecord(epoch, changedAddresses));
+        while (_recentInvalidations.Count > MaxRecentInvalidations)
+        {
+            _recentInvalidations.TryDequeue(out _);
+        }
+
         var affectedEntryKeys = await _graphStore.FindAffectedEntries(changedAddresses, ct);
 
         foreach (var entryKey in affectedEntryKeys)
@@ -112,6 +172,29 @@ public sealed class OperationRegistry(
             await cacheStore.RemoveAsync(entryKey, ct);
             await _graphStore.ClearEntryEdges(entryKey, ct);
         }
+    }
+
+    private static bool Overlaps(
+        ResourceAddress changedAddress,
+        IReadOnlyList<ResourceAddress> observedReads
+    )
+    {
+        foreach (var observed in observedReads)
+        {
+            if (changedAddress == observed)
+            {
+                return true;
+            }
+            if (
+                changedAddress.Key == "*"
+                && changedAddress.Kind == observed.Kind
+                && changedAddress.Name == observed.Name
+            )
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     public Task<string> DumpGraphAsync(CancellationToken ct) => _graphStore.DumpGraphAsync(ct);

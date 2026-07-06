@@ -267,6 +267,264 @@ public sealed class StampedeTests
         freshResult.Score.Should().Be(20);
     }
 
+    [Fact]
+    public async Task LostInvalidation_WriteDuringCompute_SelfInvalidates()
+    {
+        var store = new FakeStore();
+        var gatedStore = new GatedCustomerStore(store);
+        var queries = new OverlayQueries(gatedStore);
+        var cacheStore = new InMemoryCacheStore();
+        var registry = new OperationRegistry(cacheStore).Register(queries.CustomerScore.Operation);
+
+        var customerId = new CustomerId("A");
+
+        await registry.ExecuteAsync(
+            queries.CustomerScore.Operation,
+            customerId,
+            CancellationToken.None
+        );
+        store.GetCustomerCallCount.Should().Be(1);
+        store.GetOrdersByCustomerCallCount.Should().Be(1);
+
+        var entryKey = queries.CustomerScore.Operation.BuildEntryKey(customerId);
+        await cacheStore.RemoveAsync(entryKey, CancellationToken.None);
+
+        gatedStore.ArmGate();
+
+        var read = Task.Run(async () =>
+            await registry.ExecuteAsync(
+                queries.CustomerScore.Operation,
+                customerId,
+                CancellationToken.None
+            )
+        );
+
+        await gatedStore.GetCustomerEntered;
+
+        await registry.ApplyAsync(
+            ctx =>
+                ctx.Apply(
+                    () => Task.CompletedTask,
+                    new WriteEffect(OrderResources.OrdersByCustomer.For(customerId))
+                ),
+            CancellationToken.None
+        );
+
+        gatedStore.ReleaseGate();
+
+        var result = await read;
+        result.Score.Should().Be(20);
+
+        var nextResult = await registry.ExecuteAsync(
+            queries.CustomerScore.Operation,
+            customerId,
+            CancellationToken.None
+        );
+
+        nextResult.Score.Should().Be(20);
+        store.GetCustomerCallCount.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task LostInvalidation_UnrelatedWrite_DoesNotSelfInvalidate()
+    {
+        var store = new FakeStore();
+        var gatedStore = new GatedCustomerStore(store);
+        var queries = new OverlayQueries(gatedStore);
+        var cacheStore = new InMemoryCacheStore();
+        var registry = new OperationRegistry(cacheStore).Register(queries.CustomerScore.Operation);
+
+        var customerA = new CustomerId("A");
+        var customerB = new CustomerId("B");
+
+        await registry.ExecuteAsync(
+            queries.CustomerScore.Operation,
+            customerA,
+            CancellationToken.None
+        );
+        store.GetCustomerCallCount.Should().Be(1);
+
+        var entryKey = queries.CustomerScore.Operation.BuildEntryKey(customerA);
+        await cacheStore.RemoveAsync(entryKey, CancellationToken.None);
+
+        gatedStore.ArmGate();
+
+        var read = Task.Run(async () =>
+            await registry.ExecuteAsync(
+                queries.CustomerScore.Operation,
+                customerA,
+                CancellationToken.None
+            )
+        );
+
+        await gatedStore.GetCustomerEntered;
+
+        await registry.ApplyAsync(
+            ctx =>
+                ctx.Apply(
+                    () => Task.CompletedTask,
+                    new WriteEffect(OrderResources.OrdersByCustomer.For(customerB))
+                ),
+            CancellationToken.None
+        );
+
+        gatedStore.ReleaseGate();
+
+        var result = await read;
+        result.Score.Should().Be(20);
+
+        var nextResult = await registry.ExecuteAsync(
+            queries.CustomerScore.Operation,
+            customerA,
+            CancellationToken.None
+        );
+
+        nextResult.Score.Should().Be(20);
+        store.GetCustomerCallCount.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task LostInvalidation_BurstExceedsMax_SelfInvalidates()
+    {
+        var store = new FakeStore();
+        var gatedStore = new GatedCustomerStore(store);
+        var queries = new OverlayQueries(gatedStore);
+        var cacheStore = new InMemoryCacheStore();
+        var registry = new OperationRegistry(cacheStore).Register(queries.CustomerScore.Operation);
+
+        var customerId = new CustomerId("A");
+
+        await registry.ExecuteAsync(
+            queries.CustomerScore.Operation,
+            customerId,
+            CancellationToken.None
+        );
+        store.GetCustomerCallCount.Should().Be(1);
+
+        var entryKey = queries.CustomerScore.Operation.BuildEntryKey(customerId);
+        await cacheStore.RemoveAsync(entryKey, CancellationToken.None);
+
+        gatedStore.ArmGate();
+
+        var read = Task.Run(async () =>
+            await registry.ExecuteAsync(
+                queries.CustomerScore.Operation,
+                customerId,
+                CancellationToken.None
+            )
+        );
+
+        await gatedStore.GetCustomerEntered;
+
+        for (int i = 0; i < 300; i++)
+        {
+            var burstId = new CustomerId($"burst-{i}");
+            await registry.ApplyAsync(
+                ctx =>
+                    ctx.Apply(
+                        () => Task.CompletedTask,
+                        new WriteEffect(OrderResources.OrdersByCustomer.For(burstId))
+                    ),
+                CancellationToken.None
+            );
+        }
+
+        gatedStore.ReleaseGate();
+
+        var result = await read;
+        result.Score.Should().Be(20);
+
+        var nextResult = await registry.ExecuteAsync(
+            queries.CustomerScore.Operation,
+            customerId,
+            CancellationToken.None
+        );
+
+        nextResult.Score.Should().Be(20);
+        store.GetCustomerCallCount.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task LostInvalidation_WildcardWriteDuringCompute_SelfInvalidates()
+    {
+        var store = new FakeStore();
+        var gatedStore = new GatedCustomerStore(store);
+        var queries = new OverlayQueries(gatedStore);
+        var cacheStore = new InMemoryCacheStore();
+        var registry = new OperationRegistry(cacheStore).Register(queries.CustomerScore.Operation);
+
+        var customerId = new CustomerId("A");
+
+        var result1 = await registry.ExecuteAsync(
+            queries.CustomerScore.Operation,
+            customerId,
+            CancellationToken.None
+        );
+        result1.Score.Should().Be(20);
+        store.GetCustomerCallCount.Should().Be(1);
+
+        var entryKey = queries.CustomerScore.Operation.BuildEntryKey(customerId);
+        await cacheStore.RemoveAsync(entryKey, CancellationToken.None);
+
+        gatedStore.ArmGate();
+
+        var read = Task.Run(async () =>
+            await registry.ExecuteAsync(
+                queries.CustomerScore.Operation,
+                customerId,
+                CancellationToken.None
+            )
+        );
+
+        await gatedStore.GetCustomerEntered;
+
+        await registry.ApplyAsync(
+            ctx =>
+                ctx.Apply(
+                    () => Task.CompletedTask,
+                    new WriteEffect(CustomerResources.Customer.Wildcard())
+                ),
+            CancellationToken.None
+        );
+
+        gatedStore.ReleaseGate();
+
+        var result = await read;
+        result.Score.Should().Be(20);
+
+        var nextResult = await registry.ExecuteAsync(
+            queries.CustomerScore.Operation,
+            customerId,
+            CancellationToken.None
+        );
+
+        nextResult.Score.Should().Be(20);
+        store.GetCustomerCallCount.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task CacheEntry_Deserializes_OldJson_WithoutWriteEpoch()
+    {
+        var oldJson = """
+            {
+              "Value": {"CustomerId": {"Value":"A"}, "Score":20},
+              "ObservedReads": [
+                {"Kind":1,"Name":"customer","Key":"A"},
+                {"Kind":2,"Name":"orders.byCustomer","Key":"A"}
+              ],
+              "CachedAt": "2026-01-01T00:00:00.0000000Z",
+              "ExpiresAt": "2026-01-01T01:00:00.0000000Z"
+            }
+            """;
+
+        var entry = System.Text.Json.JsonSerializer.Deserialize<CacheEntry<CustomerScore>>(oldJson);
+
+        entry.Should().NotBeNull();
+        entry!.Value.CustomerId.Value.Should().Be("A");
+        entry.Value.Score.Should().Be(20);
+        entry.WriteEpoch.Should().Be(0);
+    }
+
     private sealed class GatedCustomerStore(IStore inner) : IStore
     {
         private TaskCompletionSource<bool>? _getCustomerEntered;
