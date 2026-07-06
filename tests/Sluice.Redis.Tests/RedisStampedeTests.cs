@@ -36,26 +36,23 @@ public sealed class RedisStampedeTests
         var opB = new GatedComputeOp("cross-registry-dedup");
         registryB.Register(opB);
 
-        // Arm gate on A before starting tasks to ensure A enters Compute and blocks
-        var tasks = new List<Task<string>>
-        {
-            Task.Run(async () => await registryA.ExecuteAsync(opA, "key1", CancellationToken.None)),
-            Task.Run(async () => await registryB.ExecuteAsync(opB, "key1", CancellationToken.None)),
-        };
+        var leaderTask = Task.Run(async () =>
+            await registryA.ExecuteAsync(opA, "key1", CancellationToken.None)
+        );
 
-        // Wait for the leader to be blocked in Compute (lease acquired, gate armed)
         await opA.GateEntered;
 
-        // At this point: A has the lease and is blocked. B should be polling or about to compute.
-        // Give B a brief moment to enter its polling path, then check counts.
+        var followerTask = Task.Run(async () =>
+            await registryB.ExecuteAsync(opB, "key1", CancellationToken.None)
+        );
+
         await Task.Delay(100);
         opA.ComputeCount.Should().Be(0, "leader should be blocked on gate before computing");
         opB.ComputeCount.Should().Be(0, "follower should be polling, not computing");
 
-        // Release the gate on registry A so it can compute and write the entry
         opA.ReleaseGate();
 
-        var results = await Task.WhenAll(tasks);
+        var results = await Task.WhenAll(leaderTask, followerTask);
 
         results[0].Should().Be("computed-key1");
         results[1].Should().Be("computed-key1");
@@ -140,9 +137,9 @@ public sealed class RedisStampedeTests
         var redis = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
         var db = redis.GetDatabase();
 
-        // Pre-acquire the Redis lock for the entry key so no one else can
+        var entryKey = "wait-timeout-fallback:v1:wait-timeout-test";
         await db.StringSetAsync(
-            "sluice:lock:wait-timeout-test",
+            $"sluice:lock:{entryKey}",
             "holder-token",
             TimeSpan.FromSeconds(10),
             When.NotExists
@@ -169,8 +166,7 @@ public sealed class RedisStampedeTests
         result.Should().Be("computed-wait-timeout-test");
         op.ComputeCount.Should().Be(1);
 
-        // Clean up the held lock
-        await db.KeyDeleteAsync("sluice:lock:wait-timeout-test");
+        await db.KeyDeleteAsync($"sluice:lock:{entryKey}");
     }
 
     private sealed class GatedComputeOp : CachedOperation<string, string>
@@ -198,16 +194,16 @@ public sealed class RedisStampedeTests
 
         protected override CacheKey Key(string key) => CacheKey.From(key);
 
-        protected override ValueTask<string> Compute(string key, OperationContext ctx)
+        protected override async ValueTask<string> Compute(string key, OperationContext ctx)
         {
             _gateEntered?.TrySetResult(true);
             var release = _gateRelease;
             if (release is not null)
             {
-                release.Task.Wait();
+                await release.Task;
             }
             ComputeCount++;
-            return new ValueTask<string>($"computed-{key}");
+            return $"computed-{key}";
         }
     }
 }
