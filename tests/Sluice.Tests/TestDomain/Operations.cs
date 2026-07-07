@@ -1,7 +1,10 @@
 namespace Sluice.Tests;
 
-internal sealed class CustomerScoreOperation(ITrackedCustomers customers, ITrackedOrders orders)
-    : CachedOperation<CustomerId, CustomerScore>("customer.score")
+internal sealed class CustomerScoreOperation(
+    ITrackedCustomers customers,
+    ITrackedOrders orders,
+    TimeSpan? ttl = null
+) : CachedOperation<CustomerId, CustomerScore>("customer.score", ttl: ttl)
 {
     protected override CacheKey Key(CustomerId id) => CacheKey.From(new { customerId = id.Value });
 

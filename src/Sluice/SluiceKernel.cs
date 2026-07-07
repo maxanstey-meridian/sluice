@@ -7,7 +7,8 @@ public sealed class SluiceKernel(
     IGraphStore? graphStore = null,
     TimeProvider? clock = null,
     IStampedeCoordinator? stampedeCoordinator = null,
-    StampedeOptions? stampedeOptions = null
+    StampedeOptions? stampedeOptions = null,
+    IEventSink? eventSink = null
 ) : ISluice, IDisposable
 {
     private readonly OperationRegistry _registry = new(
@@ -15,7 +16,8 @@ public sealed class SluiceKernel(
         graphStore,
         clock,
         stampedeCoordinator,
-        stampedeOptions
+        stampedeOptions,
+        eventSink
     );
     private readonly ConcurrentDictionary<object, byte> _registeredQueries = new();
 

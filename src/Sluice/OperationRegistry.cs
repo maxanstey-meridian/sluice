@@ -7,7 +7,8 @@ public sealed class OperationRegistry(
     IGraphStore? graphStore = null,
     TimeProvider? clock = null,
     IStampedeCoordinator? stampedeCoordinator = null,
-    StampedeOptions? stampedeOptions = null
+    StampedeOptions? stampedeOptions = null,
+    IEventSink? eventSink = null
 ) : IDisposable
 {
     private readonly IGraphStore _graphStore = graphStore ?? new InMemoryGraphStore();
@@ -15,6 +16,7 @@ public sealed class OperationRegistry(
     private readonly IStampedeCoordinator _stampede =
         stampedeCoordinator ?? new InMemoryStampedeCoordinator();
     private readonly StampedeOptions _stampedeOptions = stampedeOptions ?? new StampedeOptions();
+    private readonly IEventSink _eventSink = eventSink ?? NullEventSink.Instance;
     private readonly ConcurrentBag<IOperation> _operationMetadata = [];
     private long _writeEpoch;
     private readonly ConcurrentQueue<InvalidationRecord> _recentInvalidations = new();
@@ -41,30 +43,73 @@ public sealed class OperationRegistry(
         {
             if (cached.ExpiresAt is { } expiresAt && expiresAt <= _clock.GetUtcNow())
             {
+                _eventSink.EmitSafe(
+                    new SluiceEvent(
+                        _clock.GetUtcNow(),
+                        "expire",
+                        Operation: operation.Name,
+                        EntryKey: entryKey
+                    )
+                );
                 await cacheStore.RemoveAsync(entryKey, ct);
             }
             else
             {
+                _eventSink.EmitSafe(
+                    new SluiceEvent(
+                        _clock.GetUtcNow(),
+                        "hit",
+                        Operation: operation.Name,
+                        EntryKey: entryKey
+                    )
+                );
                 return cached.Value;
             }
         }
+
+        _eventSink.EmitSafe(
+            new SluiceEvent(
+                _clock.GetUtcNow(),
+                "miss",
+                Operation: operation.Name,
+                EntryKey: entryKey
+            )
+        );
 
         var lease = await _stampede.TryAcquireAsync(entryKey, _stampedeOptions.LeaseTtl, ct);
 
         if (lease is null)
         {
+            _eventSink.EmitSafe(
+                new SluiceEvent(_clock.GetUtcNow(), "stampede.follower", EntryKey: entryKey)
+            );
             var polled = await PollForEntry<TValue>(entryKey, ct);
             if (polled is not null)
             {
+                _eventSink.EmitSafe(
+                    new SluiceEvent(
+                        _clock.GetUtcNow(),
+                        "hit",
+                        Operation: operation.Name,
+                        EntryKey: entryKey
+                    )
+                );
                 return polled.Value;
             }
 
             lease = await _stampede.TryAcquireAsync(entryKey, _stampedeOptions.LeaseTtl, ct);
             if (lease is null)
             {
+                _eventSink.EmitSafe(
+                    new SluiceEvent(_clock.GetUtcNow(), "stampede.timeout", EntryKey: entryKey)
+                );
                 return await ComputeAndStoreAsync(operation, entryKey, key, ct);
             }
         }
+
+        _eventSink.EmitSafe(
+            new SluiceEvent(_clock.GetUtcNow(), "stampede.leader", EntryKey: entryKey)
+        );
 
         try
         {
@@ -76,10 +121,26 @@ public sealed class OperationRegistry(
 
             if (rechecked.ExpiresAt is { } expiresAt && expiresAt <= _clock.GetUtcNow())
             {
+                _eventSink.EmitSafe(
+                    new SluiceEvent(
+                        _clock.GetUtcNow(),
+                        "expire",
+                        Operation: operation.Name,
+                        EntryKey: entryKey
+                    )
+                );
                 await cacheStore.RemoveAsync(entryKey, ct);
             }
             else
             {
+                _eventSink.EmitSafe(
+                    new SluiceEvent(
+                        _clock.GetUtcNow(),
+                        "hit",
+                        Operation: operation.Name,
+                        EntryKey: entryKey
+                    )
+                );
                 return rechecked.Value;
             }
 
@@ -105,6 +166,9 @@ public sealed class OperationRegistry(
             {
                 if (entry.ExpiresAt is { } expiresAt && expiresAt <= _clock.GetUtcNow())
                 {
+                    _eventSink.EmitSafe(
+                        new SluiceEvent(_clock.GetUtcNow(), "expire", EntryKey: entryKey)
+                    );
                     await cacheStore.RemoveAsync(entryKey, ct);
                 }
                 else
@@ -127,6 +191,7 @@ public sealed class OperationRegistry(
         CancellationToken ct
     )
     {
+        var startTimestamp = _clock.GetTimestamp();
         var epochBefore = Interlocked.Read(ref _writeEpoch);
 
         await _graphStore.ClearEntryEdges(entryKey, ct);
@@ -160,8 +225,19 @@ public sealed class OperationRegistry(
         var snapshot = _recentInvalidations.ToArray();
         var epochAfter = Interlocked.Read(ref _writeEpoch);
 
+        var elapsedMs = (long)_clock.GetElapsedTime(startTimestamp).TotalMilliseconds;
+
         if (epochAfter <= epochBefore)
         {
+            _eventSink.EmitSafe(
+                new SluiceEvent(
+                    _clock.GetUtcNow(),
+                    "compute",
+                    Operation: operation.Name,
+                    EntryKey: entryKey,
+                    DurationMs: elapsedMs
+                )
+            );
             return value;
         }
 
@@ -191,12 +267,30 @@ public sealed class OperationRegistry(
 
         if (!shouldInvalidate)
         {
+            _eventSink.EmitSafe(
+                new SluiceEvent(
+                    _clock.GetUtcNow(),
+                    "compute",
+                    Operation: operation.Name,
+                    EntryKey: entryKey,
+                    DurationMs: elapsedMs
+                )
+            );
             return value;
         }
 
         await cacheStore.RemoveAsync(entryKey, ct);
         await _graphStore.ClearEntryEdges(entryKey, ct);
 
+        _eventSink.EmitSafe(
+            new SluiceEvent(
+                _clock.GetUtcNow(),
+                "compute",
+                Operation: operation.Name,
+                EntryKey: entryKey,
+                DurationMs: elapsedMs
+            )
+        );
         return value;
     }
 
@@ -220,6 +314,7 @@ public sealed class OperationRegistry(
         await cacheStore.ClearAsync(ct);
         await _graphStore.FlushAsync(ct);
         await _stampede.ClearAsync(ct);
+        _eventSink.EmitSafe(new SluiceEvent(_clock.GetUtcNow(), "flush"));
     }
 
     internal async Task InvalidateAsync(
@@ -240,6 +335,19 @@ public sealed class OperationRegistry(
         {
             await cacheStore.RemoveAsync(entryKey, ct);
             await _graphStore.ClearEntryEdges(entryKey, ct);
+        }
+
+        if (affectedEntryKeys.Count > 0)
+        {
+            var resourceNames = changedAddresses.Select(a => a.Name).Distinct();
+            _eventSink.EmitSafe(
+                new SluiceEvent(
+                    _clock.GetUtcNow(),
+                    "invalidate",
+                    ResourceName: string.Join(", ", resourceNames),
+                    Detail: string.Join(", ", affectedEntryKeys)
+                )
+            );
         }
     }
 

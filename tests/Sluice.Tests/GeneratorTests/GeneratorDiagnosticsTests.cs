@@ -97,7 +97,11 @@ public sealed class GeneratorDiagnosticsTests
         sources.Should().HaveCount(2);
 
         var sluiceSource = sources.First(t => t.FilePath.Contains("CustomWidgetSluice"));
-        sluiceSource.GetText().ToString().Should().Contain("public sealed class CustomWidgetSluice");
+        sluiceSource
+            .GetText()
+            .ToString()
+            .Should()
+            .Contain("public sealed class CustomWidgetSluice");
     }
 
     [Fact]
@@ -127,11 +131,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE002"
-            && d.GetMessage().Contains("UserSluice")
-            && d.GetMessage().Contains("already ends with 'Sluice'")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE002"
+                && d.GetMessage().Contains("UserSluice")
+                && d.GetMessage().Contains("already ends with 'Sluice'")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -204,11 +210,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE003"
-            && d.GetMessage().Contains("GetWidget")
-            && d.GetMessage().Contains("must return Task<T>")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE003"
+                && d.GetMessage().Contains("GetWidget")
+                && d.GetMessage().Contains("must return Task<T>")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -240,11 +248,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE003"
-            && d.GetMessage().Contains("GetWidget")
-            && d.GetMessage().Contains("CancellationToken")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE003"
+                && d.GetMessage().Contains("GetWidget")
+                && d.GetMessage().Contains("CancellationToken")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -276,11 +286,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE003"
-            && d.GetMessage().Contains("UpdateWidget")
-            && d.GetMessage().Contains("CancellationToken")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE003"
+                && d.GetMessage().Contains("UpdateWidget")
+                && d.GetMessage().Contains("CancellationToken")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -312,11 +324,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE003"
-            && d.GetMessage().Contains("GetWidget")
-            && d.GetMessage().Contains("exactly 2 parameters")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE003"
+                && d.GetMessage().Contains("GetWidget")
+                && d.GetMessage().Contains("exactly 2 parameters")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -343,12 +357,14 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE004"
-            && d.GetMessage().Contains("GetWidget")
-            && d.GetMessage().Contains("int")
-            && d.GetMessage().Contains("does not implement IResourceKey")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE004"
+                && d.GetMessage().Contains("GetWidget")
+                && d.GetMessage().Contains("int")
+                && d.GetMessage().Contains("does not implement IResourceKey")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -380,11 +396,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE005"
-            && d.GetMessage().Contains("widget:invalid")
-            && d.GetMessage().Contains(":")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE005"
+                && d.GetMessage().Contains("widget:invalid")
+                && d.GetMessage().Contains(":")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -416,11 +434,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE005"
-            && d.GetMessage().Contains("widget:invalid")
-            && d.GetMessage().Contains(":")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE005"
+                && d.GetMessage().Contains("widget:invalid")
+                && d.GetMessage().Contains(":")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -452,11 +472,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE005"
-            && d.GetMessage().Contains("widgets:invalid.byGroup")
-            && d.GetMessage().Contains(":")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE005"
+                && d.GetMessage().Contains("widgets:invalid.byGroup")
+                && d.GetMessage().Contains(":")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }
@@ -492,11 +514,13 @@ public sealed class GeneratorDiagnosticsTests
             """
         );
 
-        runResult.Diagnostics.Should().Contain(d =>
-            d.Id == "SLUICE006"
-            && d.GetMessage().Contains("UserProfile")
-            && d.GetMessage().Contains("collision")
-        );
+        runResult
+            .Diagnostics.Should()
+            .Contain(d =>
+                d.Id == "SLUICE006"
+                && d.GetMessage().Contains("UserProfile")
+                && d.GetMessage().Contains("collision")
+            );
 
         runResult.Results.Single().GeneratedSources.Should().BeEmpty();
     }

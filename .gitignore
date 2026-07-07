@@ -10,3 +10,4 @@ drafts/
 .build
 bin/
 obj/
+.playwright-mcp

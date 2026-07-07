@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en" x-data="dashboard()" x-init="start()">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sluice Dashboard</title>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+[x-cloak] { display: none !important; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 16px; color: #58a6ff; }
+
+/* filter bar */
+.filter-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.filter-tag { padding: 4px 12px; border-radius: 12px; font-size: 0.8rem; cursor: pointer; background: #21262d; border: 1px solid #30363d; color: #8b949e; user-select: none; transition: background .15s, color .15s; }
+.filter-tag.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+.filter-tag:hover { background: #30363d; }
+
+/* stats bar */
+.stats { display: flex; gap: 20px; margin-bottom: 16px; flex-wrap: wrap; font-size: 0.85rem; color: #8b949e; }
+.stat { display: flex; align-items: center; gap: 4px; }
+.stat-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.stat-dot.hit { background: #3fb950; }
+.stat-dot.miss { background: #d29922; }
+.stat-dot.compute { background: #58a6ff; }
+.stat-dot.invalidate { background: #f85149; }
+.stat-dot.stampede { background: #bc8cff; }
+
+/* activity board */
+.board { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
+.board-group h3 { font-size: 0.9rem; font-weight: 500; color: #8b949e; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .05em; }
+.board-cards { display: flex; flex-wrap: wrap; gap: 8px; }
+.card { padding: 10px 14px; border-radius: 6px; border: 1px solid #30363d; background: #161b22; min-width: 180px; transition: border-color .3s, box-shadow .3s; position: relative; }
+.card.hit { border-color: #3fb950; box-shadow: 0 0 8px rgba(63,185,80,.15); }
+.card.miss { border-color: #d29922; box-shadow: 0 0 8px rgba(210,153,34,.15); }
+.card.compute { border-color: #58a6ff; box-shadow: 0 0 8px rgba(88,166,255,.15); }
+.card.invalidate { border-color: #f85149; box-shadow: 0 0 8px rgba(248,81,73,.15); }
+.card.stampede { border-color: #bc8cff; box-shadow: 0 0 8px rgba(188,140,255,.15); }
+.card-key { font-size: 0.8rem; font-family: 'SF Mono', Monaco, monospace; color: #c9d1d9; margin-bottom: 4px; word-break: break-all; }
+.card-state { font-size: 0.75rem; color: #8b949e; }
+.card-event-counts { display: flex; gap: 8px; margin-top: 4px; font-size: 0.7rem; }
+.card-event-counts span { display: flex; align-items: center; gap: 2px; }
+
+/* trace strip */
+.trace-strip { border-top: 1px solid #21262d; padding-top: 12px; }
+.trace-strip h2 { font-size: 0.9rem; font-weight: 500; color: #8b949e; margin-bottom: 8px; }
+.trace-row { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; font-size: 0.75rem; font-family: 'SF Mono', Monaco, monospace; }
+.trace-label { min-width: 160px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b949e; flex-shrink: 0; }
+.trace-bar { display: flex; gap: 2px; overflow: hidden; height: 14px; align-items: center; }
+.trace-seg { width: 8px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+.trace-seg.hit { background: #3fb950; }
+.trace-seg.miss { background: #d29922; }
+.trace-seg.compute { background: #58a6ff; }
+.trace-seg.invalidate { background: #f85149; }
+.trace-seg.stampede { background: #bc8cff; }
+
+.empty-state { color: #484f58; text-align: center; padding: 40px; font-size: 0.9rem; }
+
+#pulse { width: 10px; height: 10px; border-radius: 50%; background: #3fb950; display: inline-block; margin-left: 8px; transition: background .3s; vertical-align: middle; }
+#pulse.paused { background: #f85149; }
+</style>
+</head>
+<body x-cloak>
+
+<h1>Sluice Dashboard <span id="pulse" :class="{ paused: polling || pollFailed }"></span></h1>
+
+<div class="filter-bar">
+  <template x-for="filter in filters" :key="filter">
+    <span
+      class="filter-tag"
+      :class="{ active: activeFilter === filter }"
+      @click="activeFilter = filter"
+      x-text="filter"
+    ></span>
+  </template>
+</div>
+
+<div class="stats">
+  <template x-for="type in eventTypes" :key="type">
+    <div class="stat">
+      <span class="stat-dot" :class="type"></span>
+      <span x-text="`${type}: ${eventTypeCounts[type] || 0}`"></span>
+    </div>
+  </template>
+</div>
+
+<div class="board">
+  <template x-if="keyOrder.length === 0">
+    <div class="empty-state">Waiting for events...</div>
+  </template>
+
+  <template x-if="keyOrder.length > 0 && groupedKeys.length === 0">
+    <div class="empty-state">No events match filter</div>
+  </template>
+
+  <template x-for="group in groupedKeys" :key="group.domain">
+    <div class="board-group">
+      <h3 x-text="group.domain"></h3>
+      <div class="board-cards">
+        <template x-for="entryKey in group.keys" :key="entryKey">
+          <div class="card" :class="latestEventType(entryKey)">
+            <div class="card-key" x-text="shortKey(entryKey)"></div>
+            <div class="card-state" x-text="latestEventType(entryKey)"></div>
+            <div class="card-event-counts">
+              <template x-for="type in eventTypes" :key="type">
+                <span>
+                  <span class="stat-dot" :class="type"></span>
+                  <span x-text="countByType(entryKey, type)"></span>
+                </span>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+</div>
+
+<div class="trace-strip">
+  <h2>Trace</h2>
+
+  <template x-if="keyOrder.length === 0">
+    <div class="empty-state">No events yet</div>
+  </template>
+
+  <template x-if="keyOrder.length > 0 && traceRows.length === 0">
+    <div class="empty-state">No events to display</div>
+  </template>
+
+  <template x-for="row in traceRows" :key="row.entryKey">
+    <div class="trace-row">
+      <div class="trace-label" :title="row.entryKey" x-text="shortKey(row.entryKey)"></div>
+      <div class="trace-bar">
+        <template x-for="(eventType, index) in row.events" :key="`${row.entryKey}-${index}`">
+          <div class="trace-seg" :class="eventType"></div>
+        </template>
+      </div>
+    </div>
+  </template>
+</div>
+
+<script>
+function dashboard() {
+  const pollInterval = 500;
+  const eventTypes = ['hit', 'miss', 'compute', 'invalidate', 'stampede'];
+
+  return {
+    activeFilter: 'all',
+    eventTypeCounts: {},
+    eventTypes,
+    eventsByKey: {},
+    filters: ['all', ...eventTypes],
+    keyOrder: [],
+    lastSeq: 0,
+    pollFailed: false,
+    polling: false,
+
+    get groupedKeys() {
+      const groups = {};
+
+      for (const entryKey of this.keyOrder) {
+        const type = this.latestEventType(entryKey);
+        if (this.activeFilter !== 'all' && type !== this.activeFilter) continue;
+
+        const domain = this.getDomain(entryKey);
+        groups[domain] ??= [];
+        groups[domain].push(entryKey);
+      }
+
+      return Object.keys(groups)
+        .sort()
+        .map(domain => ({ domain, keys: groups[domain] }));
+    },
+
+    get traceRows() {
+      return this.keyOrder
+        .slice(-10)
+        .map(entryKey => ({
+          entryKey,
+          events: (this.eventsByKey[entryKey] || [])
+            .slice(-100)
+            .map(event => this.baseType(event.type))
+            .filter(type => this.activeFilter === 'all' || type === this.activeFilter),
+        }))
+        .filter(row => row.events.length > 0);
+    },
+
+    start() {
+      this.poll();
+      setInterval(() => this.poll(), pollInterval);
+    },
+
+    async poll() {
+      this.polling = true;
+
+      try {
+        const response = await fetch(`/sluice/events?since=${this.lastSeq}`);
+        const events = await response.json();
+
+        if (events && events.length > 0) this.addEvents(events);
+
+        this.pollFailed = false;
+      } catch {
+        this.pollFailed = true;
+      } finally {
+        this.polling = false;
+      }
+    },
+
+    addEvents(events) {
+      for (const event of events) {
+        if (event.seq > this.lastSeq) this.lastSeq = event.seq;
+
+        const entryKey = event.entryKey || event.operation || 'system';
+        if (!this.eventsByKey[entryKey]) {
+          this.eventsByKey[entryKey] = [];
+          this.keyOrder.push(entryKey);
+        }
+
+        this.eventsByKey[entryKey].push(event);
+
+        const type = this.baseType(event.type);
+        this.eventTypeCounts[type] = (this.eventTypeCounts[type] || 0) + 1;
+      }
+    },
+
+    baseType(type) {
+      return type && type.startsWith('stampede.') ? 'stampede' : type;
+    },
+
+    countByType(entryKey, type) {
+      return (this.eventsByKey[entryKey] || [])
+        .filter(event => this.baseType(event.type) === type)
+        .length;
+    },
+
+    getDomain(entryKey) {
+      if (!entryKey) return 'unknown';
+
+      const versionIndex = entryKey.indexOf(':v');
+      return versionIndex > 0 ? entryKey.substring(0, versionIndex) : 'unknown';
+    },
+
+    latestEventType(entryKey) {
+      const events = this.eventsByKey[entryKey] || [];
+      const latest = events[events.length - 1];
+
+      return latest ? this.baseType(latest.type) : null;
+    },
+
+    shortKey(entryKey) {
+      if (!entryKey) return '-';
+
+      const versionIndex = entryKey.indexOf(':v');
+      if (versionIndex < 0) return entryKey;
+
+      const keyIndex = entryKey.indexOf(':', versionIndex + 2);
+      let keyPart = keyIndex > 0
+        ? entryKey.substring(keyIndex + 1)
+        : entryKey.substring(versionIndex);
+
+      if (keyPart.length > 30) keyPart = `${keyPart.substring(0, 27)}...`;
+      return keyPart;
+    },
+  };
+}
+</script>
+
+</body>
+</html>
