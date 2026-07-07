@@ -103,9 +103,9 @@ public sealed class RedisEpochFenceTests
             CancellationToken.None
         );
 
-        result.Should().BeTrue(
-            "epoch re-read safety should detect overlap even when the record was trimmed"
-        );
+        result
+            .Should()
+            .BeTrue("epoch re-read safety should detect overlap even when the record was trimmed");
     }
 
     [RequireDockerFact]
@@ -161,7 +161,9 @@ public sealed class RedisEpochFenceTests
 
         var entryKey = $"nonoverlap-op:v1:{JsonSerializer.Serialize("key1")}";
         var stored = await cacheStoreA.GetAsync<string>(entryKey, CancellationToken.None);
-        stored.Should().NotBeNull("non-overlapping invalidation should not cause self-invalidation");
+        stored
+            .Should()
+            .NotBeNull("non-overlapping invalidation should not cause self-invalidation");
         stored!.Value.Should().Be("computed-key1");
 
         opA.ComputeCount.Should().Be(1);
@@ -210,9 +212,11 @@ public sealed class RedisEpochFenceTests
 
         var entryKey = $"conservative-op:v1:{JsonSerializer.Serialize("key1")}";
         var stored = await cacheStoreA.GetAsync<string>(entryKey, CancellationToken.None);
-        stored.Should().BeNull(
-            "conservative fallback should self-invalidate after 257 unrelated epoch advances"
-        );
+        stored
+            .Should()
+            .BeNull(
+                "conservative fallback should self-invalidate after 257 unrelated epoch advances"
+            );
 
         opA.ComputeCount.Should().Be(1);
     }
@@ -233,24 +237,28 @@ public sealed class RedisEpochFenceTests
         );
         var computeCount = 0;
 
-        var query = new CachedQuery<string, string>(
+        var query = new CachedQuery<StringKey, string>(
             "factory-fencing",
-            key => key,
             async (key, scope) =>
             {
-                var addr = new ResourceAddress(ResourceKind.Entity, "test", key);
-                return await scope.Track<string>(addr, async () =>
-                {
-                    gateEntered.TrySetResult(true);
-                    await gateRelease.Task;
-                    Interlocked.Increment(ref computeCount);
-                    return $"computed-{key}";
-                });
+                var addr = new ResourceAddress(ResourceKind.Entity, "test", key.ResourceKey);
+                return await scope.Track<string>(
+                    addr,
+                    async () =>
+                    {
+                        gateEntered.TrySetResult(true);
+                        await gateRelease.Task;
+                        Interlocked.Increment(ref computeCount);
+                        return $"computed-{key.Value}";
+                    }
+                );
             },
             allowUntracked: false
         );
 
-        var getTask = Task.Run(() => kernelA.Get(query, "key1", CancellationToken.None));
+        var getTask = Task.Run(() =>
+            kernelA.Get(query, new StringKey("key1"), CancellationToken.None)
+        );
 
         await gateEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
@@ -266,9 +274,11 @@ public sealed class RedisEpochFenceTests
 
         var cacheKey = $"factory-test:cache:factory-fencing:v1:{JsonSerializer.Serialize("key1")}";
         var stored = await redis.GetDatabase().StringGetAsync(cacheKey);
-        stored.IsNull.Should().BeTrue(
-            "epoch fence wired by SluiceRedis.Create should self-invalidate the stale entry"
-        );
+        stored
+            .IsNull.Should()
+            .BeTrue(
+                "epoch fence wired by SluiceRedis.Create should self-invalidate the stale entry"
+            );
 
         computeCount.Should().Be(1);
     }

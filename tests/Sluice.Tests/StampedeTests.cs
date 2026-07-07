@@ -126,7 +126,6 @@ public sealed class StampedeTests
 
         var customerScoreTtl = new CachedQuery<CustomerId, CustomerScore>(
             "customer.score",
-            id => new { customerId = id.Value },
             async (id, read) =>
             {
                 _ = await read.Track(

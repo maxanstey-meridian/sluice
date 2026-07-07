@@ -9,17 +9,17 @@ namespace Playground.Generated.Application;
 public interface IGeneratedPlaygroundStore
 {
     [ReadEntity("user")]
-    public Task<User> GetUser(StringKey id, CancellationToken ct);
+    public Task<User> GetUser(UserId id, CancellationToken ct);
 
     [ReadEntity("flag")]
-    public Task<FeatureFlag> GetFlag(StringKey id, CancellationToken ct);
+    public Task<FeatureFlag> GetFlag(FeatureFlagId id, CancellationToken ct);
 
     [ReadEntity("greeting")]
-    public Task<Greeting> GetGreeting(StringKey id, CancellationToken ct);
+    public Task<Greeting> GetGreeting(UserId id, CancellationToken ct);
 
     [WriteEntity("flag")]
-    public Task ToggleFlag(StringKey id, CancellationToken ct);
+    public Task ToggleFlag(FeatureFlagId id, CancellationToken ct);
 
     [WriteEntity("greeting")]
-    public Task UpdateGreeting(StringKey id, string text, CancellationToken ct);
+    public Task UpdateGreeting(UserId id, string text, CancellationToken ct);
 }

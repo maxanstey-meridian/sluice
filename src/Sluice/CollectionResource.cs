@@ -13,4 +13,6 @@ public sealed class CollectionResource<TKey>(string name)
     public TrackedRead<TKey, TValue> Read<TValue>(
         Func<TKey, CancellationToken, Task<TValue>> read
     ) => new(For, read);
+
+    public TrackedWrite<TKey> Write(ISluice sluice) => new(sluice, For);
 }

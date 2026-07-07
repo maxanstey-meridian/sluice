@@ -28,6 +28,7 @@ public sealed class SluiceKernel(
         TKey key,
         CancellationToken ct
     )
+        where TKey : IResourceKey
     {
         if (_registeredQueries.TryAdd(query, 0))
         {

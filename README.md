@@ -29,11 +29,29 @@ That gives the selective invalidation behavior:
 Sluice does not change your domain. Both modes use the same simple records:
 
 ```csharp
-public sealed record User(string Id, string Name, string Role);
+public sealed record UserId(string Value) : IResourceKey
+{
+    // ResourceKey is the stable string Sluice stores in resource addresses
+    // and cache entry keys.
+    public string ResourceKey => Value;
 
-public sealed record FeatureFlag(string Id, bool Enabled);
+    public static implicit operator UserId(string value) => new(value);
+}
 
-public sealed record Greeting(string Id, string Text);
+public sealed record FeatureFlagId(string Value) : IResourceKey
+{
+    public static readonly FeatureFlagId DarkMode = new("dark_mode");
+
+    public string ResourceKey => Value;
+
+    public static implicit operator FeatureFlagId(string value) => new(value);
+}
+
+public sealed record User(UserId Id, string Name, string Role);
+
+public sealed record FeatureFlag(FeatureFlagId Id, bool Enabled);
+
+public sealed record Greeting(UserId Id, string Text);
 
 public sealed record Dashboard(User User, FeatureFlag Flag, Greeting? Greeting);
 ```
@@ -45,25 +63,19 @@ public sealed record Dashboard(User User, FeatureFlag Flag, Greeting? Greeting);
 The manual mode is explicit: resource definitions, tracked reads, tracked writes, and the cached projection all live in one class.
 
 ```csharp
-public sealed record StringKey(string Value) : IResourceKey
-{
-    // ResourceKey is the stable string Sluice stores in resource addresses.
-    // For this demo the user/flag/greeting IDs are already stable strings.
-    public string ResourceKey => Value;
-}
-
 // This is the hand-written Sluice layer for the playground.
 // It names the resources, derives tracked reads/writes, and composes them into
 // the cached dashboard projection that the UI exercises.
 public sealed class DashboardCache
 {
-    private const string DarkModeFlagId = "dark_mode";
-
     private readonly SluiceKernel _sluice;
     private readonly PlaygroundStore _store;
-    private readonly CachedQuery<StringKey, Dashboard> _dashboardQuery;
-    private readonly TrackedWrite<StringKey> _flagWrite;
-    private readonly TrackedWrite<StringKey> _greetingWrite;
+    private readonly TrackedRead<UserId, User> _userRead;
+    private readonly TrackedRead<FeatureFlagId, FeatureFlag> _flagRead;
+    private readonly TrackedRead<UserId, Greeting> _greetingRead;
+    private readonly CachedQuery<UserId, Dashboard> _dashboardQuery;
+    private readonly TrackedWrite<FeatureFlagId> _flagWrite;
+    private readonly TrackedWrite<UserId> _greetingWrite;
 
     public DashboardCache(SluiceKernel sluice, PlaygroundStore store)
     {
@@ -73,74 +85,77 @@ public sealed class DashboardCache
         // Resource definitions are pure identity: kind + name + key type.
         // The same resource name must be used by reads and writes so Sluice can
         // intersect "what was read" with "what changed" during invalidation.
-        var userResource = new EntityResource<StringKey>("user");
-        var flagResource = new EntityResource<StringKey>("flag");
-        var greetingResource = new EntityResource<StringKey>("greeting");
+        var userResource = new EntityResource<UserId>("user");
+        var flagResource = new EntityResource<FeatureFlagId>("flag");
+        var greetingResource = new EntityResource<UserId>("greeting");
 
         // .Read(storeMethod) pairs a resource address with the actual fetch.
         // Calling .Get(key, scope) inside the query body records the read
         // into the scope so Sluice can track which resources were observed.
-        var userRead = userResource.Read((id, _) => _store.GetUser(id.Value));
-        var flagRead = flagResource.Read((id, _) => _store.GetFlag(id.Value));
-        var greetingRead = greetingResource.Read((id, _) => _store.GetGreeting(id.Value));
-
-        // The cached query is the projection users read from the playground.
-        // The cache key becomes dashboard:v1:"alice" or dashboard:v1:"bob".
-        _dashboardQuery = new CachedQuery<StringKey, Dashboard>(
-            "dashboard",
-            id => id.Value,
-            async (id, scope) =>
-            {
-                // Both dashboards depend on their user row and the shared flag.
-                var user = await userRead.Get(id, scope);
-                var flag = await flagRead.Get(new StringKey(DarkModeFlagId), scope);
-                Greeting? greeting = null;
-
-                // Alice is admin, so only Alice's dashboard observes greeting:alice.
-                // Bob never reads it, so a greeting write should not evict Bob.
-                if (user.Role == "admin")
-                {
-                    greeting = await greetingRead.Get(id, scope);
-                }
-
-                return new Dashboard(user, flag, greeting);
-            },
-            ttl: TimeSpan.FromMinutes(5)
-        );
+        _userRead = userResource.Read((id, _) => _store.GetUser(id));
+        _flagRead = flagResource.Read((id, _) => _store.GetFlag(id));
+        _greetingRead = greetingResource.Read((id, _) => _store.GetGreeting(id));
 
         // Writes declare which resource address changed.
         // Sluice evicts cached entries whose recorded reads include that address.
-        _flagWrite = new TrackedWrite<StringKey>(_sluice, flagResource.For);
-        _greetingWrite = new TrackedWrite<StringKey>(_sluice, greetingResource.For);
+        _flagWrite = flagResource.Write(_sluice);
+        _greetingWrite = greetingResource.Write(_sluice);
+
+        // The cached query is the projection users read from the playground.
+        // The cache key becomes dashboard:v1:"alice" or dashboard:v1:"bob".
+        _dashboardQuery = new CachedQuery<UserId, Dashboard>(
+            "dashboard",
+            ComputeDashboard,
+            ttl: TimeSpan.FromMinutes(5)
+        );
+    }
+
+    private async ValueTask<Dashboard> ComputeDashboard(UserId id, IReadScope scope)
+    {
+        // Both dashboards depend on their user row and the shared flag.
+        var user = await _userRead.Get(id, scope);
+        var flag = await _flagRead.Get(FeatureFlagId.DarkMode, scope);
+        Greeting? greeting = null;
+
+        // Alice is admin, so only Alice's dashboard observes greeting:alice.
+        // Bob never reads it, so a greeting write should not evict Bob.
+        if (user.Role == "admin")
+        {
+            greeting = await _greetingRead.Get(id, scope);
+        }
+
+        return new Dashboard(user, flag, greeting);
     }
 
     // Cache miss: compute the dashboard, record observed resource reads, store it.
     // Cache hit: return the stored Dashboard without calling PlaygroundStore.
-    public Task<Dashboard> GetDashboard(string user, CancellationToken ct) =>
-        _sluice.Get(_dashboardQuery, new StringKey(user), ct);
+    public Task<Dashboard> GetDashboard(UserId user, CancellationToken ct) =>
+        _sluice.Get(_dashboardQuery, user, ct);
 
     public async Task<FeatureFlag> ToggleDarkMode(CancellationToken ct)
     {
         // dark_mode is shared, so both dashboard:v1:alice and dashboard:v1:bob
         // are affected after they have observed flag:dark_mode.
         await _flagWrite.Write(
-            new StringKey(DarkModeFlagId),
-            _ => _store.ToggleFlag(DarkModeFlagId),
+            FeatureFlagId.DarkMode,
+            _ => _store.ToggleFlag(FeatureFlagId.DarkMode),
             ct
         );
 
-        return await _store.GetFlag(DarkModeFlagId);
+        return await _store.GetFlag(FeatureFlagId.DarkMode);
     }
 
     // greeting:{user} is selective. In the seeded data only Alice reads a greeting,
     // so updating Alice's greeting evicts Alice but leaves Bob cached.
-    public Task UpdateGreeting(string user, string text, CancellationToken ct) =>
-        _greetingWrite.Write(new StringKey(user), _ => _store.UpdateGreeting(user, text), ct);
+    public Task UpdateGreeting(UserId user, string text, CancellationToken ct) =>
+        _greetingWrite.Write(user, _ => _store.UpdateGreeting(user, text), ct);
 
     // Flush is the broad escape hatch: clear cache entries and dependency edges.
     public Task FlushAll(CancellationToken ct) => _sluice.FlushAllAsync(ct);
 }
 ```
+
+Sluice wraps reads and writes with typed resource definitions so invalidation follows the work your code already performs.
 
 ---
 
@@ -153,19 +168,19 @@ The generated mode replaces the hand-written resource wrapper with an annotated 
 public interface IGeneratedPlaygroundStore
 {
     [ReadEntity("user")]
-    public Task<User> GetUser(StringKey id, CancellationToken ct);
+    public Task<User> GetUser(UserId id, CancellationToken ct);
 
     [ReadEntity("flag")]
-    public Task<FeatureFlag> GetFlag(StringKey id, CancellationToken ct);
+    public Task<FeatureFlag> GetFlag(FeatureFlagId id, CancellationToken ct);
 
     [ReadEntity("greeting")]
-    public Task<Greeting> GetGreeting(StringKey id, CancellationToken ct);
+    public Task<Greeting> GetGreeting(UserId id, CancellationToken ct);
 
     [WriteEntity("flag")]
-    public Task ToggleFlag(StringKey id, CancellationToken ct);
+    public Task ToggleFlag(FeatureFlagId id, CancellationToken ct);
 
     [WriteEntity("greeting")]
-    public Task UpdateGreeting(StringKey id, string text, CancellationToken ct);
+    public Task UpdateGreeting(UserId id, string text, CancellationToken ct);
 }
 ```
 
@@ -176,52 +191,51 @@ That interface emits `GeneratedDashboardResources` and `GeneratedDashboardSluice
 // writes from the source-generated GeneratedDashboardSluice wrapper.
 public sealed class DashboardCache
 {
-    private const string DarkModeFlagId = "dark_mode";
-
     private readonly SluiceKernel _sluice;
     private readonly PlaygroundStore _store;
-    private readonly GeneratedDashboardSluice _generated;
-    private readonly CachedQuery<StringKey, Dashboard> _dashboardQuery;
+    private readonly GeneratedDashboardSluice _dashboardSluice;
+    private readonly CachedQuery<UserId, Dashboard> _dashboardQuery;
 
     public DashboardCache(SluiceKernel sluice, PlaygroundStore store)
     {
         _sluice = sluice;
         _store = store;
-        _generated = new GeneratedDashboardSluice(_sluice, _store);
+        _dashboardSluice = new GeneratedDashboardSluice(_sluice, _store);
 
         // The query is still hand-written. Codegen replaces the resource wrapper,
         // not the application projection.
-        _dashboardQuery = new CachedQuery<StringKey, Dashboard>(
+        _dashboardQuery = new CachedQuery<UserId, Dashboard>(
             "dashboard",
-            id => id.Value,
-            async (id, scope) =>
-            {
-                var user = await _generated.User.Get(id, scope);
-                var flag = await _generated.Flag.Get(new StringKey(DarkModeFlagId), scope);
-                Greeting? greeting = null;
-
-                if (user.Role == "admin")
-                {
-                    greeting = await _generated.Greeting.Get(id, scope);
-                }
-
-                return new Dashboard(user, flag, greeting);
-            },
+            ComputeDashboard,
             ttl: TimeSpan.FromMinutes(5)
         );
     }
 
-    public Task<Dashboard> GetDashboard(string user, CancellationToken ct) =>
-        _sluice.Get(_dashboardQuery, new StringKey(user), ct);
+    private async ValueTask<Dashboard> ComputeDashboard(UserId id, IReadScope scope)
+    {
+        var user = await _dashboardSluice.User.Get(id, scope);
+        var flag = await _dashboardSluice.Flag.Get(FeatureFlagId.DarkMode, scope);
+        Greeting? greeting = null;
+
+        if (user.Role == "admin")
+        {
+            greeting = await _dashboardSluice.Greeting.Get(id, scope);
+        }
+
+        return new Dashboard(user, flag, greeting);
+    }
+
+    public Task<Dashboard> GetDashboard(UserId user, CancellationToken ct) =>
+        _sluice.Get(_dashboardQuery, user, ct);
 
     public async Task<FeatureFlag> ToggleDarkMode(CancellationToken ct)
     {
-        await _generated.ToggleFlag(new StringKey(DarkModeFlagId), ct);
-        return await _store.GetFlag(new StringKey(DarkModeFlagId), ct);
+        await _dashboardSluice.ToggleFlag(FeatureFlagId.DarkMode, ct);
+        return await _store.GetFlag(FeatureFlagId.DarkMode, ct);
     }
 
-    public Task UpdateGreeting(string user, string text, CancellationToken ct) =>
-        _generated.UpdateGreeting(new StringKey(user), text, ct);
+    public Task UpdateGreeting(UserId user, string text, CancellationToken ct) =>
+        _dashboardSluice.UpdateGreeting(user, text, ct);
 
     public Task FlushAll(CancellationToken ct) => _sluice.FlushAllAsync(ct);
 }
@@ -303,11 +317,11 @@ entity:greeting:alice
 `Wildcard()` produces an address that matches all keys of a resource (for bulk invalidation):
 
 ```csharp
-var flagResource = new EntityResource<StringKey>("flag");
+var flagResource = new EntityResource<FeatureFlagId>("flag");
 
 // Invalidate every cached entry that read flag:dark_mode.
 await sluice.Invalidate(
-    new WriteEffect(flagResource.For(new StringKey("dark_mode"))),
+    new WriteEffect(flagResource.For(FeatureFlagId.DarkMode)),
     ct);
 ```
 
@@ -318,17 +332,17 @@ await sluice.Invalidate(
 For one-off writes without a `TrackedWrite` field:
 
 ```csharp
-var flagResource = new EntityResource<StringKey>("flag");
+var flagResource = new EntityResource<FeatureFlagId>("flag");
 
 // Run the work, then invalidate the declared addresses.
 await sluice.Apply(
-    ct => store.ToggleFlag("dark_mode"),
-    new WriteEffect(flagResource.For(new StringKey("dark_mode"))),
+    ct => store.ToggleFlag(FeatureFlagId.DarkMode),
+    new WriteEffect(flagResource.For(FeatureFlagId.DarkMode)),
     ct);
 
 // Or if the work already committed — just invalidate.
 await sluice.Invalidate(
-    new WriteEffect(flagResource.For(new StringKey("dark_mode"))),
+    new WriteEffect(flagResource.For(FeatureFlagId.DarkMode)),
     ct);
 ```
 
@@ -345,13 +359,13 @@ var order = await sluice.Apply(
 For custom tracking inside a compute body (computed addresses, conditional reads):
 
 ```csharp
-var query = new CachedQuery<StringKey, FeatureFlag>("flag.byId", id => id.Value,
+var query = new CachedQuery<FeatureFlagId, FeatureFlag>("flag.byId",
     async (id, scope) =>
     {
         // Manual tracking instead of TrackedRead.
         return await scope.Track(
             new ResourceAddress(ResourceKind.Entity, "flag", id.ResourceKey),
-            ct => store.GetFlag(id.Value));
+            ct => store.GetFlag(id));
     });
 ```
 

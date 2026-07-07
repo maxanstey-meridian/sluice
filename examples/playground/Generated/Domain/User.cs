@@ -1,3 +1,3 @@
 namespace Playground.Generated.Domain;
 
-public sealed record User(string Id, string Name, string Role);
+public sealed record User(UserId Id, string Name, string Role);

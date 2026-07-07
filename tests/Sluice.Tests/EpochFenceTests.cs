@@ -11,20 +11,25 @@ public sealed class EpochFenceTests
         // Build records with known epochs:
         // Inside window (afterEpoch=1, throughEpoch=4) → epochs 2,3,4 are checked
         await fence.IncrementEpochAsync(
-            [new ResourceAddress(ResourceKind.Entity, "other", "a")], CancellationToken.None
+            [new ResourceAddress(ResourceKind.Entity, "other", "a")],
+            CancellationToken.None
         );
         await fence.IncrementEpochAsync(
-            [new ResourceAddress(ResourceKind.Entity, "other", "b")], CancellationToken.None
+            [new ResourceAddress(ResourceKind.Entity, "other", "b")],
+            CancellationToken.None
         );
         await fence.IncrementEpochAsync(
-            [new ResourceAddress(ResourceKind.Entity, "other", "c")], CancellationToken.None
+            [new ResourceAddress(ResourceKind.Entity, "other", "c")],
+            CancellationToken.None
         );
         await fence.IncrementEpochAsync(
-            [new ResourceAddress(ResourceKind.Entity, "other", "d")], CancellationToken.None
+            [new ResourceAddress(ResourceKind.Entity, "other", "d")],
+            CancellationToken.None
         );
         // Epoch 5: overlaps observedRead but is BEYOND throughEpoch=4 → must be excluded
         await fence.IncrementEpochAsync(
-            [new ResourceAddress(ResourceKind.Entity, "test", "shared")], CancellationToken.None
+            [new ResourceAddress(ResourceKind.Entity, "test", "shared")],
+            CancellationToken.None
         );
 
         var result = await fence.HasOverlappingInvalidationAsync(
@@ -34,9 +39,11 @@ public sealed class EpochFenceTests
             CancellationToken.None
         );
 
-        result.Should().BeFalse(
-            "overlapping invalidation at epoch 5 is excluded by upper bound throughEpoch=4"
-        );
+        result
+            .Should()
+            .BeFalse(
+                "overlapping invalidation at epoch 5 is excluded by upper bound throughEpoch=4"
+            );
     }
 
     [Fact]
@@ -45,11 +52,10 @@ public sealed class EpochFenceTests
         var fence = new InMemoryEpochFence();
         var observedRead = new ResourceAddress(ResourceKind.Entity, "test", "x");
 
+        await fence.IncrementEpochAsync([observedRead], CancellationToken.None);
         await fence.IncrementEpochAsync(
-            [observedRead], CancellationToken.None
-        );
-        await fence.IncrementEpochAsync(
-            [new ResourceAddress(ResourceKind.Entity, "other", "b")], CancellationToken.None
+            [new ResourceAddress(ResourceKind.Entity, "other", "b")],
+            CancellationToken.None
         );
 
         var result = await fence.HasOverlappingInvalidationAsync(
@@ -59,9 +65,9 @@ public sealed class EpochFenceTests
             CancellationToken.None
         );
 
-        result.Should().BeFalse(
-            "overlapping record at epoch 1 is excluded by lower bound afterEpoch=1"
-        );
+        result
+            .Should()
+            .BeFalse("overlapping record at epoch 1 is excluded by lower bound afterEpoch=1");
     }
 
     [Fact]
@@ -71,13 +77,13 @@ public sealed class EpochFenceTests
         var observedRead = new ResourceAddress(ResourceKind.Entity, "test", "x");
 
         await fence.IncrementEpochAsync(
-            [new ResourceAddress(ResourceKind.Entity, "other", "a")], CancellationToken.None
+            [new ResourceAddress(ResourceKind.Entity, "other", "a")],
+            CancellationToken.None
         );
+        await fence.IncrementEpochAsync([observedRead], CancellationToken.None);
         await fence.IncrementEpochAsync(
-            [observedRead], CancellationToken.None
-        );
-        await fence.IncrementEpochAsync(
-            [new ResourceAddress(ResourceKind.Entity, "other", "b")], CancellationToken.None
+            [new ResourceAddress(ResourceKind.Entity, "other", "b")],
+            CancellationToken.None
         );
 
         var result = await fence.HasOverlappingInvalidationAsync(
@@ -110,9 +116,9 @@ public sealed class EpochFenceTests
             CancellationToken.None
         );
 
-        result.Should().BeTrue(
-            "guard fires when throughEpoch - afterEpoch >= MaxRecentInvalidations"
-        );
+        result
+            .Should()
+            .BeTrue("guard fires when throughEpoch - afterEpoch >= MaxRecentInvalidations");
     }
 
     [Fact]
@@ -154,15 +160,17 @@ public sealed class EpochFenceTests
         // The snapshot scan finds no overlap (epoch 257 is gone).
         // The post-scan guard must catch it.
         var result = await fence.HasOverlappingInvalidationAsync(
-            afterEpoch: epochBefore,  // 256
+            afterEpoch: epochBefore, // 256
             throughEpoch: epochAfter, // 511
             observedReads: [overlappingAddress],
             CancellationToken.None
         );
 
-        result.Should().BeTrue(
-            "overlapping invalidation at epoch 257 was trimmed from the queue before the " +
-            "overlap check ran, but the post-scan epoch guard should detect the trim window"
-        );
+        result
+            .Should()
+            .BeTrue(
+                "overlapping invalidation at epoch 257 was trimmed from the queue before the "
+                    + "overlap check ran, but the post-scan epoch guard should detect the trim window"
+            );
     }
 }

@@ -6,7 +6,8 @@ public interface ISluice
         CachedQuery<TKey, TValue> query,
         TKey key,
         CancellationToken ct
-    );
+    )
+        where TKey : IResourceKey;
 
     public Task Apply(Func<CancellationToken, Task> work, WriteEffect effect, CancellationToken ct);
 

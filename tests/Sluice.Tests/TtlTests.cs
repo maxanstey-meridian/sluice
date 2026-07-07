@@ -79,7 +79,6 @@ public sealed class TtlTests
     ) =>
         new(
             "customer.score",
-            id => new { customerId = id.Value },
             async (id, read) =>
             {
                 _ = await read.Track(
@@ -110,7 +109,7 @@ public sealed class TtlTests
         result1.Score.Should().Be(20);
         store.GetCustomerCallCount.Should().Be(1);
 
-        var entryKey = "customer.score:v1:{\"customerId\":\"A\"}";
+        var entryKey = "customer.score:v1:\"A\"";
         var entryBefore = await cacheStore.GetAsync<CustomerScore>(
             entryKey,
             CancellationToken.None
@@ -165,7 +164,7 @@ public sealed class TtlTests
         await sluice.Get(query, customerA, CancellationToken.None);
         store.GetCustomerCallCount.Should().Be(1);
 
-        var entryKey = "customer.score:v1:{\"customerId\":\"A\"}";
+        var entryKey = "customer.score:v1:\"A\"";
         var entryBefore = await cacheStore.GetAsync<CustomerScore>(
             entryKey,
             CancellationToken.None
@@ -215,7 +214,7 @@ public sealed class TtlTests
         store.GetCustomerCallCount.Should().Be(1);
 
         var graphBefore = await sluice.DumpGraphAsync(CancellationToken.None);
-        graphBefore.Should().Contain("customer.score:v1:{\"customerId\":\"A\"}");
+        graphBefore.Should().Contain("customer.score:v1:\"A\"");
         graphBefore.Should().Contain("entity:customer:A");
         graphBefore.Should().Contain("collection:orders.byCustomer:A");
         graphBefore.Should().Contain("cached:");
@@ -230,7 +229,7 @@ public sealed class TtlTests
         cacheStore.RemoveCallCount.Should().Be(1);
 
         var graphDuringRefresh = await sluice.DumpGraphAsync(CancellationToken.None);
-        graphDuringRefresh.Should().Contain("customer.score:v1:{\"customerId\":\"A\"}");
+        graphDuringRefresh.Should().Contain("customer.score:v1:\"A\"");
         graphDuringRefresh.Should().Contain("entity:customer:A");
         graphDuringRefresh.Should().Contain("collection:orders.byCustomer:A");
         graphDuringRefresh.Should().Contain("cached:");
@@ -241,7 +240,7 @@ public sealed class TtlTests
         store.GetCustomerCallCount.Should().Be(2);
 
         var graphAfter = await sluice.DumpGraphAsync(CancellationToken.None);
-        graphAfter.Should().Contain("customer.score:v1:{\"customerId\":\"A\"}");
+        graphAfter.Should().Contain("customer.score:v1:\"A\"");
         graphAfter.Should().Contain("entity:customer:A");
         graphAfter.Should().Contain("collection:orders.byCustomer:A");
         graphAfter.Should().Contain("cached:");

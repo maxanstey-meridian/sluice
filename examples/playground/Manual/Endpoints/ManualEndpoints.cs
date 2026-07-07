@@ -1,4 +1,5 @@
 using Playground.Manual.Application;
+using Playground.Manual.Domain;
 
 namespace Playground.Manual.Endpoints;
 
@@ -11,8 +12,9 @@ public static class ManualEndpoints
             "/manual/api/dashboard/{user}",
             async (string user, CancellationToken ct) =>
             {
-                var dash = await runtime.Cache.GetDashboard(user, ct);
-                runtime.ReadState.Set(user, dash);
+                var userId = new UserId(user);
+                var dash = await runtime.Cache.GetDashboard(userId, ct);
+                runtime.ReadState.Set(userId, dash);
                 return dash;
             }
         );
@@ -27,7 +29,7 @@ public static class ManualEndpoints
         app.MapPost(
             "/manual/api/greeting/{user}",
             async (string user, UpdateGreetingRequest body, CancellationToken ct) =>
-                await runtime.Cache.UpdateGreeting(user, body.Text, ct)
+                await runtime.Cache.UpdateGreeting(new UserId(user), body.Text, ct)
         );
 
         // Broad reset for demos and manual testing.
@@ -61,12 +63,13 @@ public static class ManualEndpoints
             "/manual/api/stampede/{user}",
             async (string user, CancellationToken ct) =>
             {
+                var userId = new UserId(user);
                 await runtime.Cache.FlushAll(ct);
                 var tasks = Enumerable
                     .Range(0, 10)
-                    .Select(_ => runtime.Cache.GetDashboard(user, ct));
+                    .Select(_ => runtime.Cache.GetDashboard(userId, ct));
                 var results = await Task.WhenAll(tasks);
-                runtime.ReadState.Set(user, results[0]);
+                runtime.ReadState.Set(userId, results[0]);
                 return results[0];
             }
         );

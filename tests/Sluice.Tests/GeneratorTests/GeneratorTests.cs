@@ -43,7 +43,6 @@ public sealed class GeneratorTests
 
         var query = new CachedQuery<WidgetId, Widget>(
             "test.widget",
-            id => new { id = id.Value },
             async (id, scope) => await widgetSluice.Widget.Get(id, scope)
         );
 
@@ -65,7 +64,6 @@ public sealed class GeneratorTests
 
         var query = new CachedQuery<WidgetId, Widget>(
             "test.widget",
-            id => new { id = id.Value },
             async (id, scope) => await widgetSluice.Widget.Get(id, scope)
         );
 
@@ -94,7 +92,6 @@ public sealed class GeneratorTests
 
         var query = new CachedQuery<WidgetId, IReadOnlyList<Widget>>(
             "test.widgetsByGroup",
-            id => new { id = id.Value },
             async (id, scope) => await widgetSluice.WidgetsByGroup.Get(id, scope)
         );
 
@@ -123,7 +120,6 @@ public sealed class GeneratorTests
 
         var query = new CachedQuery<WidgetId, Widget>(
             "test.widget",
-            id => new { id = id.Value },
             async (id, scope) => await widgetSluice.Widget.Get(id, scope)
         );
 
@@ -155,7 +151,6 @@ public sealed class GeneratorTests
 
         var query = new CachedQuery<WidgetId, Widget>(
             "test.widget",
-            id => new { id = id.Value },
             async (id, scope) => await widgetSluice.Widget.Get(id, scope)
         );
 

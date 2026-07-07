@@ -1,3 +1,3 @@
 namespace Playground.Generated.Domain;
 
-public sealed record Greeting(string Id, string Text);
+public sealed record Greeting(UserId Id, string Text);

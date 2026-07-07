@@ -272,22 +272,21 @@ public sealed class RedisResilienceTests
         );
 
         var computeCount = 0;
-        var query = new CachedQuery<string, string>(
+        var query = new CachedQuery<StringKey, string>(
             "factory-test",
-            key => key,
             async (key, scope) =>
             {
                 computeCount++;
-                return await ValueTask.FromResult($"computed-{key}");
+                return await ValueTask.FromResult($"computed-{key.Value}");
             },
             allowUntracked: true
         );
 
-        var result1 = await sluice.Get(query, "alice", CancellationToken.None);
+        var result1 = await sluice.Get(query, new StringKey("alice"), CancellationToken.None);
         result1.Should().Be("computed-alice");
         computeCount.Should().Be(1);
 
-        var result2 = await sluice.Get(query, "alice", CancellationToken.None);
+        var result2 = await sluice.Get(query, new StringKey("alice"), CancellationToken.None);
         result2.Should().Be("computed-alice");
         computeCount.Should().Be(1);
 

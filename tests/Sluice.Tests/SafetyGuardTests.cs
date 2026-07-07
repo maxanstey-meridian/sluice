@@ -65,7 +65,6 @@ public sealed class SafetyGuardTests
 
             var query = new CachedQuery<CustomerId, CustomerScore>(
                 "untracked.score",
-                id => new { id = id.Value },
                 (_, _) => ValueTask.FromResult(new CustomerScore(new CustomerId("A"), 42))
             );
 
@@ -88,7 +87,6 @@ public sealed class SafetyGuardTests
 
             var query = new CachedQuery<CustomerId, CustomerScore>(
                 "allowed.untracked",
-                id => new { id = id.Value },
                 (_, _) =>
                 {
                     computeCount++;
@@ -122,7 +120,6 @@ public sealed class SafetyGuardTests
 
             var query = new CachedQuery<CustomerId, CustomerScore>(
                 "untracked.score",
-                id => new { id = id.Value },
                 (_, _) => ValueTask.FromResult(new CustomerScore(new CustomerId("A"), 42))
             );
 

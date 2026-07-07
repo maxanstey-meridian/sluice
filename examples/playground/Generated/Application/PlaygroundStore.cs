@@ -6,46 +6,45 @@ namespace Playground.Generated.Application;
 // interface so source generation can derive the Sluice wrapper.
 public sealed class PlaygroundStore : IGeneratedPlaygroundStore
 {
-    private readonly Dictionary<string, User> _users = new()
+    private readonly Dictionary<UserId, User> _users = new()
     {
         ["alice"] = new User("alice", "Alice", "admin"),
         ["bob"] = new User("bob", "Bob", "member"),
     };
 
-    private readonly Dictionary<string, FeatureFlag> _flags = new()
+    private readonly Dictionary<FeatureFlagId, FeatureFlag> _flags = new()
     {
-        ["dark_mode"] = new FeatureFlag("dark_mode", true),
+        [FeatureFlagId.DarkMode] = new FeatureFlag(FeatureFlagId.DarkMode, true),
     };
 
-    private readonly Dictionary<string, Greeting> _greetings = new()
+    private readonly Dictionary<UserId, Greeting> _greetings = new()
     {
         ["alice"] = new Greeting("alice", "Welcome back, Admin!"),
     };
 
-    public Task<User> GetUser(StringKey id, CancellationToken ct) =>
-        Task.FromResult(_users[id.Value]);
+    public Task<User> GetUser(UserId id, CancellationToken ct) => Task.FromResult(_users[id]);
 
-    public Task<FeatureFlag> GetFlag(StringKey id, CancellationToken ct) =>
-        Task.FromResult(_flags[id.Value]);
+    public Task<FeatureFlag> GetFlag(FeatureFlagId id, CancellationToken ct) =>
+        Task.FromResult(_flags[id]);
 
-    public Task<Greeting> GetGreeting(StringKey id, CancellationToken ct) =>
-        Task.FromResult(_greetings[id.Value]);
+    public Task<Greeting> GetGreeting(UserId id, CancellationToken ct) =>
+        Task.FromResult(_greetings[id]);
 
     // This mutates the shared dependency both dashboards read.
-    public Task ToggleFlag(StringKey id, CancellationToken ct)
+    public Task ToggleFlag(FeatureFlagId id, CancellationToken ct)
     {
-        if (_flags.TryGetValue(id.Value, out var flag))
+        if (_flags.TryGetValue(id, out var flag))
         {
-            _flags[id.Value] = flag with { Enabled = !flag.Enabled };
+            _flags[id] = flag with { Enabled = !flag.Enabled };
         }
 
         return Task.CompletedTask;
     }
 
     // This mutates an admin-only dependency. Bob's dashboard never observes it.
-    public Task UpdateGreeting(StringKey id, string text, CancellationToken ct)
+    public Task UpdateGreeting(UserId id, string text, CancellationToken ct)
     {
-        _greetings[id.Value] = new Greeting(id.Value, text);
+        _greetings[id] = new Greeting(id, text);
         return Task.CompletedTask;
     }
 }

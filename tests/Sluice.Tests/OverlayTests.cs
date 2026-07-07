@@ -145,7 +145,7 @@ public sealed class OverlayTests
 
         graph.Should().Contain("entity:customer:c1");
         graph.Should().Contain("collection:orders.byCustomer:c1");
-        graph.Should().Contain("customer.score:v1:{\"customerId\":\"c1\"}");
+        graph.Should().Contain("customer.score:v1:\"c1\"");
     }
 
     [Fact]
