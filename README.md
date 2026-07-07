@@ -58,9 +58,95 @@ public sealed record Dashboard(User User, FeatureFlag Flag, Greeting? Greeting);
 
 ---
 
+## Generated mode
+
+Generated mode is the default path: write a typed store interface, annotate the reads and writes, and keep the cached projection hand-written.
+
+```csharp
+[Sluice("GeneratedDashboard")]
+public interface IGeneratedPlaygroundStore
+{
+    [ReadEntity("user")]
+    public Task<User> GetUser(UserId id, CancellationToken ct);
+
+    [ReadEntity("flag")]
+    public Task<FeatureFlag> GetFlag(FeatureFlagId id, CancellationToken ct);
+
+    [ReadEntity("greeting")]
+    public Task<Greeting> GetGreeting(UserId id, CancellationToken ct);
+
+    [WriteEntity("flag")]
+    public Task ToggleFlag(FeatureFlagId id, CancellationToken ct);
+
+    [WriteEntity("greeting")]
+    public Task UpdateGreeting(UserId id, string text, CancellationToken ct);
+}
+```
+
+That interface emits `GeneratedDashboardResources` and `GeneratedDashboardSluice`. Codegen replaces the repetitive resource wrapper, not the application query:
+
+```csharp
+// Generated mode keeps the same cached projection, but gets tracked reads and
+// writes from the source-generated GeneratedDashboardSluice wrapper.
+public sealed class DashboardCache
+{
+    private readonly SluiceKernel _sluice;
+    private readonly PlaygroundStore _store;
+    private readonly GeneratedDashboardSluice _dashboardSluice;
+    private readonly CachedQuery<UserId, Dashboard> _dashboardQuery;
+
+    public DashboardCache(SluiceKernel sluice, PlaygroundStore store)
+    {
+        _sluice = sluice;
+        _store = store;
+        _dashboardSluice = new GeneratedDashboardSluice(_sluice, _store);
+
+        // The query is still hand-written. Codegen replaces the resource wrapper,
+        // not the application projection.
+        _dashboardQuery = new CachedQuery<UserId, Dashboard>(
+            "dashboard",
+            ComputeDashboard,
+            ttl: TimeSpan.FromMinutes(5)
+        );
+    }
+
+    private async ValueTask<Dashboard> ComputeDashboard(UserId id, IReadScope scope)
+    {
+        var user = await _dashboardSluice.User.Get(id, scope);
+        var flag = await _dashboardSluice.Flag.Get(FeatureFlagId.DarkMode, scope);
+        Greeting? greeting = null;
+
+        if (user.Role == "admin")
+        {
+            greeting = await _dashboardSluice.Greeting.Get(id, scope);
+        }
+
+        return new Dashboard(user, flag, greeting);
+    }
+
+    public Task<Dashboard> GetDashboard(UserId user, CancellationToken ct) =>
+        _sluice.Get(_dashboardQuery, user, ct);
+
+    public async Task<FeatureFlag> ToggleDarkMode(CancellationToken ct)
+    {
+        await _dashboardSluice.ToggleFlag(FeatureFlagId.DarkMode, ct);
+        return await _store.GetFlag(FeatureFlagId.DarkMode, ct);
+    }
+
+    public Task UpdateGreeting(UserId user, string text, CancellationToken ct) =>
+        _dashboardSluice.UpdateGreeting(user, text, ct);
+
+    public Task FlushAll(CancellationToken ct) => _sluice.FlushAllAsync(ct);
+}
+```
+
+---
+
 ## Manual mode
 
-The manual mode is explicit: resource definitions, tracked reads, tracked writes, and the cached projection all live in one class.
+Manual mode shows the same contract explicitly: resource definitions, tracked reads, tracked writes, and the cached projection all live in one class.
+
+Sluice wraps reads and writes with typed resource definitions so invalidation follows the work your code already performs.
 
 ```csharp
 // This is the hand-written Sluice layer for the playground.
@@ -151,92 +237,6 @@ public sealed class DashboardCache
         _greetingWrite.Write(user, _ => _store.UpdateGreeting(user, text), ct);
 
     // Flush is the broad escape hatch: clear cache entries and dependency edges.
-    public Task FlushAll(CancellationToken ct) => _sluice.FlushAllAsync(ct);
-}
-```
-
-Sluice wraps reads and writes with typed resource definitions so invalidation follows the work your code already performs.
-
----
-
-## Generated mode
-
-The generated mode replaces the hand-written resource wrapper with an annotated interface:
-
-```csharp
-[Sluice("GeneratedDashboard")]
-public interface IGeneratedPlaygroundStore
-{
-    [ReadEntity("user")]
-    public Task<User> GetUser(UserId id, CancellationToken ct);
-
-    [ReadEntity("flag")]
-    public Task<FeatureFlag> GetFlag(FeatureFlagId id, CancellationToken ct);
-
-    [ReadEntity("greeting")]
-    public Task<Greeting> GetGreeting(UserId id, CancellationToken ct);
-
-    [WriteEntity("flag")]
-    public Task ToggleFlag(FeatureFlagId id, CancellationToken ct);
-
-    [WriteEntity("greeting")]
-    public Task UpdateGreeting(UserId id, string text, CancellationToken ct);
-}
-```
-
-That interface emits `GeneratedDashboardResources` and `GeneratedDashboardSluice`. The cached projection is still hand-written — codegen replaces the resource wrapper, not the application query:
-
-```csharp
-// Generated mode keeps the same cached projection, but gets tracked reads and
-// writes from the source-generated GeneratedDashboardSluice wrapper.
-public sealed class DashboardCache
-{
-    private readonly SluiceKernel _sluice;
-    private readonly PlaygroundStore _store;
-    private readonly GeneratedDashboardSluice _dashboardSluice;
-    private readonly CachedQuery<UserId, Dashboard> _dashboardQuery;
-
-    public DashboardCache(SluiceKernel sluice, PlaygroundStore store)
-    {
-        _sluice = sluice;
-        _store = store;
-        _dashboardSluice = new GeneratedDashboardSluice(_sluice, _store);
-
-        // The query is still hand-written. Codegen replaces the resource wrapper,
-        // not the application projection.
-        _dashboardQuery = new CachedQuery<UserId, Dashboard>(
-            "dashboard",
-            ComputeDashboard,
-            ttl: TimeSpan.FromMinutes(5)
-        );
-    }
-
-    private async ValueTask<Dashboard> ComputeDashboard(UserId id, IReadScope scope)
-    {
-        var user = await _dashboardSluice.User.Get(id, scope);
-        var flag = await _dashboardSluice.Flag.Get(FeatureFlagId.DarkMode, scope);
-        Greeting? greeting = null;
-
-        if (user.Role == "admin")
-        {
-            greeting = await _dashboardSluice.Greeting.Get(id, scope);
-        }
-
-        return new Dashboard(user, flag, greeting);
-    }
-
-    public Task<Dashboard> GetDashboard(UserId user, CancellationToken ct) =>
-        _sluice.Get(_dashboardQuery, user, ct);
-
-    public async Task<FeatureFlag> ToggleDarkMode(CancellationToken ct)
-    {
-        await _dashboardSluice.ToggleFlag(FeatureFlagId.DarkMode, ct);
-        return await _store.GetFlag(FeatureFlagId.DarkMode, ct);
-    }
-
-    public Task UpdateGreeting(UserId user, string text, CancellationToken ct) =>
-        _dashboardSluice.UpdateGreeting(user, text, ct);
-
     public Task FlushAll(CancellationToken ct) => _sluice.FlushAllAsync(ct);
 }
 ```
