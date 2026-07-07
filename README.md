@@ -499,6 +499,15 @@ Lua constraint (no Lua scripts in Redis backing) is relaxed specifically for thi
 `RedisGraphStore` remain Lua-free. Lease TTL (default 30s) bounds how long one process may own a recompute; it is
 separate from cache entry TTL, which may be minutes or hours.
 
+Distributed epoch fencing prevents cross-process invalidation races via the `RedisEpochFence`. The fence uses a
+Redis `INCR`-based global epoch counter (`{keyPrefix}:epoch`) and a bounded Redis sorted set (`{keyPrefix}:inval`) that
+records each invalidation with its epoch. When a compute finishes, the fence re-reads the global epoch and scans the
+sorted set for overlapping invalidations that occurred during the compute. If any are found, the just-written entry is
+self-invalidated. The sorted set is trimmed by epoch count (not TTL) so that long-running computes conservatively
+invalidate rather than miss an expired record. `SluiceRedis.Create` wires `RedisEpochFence` automatically alongside
+the cache, graph, and stampede coordinator. For single-process deployments, `InMemoryEpochFence` provides the same
+fencing without Redis.
+
 The caller owns the `ConnectionMultiplexer` and its disposal lifecycle. Sluice does not dispose it.
 
 Serialization uses `System.Text.Json` with default options. Pass `JsonSerializerOptions` to the `RedisCacheStore`
@@ -545,6 +554,8 @@ For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameter
 **Redis backing (separate package):**
 
 - `RedisCacheStore`, `RedisGraphStore`, `RedisStampedeCoordinator` (in `src/Sluice.Redis/`)
+- `IEpochFence`, `InMemoryEpochFence` (in `src/Sluice/`)
+- `RedisEpochFence` (in `src/Sluice.Redis/`)
 
 ## Limitations
 
@@ -552,8 +563,6 @@ For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameter
 - Writes must declare every resource address they changed. Missing addresses leave stale entries.
 - If a write succeeds and the process crashes before invalidation, stale entries remain until TTL or flush.
 - In-memory cache/graph stores are for tests and single-process apps.
-- Distributed stampede prevention coalesces redundant recompute but does not prevent all cross-process invalidation
-  races. Those remain bounded by TTL unless distributed epoch fencing is added (future work).
 - Redis backing is single-node or managed endpoint only. Redis Cluster topology is not supported.
 - The dependency graph is process-local. Cross-process invalidation requires Redis backing.
 - Benchmark overhead is dominated by fixed tracking cost for tiny in-memory operations; Sluice is intended for cached

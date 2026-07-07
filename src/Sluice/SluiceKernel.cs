@@ -8,7 +8,8 @@ public sealed class SluiceKernel(
     TimeProvider? clock = null,
     IStampedeCoordinator? stampedeCoordinator = null,
     StampedeOptions? stampedeOptions = null,
-    IEventSink? eventSink = null
+    IEventSink? eventSink = null,
+    IEpochFence? epochFence = null
 ) : ISluice, IDisposable
 {
     private readonly OperationRegistry _registry = new(
@@ -17,7 +18,8 @@ public sealed class SluiceKernel(
         clock,
         stampedeCoordinator,
         stampedeOptions,
-        eventSink
+        eventSink,
+        epochFence
     );
     private readonly ConcurrentDictionary<object, byte> _registeredQueries = new();
 
@@ -38,10 +40,7 @@ public sealed class SluiceKernel(
         Func<CancellationToken, Task> work,
         WriteEffect effect,
         CancellationToken ct
-    )
-    {
-        await _registry.ApplyAsync(async ctx => await ctx.Apply(() => work(ct), effect), ct);
-    }
+    ) => await _registry.ApplyAsync(async ctx => await ctx.Apply(() => work(ct), effect), ct);
 
     public async Task<T> Apply<T>(
         Func<CancellationToken, Task<T>> work,

@@ -29,6 +29,15 @@ public static class SluiceRedis
             breaker
         );
 
-        return new SluiceKernel(cache, graph, clock, stampede, stampedeOptions);
+        var epochFence = new RedisEpochFence(redis, keyPrefix);
+
+        return new SluiceKernel(
+            cache,
+            graph,
+            clock,
+            stampede,
+            stampedeOptions,
+            epochFence: epochFence
+        );
     }
 }
