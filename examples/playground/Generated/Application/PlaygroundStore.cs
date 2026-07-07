@@ -2,7 +2,7 @@ using Playground.Generated.Domain;
 
 namespace Playground.Generated.Application;
 
-// Same demo data as the manual slice. This one implements the annotated
+// Same demo data as the manual mode. This one implements the annotated
 // interface so source generation can derive the Sluice wrapper.
 public sealed class PlaygroundStore : IGeneratedPlaygroundStore
 {

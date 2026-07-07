@@ -18,7 +18,7 @@ var app = builder.Build();
 app.UseCors();
 app.UseStaticFiles();
 
-// Each mode is a fully isolated app slice: own store, Sluice kernel, event sink,
+// Each mode is a fully isolated app: own store, Sluice kernel, event sink,
 // cached query, and materialized UI state.
 var manual = new ManualPlaygroundRuntime();
 var generated = new GeneratedPlaygroundRuntime();

@@ -12,15 +12,7 @@ one dependency, while only Alice depends on an admin greeting.
 
 Prototype / proof of concept. Targets `.NET 10` (`net10.0`). The core library has zero third-party dependencies.
 
-## Example
-
-Run it:
-
-```bash
-dotnet run --project examples/playground/Playground.csproj
-```
-
-Open `http://localhost:5300`.
+## The domain stays the same
 
 The example caches `dashboard:v1:{user}` for Alice and Bob:
 
@@ -34,17 +26,7 @@ That gives the selective invalidation behavior:
 - changing Alice's greeting invalidates Alice only
 - Bob remains a cache hit after the greeting changes
 
-The playground has two isolated app modes with the same behavior:
-
-- `examples/playground/Manual/` — hand-written `EntityResource`, `TrackedRead`, and `TrackedWrite`
-- `examples/playground/Generated/` — annotated store interface; the generator emits the tracked wrapper
-- `examples/playground/wwwroot/index.html` — tabbed visualization (Manual / Generated)
-
-Each mode owns its own store, `SluiceKernel`, event sink, cached query, and UI state. The duplicated folders are intentional: you can compare the manual and generated slices directly.
-
-### Domain in each slice
-
-Sluice does not change your domain. Both slices use the same simple records:
+Sluice does not change your domain. Both modes use the same simple records:
 
 ```csharp
 public sealed record User(string Id, string Name, string Role);
@@ -56,9 +38,11 @@ public sealed record Greeting(string Id, string Text);
 public sealed record Dashboard(User User, FeatureFlag Flag, Greeting? Greeting);
 ```
 
-### Manual slice
+---
 
-The manual slice is explicit: resource definitions, tracked reads, tracked writes, and the cached projection all live in `Manual/Application/DashboardCache.cs`.
+## Manual mode
+
+The manual mode is explicit: resource definitions, tracked reads, tracked writes, and the cached projection all live in one class.
 
 ```csharp
 public sealed record StringKey(string Value) : IResourceKey
@@ -157,9 +141,11 @@ public sealed class DashboardCache
 }
 ```
 
-### Generated slice
+---
 
-The generated slice keeps the same domain and query, but replaces the manual resource wrapper with an annotated interface:
+## Generated mode
+
+The generated mode replaces the hand-written resource wrapper with an annotated interface:
 
 ```csharp
 [Sluice("GeneratedDashboard")]
@@ -182,7 +168,7 @@ public interface IGeneratedPlaygroundStore
 }
 ```
 
-That interface emits `GeneratedDashboardResources` and `GeneratedDashboardSluice`. The generated cache uses that wrapper, but the projection remains hand-written:
+That interface emits `GeneratedDashboardResources` and `GeneratedDashboardSluice`. The cached projection is still hand-written — codegen replaces the resource wrapper, not the application query:
 
 ```csharp
 // Generated mode keeps the same cached projection, but gets tracked reads and
@@ -240,9 +226,25 @@ public sealed class DashboardCache
 }
 ```
 
-### App mode routing
+---
 
-The host maps both modes under separate prefixes:
+## Run the example
+
+The playground runs both modes with fully isolated state (own store, kernel, event sink, and cache):
+
+```bash
+dotnet run --project examples/playground/Playground.csproj
+```
+
+Open `http://localhost:5300`. Tabs switch between Manual and Generated.
+
+Key files:
+
+- `examples/playground/Manual/` — hand-written mode
+- `examples/playground/Generated/` — codegen mode
+- `examples/playground/wwwroot/index.html` — tabbed visualization
+
+Route prefixes keep the two modes isolated:
 
 ```text
 /manual/api/dashboard/{user}
@@ -258,9 +260,7 @@ The host maps both modes under separate prefixes:
 /generated/sluice/state
 ```
 
-### Composition root
-
-`Program.cs` creates one runtime per mode and maps both endpoint slices:
+`Program.cs` creates one runtime per mode:
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -269,7 +269,7 @@ builder.WebHost.UseUrls("http://localhost:5300");
 var app = builder.Build();
 app.UseStaticFiles();
 
-// Each mode is a fully isolated app slice: own store, Sluice kernel, event sink,
+// Each mode is a fully isolated app: own store, Sluice kernel, event sink,
 // cached query, and materialized UI state.
 var manual = new ManualPlaygroundRuntime();
 var generated = new GeneratedPlaygroundRuntime();
