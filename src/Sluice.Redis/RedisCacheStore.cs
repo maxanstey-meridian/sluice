@@ -62,28 +62,7 @@ public sealed class RedisCacheStore(
 
     public async Task ClearAsync(CancellationToken ct)
     {
-        var keys = new List<RedisKey>();
-        var cursor = 0L;
-        do
-        {
-            var result = await _db.ExecuteAsync(
-                "SCAN",
-                cursor.ToString(),
-                "MATCH",
-                $"{keyPrefix}:cache:*",
-                "COUNT",
-                "500"
-            );
-            var inner = (RedisResult[])result!;
-            cursor = long.Parse((string?)inner[0] ?? "0");
-            var items = (RedisResult[])inner[1]!;
-            foreach (var item in items)
-            {
-                var bytes = (byte[]?)(RedisResult?)item;
-                keys.Add(bytes is not null ? (RedisKey)bytes : new RedisKey((string?)item!));
-            }
-        } while (cursor != 0);
-
+        var keys = await redis.ScanKeysAsync($"{keyPrefix}:cache:*");
         if (keys.Count > 0)
         {
             await _db.KeyDeleteAsync([.. keys]);

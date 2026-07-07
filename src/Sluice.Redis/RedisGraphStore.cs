@@ -8,6 +8,9 @@ public sealed class RedisGraphStore(IConnectionMultiplexer redis, string keyPref
 {
     private readonly IDatabase _db = redis.GetDatabase();
 
+    private const string FwdSegment = ":fwd:";
+    private const string RevSegment = ":rev:";
+
     public async Task<IReadOnlyList<string>> FindAffectedEntries(
         IReadOnlyList<ResourceAddress> changedAddresses,
         CancellationToken ct
@@ -19,42 +22,25 @@ public sealed class RedisGraphStore(IConnectionMultiplexer redis, string keyPref
         {
             if (address.Key == "*")
             {
-                var cursor = 0L;
-                do
+                var pattern =
+                    $"{keyPrefix}{RevSegment}{address.Kind.ToString().ToLower()}:{address.Name}:*";
+                var matchedKeys = await redis.ScanKeysAsync(pattern);
+                foreach (var matchedKey in matchedKeys)
                 {
-                    var result = await _db.ExecuteAsync(
-                        "SCAN",
-                        cursor.ToString(),
-                        "MATCH",
-                        $"{keyPrefix}:rev:{address.Kind.ToString().ToLower()}:{address.Name}:*",
-                        "COUNT",
-                        "500"
-                    );
-                    var inner = (RedisResult[])result!;
-                    cursor = long.Parse((string?)inner[0] ?? "0");
-                    var matchedKeys = (RedisResult[])inner[1]!;
-                    foreach (var matchedKey in matchedKeys)
+                    var members = await _db.SetMembersAsync(matchedKey);
+                    foreach (var member in members)
                     {
-                        var keyStr = (string?)matchedKey;
-                        if (keyStr is null)
+                        var memberStr = (string?)member;
+                        if (memberStr is not null)
                         {
-                            continue;
-                        }
-                        var members = await _db.SetMembersAsync(keyStr);
-                        foreach (var member in members)
-                        {
-                            var memberStr = (string?)member;
-                            if (memberStr is not null)
-                            {
-                                affected.Add(memberStr);
-                            }
+                            affected.Add(memberStr);
                         }
                     }
-                } while (cursor != 0);
+                }
             }
             else
             {
-                var members = await _db.SetMembersAsync($"{keyPrefix}:rev:{address}");
+                var members = await _db.SetMembersAsync($"{keyPrefix}{RevSegment}{address}");
                 foreach (var member in members)
                 {
                     var memberStr = (string?)member;
@@ -76,30 +62,29 @@ public sealed class RedisGraphStore(IConnectionMultiplexer redis, string keyPref
         CancellationToken ct
     )
     {
+        var batch = _db.CreateBatch();
+        var tasks = new List<Task>();
+
         foreach (var address in addresses)
         {
-            await _db.SetAddAsync($"{keyPrefix}:rev:{address}", entryKey);
+            tasks.Add(batch.SetAddAsync($"{keyPrefix}{RevSegment}{address}", entryKey));
         }
-        var fwdKey = $"{keyPrefix}:fwd:{entryKey}";
-        var addressStrings = addresses.Select(a => a.ToString()).ToArray();
-        await _db.SetAddAsync(fwdKey, addressStrings.Select<string, RedisValue>(a => a).ToArray());
-        await _db.StringSetAsync(
-            $"{keyPrefix}:ts:{entryKey}",
-            cachedAt.ToString("O"),
-            null,
-            false,
-            When.Always,
-            CommandFlags.None
-        );
+
+        var addressValues = addresses.Select(a => (RedisValue)a.ToString()).ToArray();
+        tasks.Add(batch.SetAddAsync($"{keyPrefix}{FwdSegment}{entryKey}", addressValues));
+        tasks.Add(batch.StringSetAsync($"{keyPrefix}:ts:{entryKey}", cachedAt.ToString("O")));
+
+        batch.Execute();
+        await Task.WhenAll(tasks);
     }
 
     public async Task ClearEntryEdges(string entryKey, CancellationToken ct)
     {
-        var fwdKey = $"{keyPrefix}:fwd:{entryKey}";
+        var fwdKey = $"{keyPrefix}{FwdSegment}{entryKey}";
         var addresses = await _db.SetMembersAsync(fwdKey);
         foreach (var address in addresses)
         {
-            var revKey = $"{keyPrefix}:rev:{(string?)address!}";
+            var revKey = $"{keyPrefix}{RevSegment}{(string?)address!}";
             await _db.SetRemoveAsync(revKey, entryKey);
             var count = await _db.SetLengthAsync(revKey);
             if (count == 0)
@@ -107,75 +92,15 @@ public sealed class RedisGraphStore(IConnectionMultiplexer redis, string keyPref
                 await _db.KeyDeleteAsync(revKey);
             }
         }
-        await _db.KeyDeleteAsync(fwdKey);
-        await _db.KeyDeleteAsync($"{keyPrefix}:ts:{entryKey}");
+        await _db.KeyDeleteAsync([fwdKey, $"{keyPrefix}:ts:{entryKey}"]);
     }
 
     public async Task FlushAsync(CancellationToken ct)
     {
         var keys = new List<RedisKey>();
-        var cursor = 0L;
-        do
-        {
-            var result = await _db.ExecuteAsync(
-                "SCAN",
-                cursor.ToString(),
-                "MATCH",
-                $"{keyPrefix}:rev:*",
-                "COUNT",
-                "500"
-            );
-            var inner = (RedisResult[])result!;
-            cursor = long.Parse((string?)inner[0] ?? "0");
-            var items = (RedisResult[])inner[1]!;
-            foreach (var item in items)
-            {
-                var bytes = (byte[]?)(RedisResult?)item;
-                keys.Add(bytes is not null ? (RedisKey)bytes : new RedisKey((string?)item!));
-            }
-        } while (cursor != 0);
-
-        cursor = 0L;
-        do
-        {
-            var result = await _db.ExecuteAsync(
-                "SCAN",
-                cursor.ToString(),
-                "MATCH",
-                $"{keyPrefix}:fwd:*",
-                "COUNT",
-                "500"
-            );
-            var inner = (RedisResult[])result!;
-            cursor = long.Parse((string?)inner[0] ?? "0");
-            var items = (RedisResult[])inner[1]!;
-            foreach (var item in items)
-            {
-                var bytes = (byte[]?)(RedisResult?)item;
-                keys.Add(bytes is not null ? (RedisKey)bytes : new RedisKey((string?)item!));
-            }
-        } while (cursor != 0);
-
-        cursor = 0L;
-        do
-        {
-            var result = await _db.ExecuteAsync(
-                "SCAN",
-                cursor.ToString(),
-                "MATCH",
-                $"{keyPrefix}:ts:*",
-                "COUNT",
-                "500"
-            );
-            var inner = (RedisResult[])result!;
-            cursor = long.Parse((string?)inner[0] ?? "0");
-            var items = (RedisResult[])inner[1]!;
-            foreach (var item in items)
-            {
-                var bytes = (byte[]?)(RedisResult?)item;
-                keys.Add(bytes is not null ? (RedisKey)bytes : new RedisKey((string?)item!));
-            }
-        } while (cursor != 0);
+        keys.AddRange(await redis.ScanKeysAsync($"{keyPrefix}{RevSegment}*"));
+        keys.AddRange(await redis.ScanKeysAsync($"{keyPrefix}{FwdSegment}*"));
+        keys.AddRange(await redis.ScanKeysAsync($"{keyPrefix}:ts:*"));
 
         if (keys.Count > 0)
         {
@@ -188,86 +113,59 @@ public sealed class RedisGraphStore(IConnectionMultiplexer redis, string keyPref
         var sb = new StringBuilder();
         sb.AppendLine("OPERATIONS:");
 
-        var fwdCursor = 0L;
-        do
+        var fwdPrefix = $"{keyPrefix}{FwdSegment}";
+        var fwdKeys = await redis.ScanKeysAsync($"{fwdPrefix}*");
+        foreach (var fk in fwdKeys)
         {
-            var result = await _db.ExecuteAsync(
-                "SCAN",
-                fwdCursor.ToString(),
-                "MATCH",
-                $"{keyPrefix}:fwd:*",
-                "COUNT",
-                "500"
-            );
-            var inner = (RedisResult[])result!;
-            fwdCursor = long.Parse((string?)inner[0] ?? "0");
-            var fwdKeys = (RedisResult[])inner[1]!;
-            foreach (var fk in fwdKeys)
+            var entryKey = ((string?)fk)?[fwdPrefix.Length..];
+            if (entryKey is null)
             {
-                var entryKey = (string?)fk;
-                if (entryKey is null)
-                {
-                    continue;
-                }
-                var stripped = entryKey.Substring(keyPrefix.Length + 5);
-                sb.AppendLine($"  {stripped}");
-                sb.AppendLine("    reads:");
-                var addresses = await _db.SetMembersAsync(entryKey);
-                foreach (var addr in addresses)
-                {
-                    var addrStr = (string?)addr;
-                    if (addrStr is not null)
-                    {
-                        sb.AppendLine($"      {addrStr}");
-                    }
-                }
-                var tsKey = $"{keyPrefix}:ts:{stripped}";
-                var ts = await _db.StringGetAsync(tsKey);
-                if (ts.HasValue)
-                {
-                    sb.AppendLine($"    cached: {(string?)ts}");
-                }
-                sb.AppendLine();
+                continue;
             }
-        } while (fwdCursor != 0);
+            sb.AppendLine($"  {entryKey}");
+            sb.AppendLine("    reads:");
+            var addresses = await _db.SetMembersAsync(fk);
+            foreach (var addr in addresses)
+            {
+                var addrStr = (string?)addr;
+                if (addrStr is not null)
+                {
+                    sb.AppendLine($"      {addrStr}");
+                }
+            }
+            var tsKey = $"{keyPrefix}:ts:{entryKey}";
+            var ts = await _db.StringGetAsync(tsKey);
+            if (ts.HasValue)
+            {
+                sb.AppendLine($"    cached: {(string?)ts}");
+            }
+            sb.AppendLine();
+        }
 
         sb.AppendLine("RESOURCE ADDRESSES:");
-        var revCursor = 0L;
-        do
+
+        var revPrefix = $"{keyPrefix}{RevSegment}";
+        var revKeys = await redis.ScanKeysAsync($"{revPrefix}*");
+        foreach (var rk in revKeys)
         {
-            var result = await _db.ExecuteAsync(
-                "SCAN",
-                revCursor.ToString(),
-                "MATCH",
-                $"{keyPrefix}:rev:*",
-                "COUNT",
-                "500"
-            );
-            var inner = (RedisResult[])result!;
-            revCursor = long.Parse((string?)inner[0] ?? "0");
-            var revKeys = (RedisResult[])inner[1]!;
-            foreach (var rk in revKeys)
+            var stripped = ((string?)rk)?[revPrefix.Length..];
+            if (stripped is null)
             {
-                var addressStr = (string?)rk;
-                if (addressStr is null)
-                {
-                    continue;
-                }
-                var stripped = addressStr.Substring(keyPrefix.Length + 5);
-                sb.AppendLine($"  {stripped}");
-                sb.AppendLine("    invalidates:");
-                var members = await _db.SetMembersAsync(addressStr);
-                foreach (var m in members)
-                {
-                    var mStr = (string?)m;
-                    if (mStr is not null)
-                    {
-                        sb.AppendLine($"      {mStr}");
-                    }
-                }
-                sb.AppendLine();
+                continue;
             }
-        } while (revCursor != 0);
+            sb.AppendLine($"  {stripped}");
+            sb.AppendLine("    invalidates:");
+            var members = await _db.SetMembersAsync(rk);
+            foreach (var m in members)
+            {
+                var mStr = (string?)m;
+                if (mStr is not null)
+                {
+                    sb.AppendLine($"      {mStr}");
+                }
+            }
+            sb.AppendLine();
+        }
 
         return sb.ToString();
     }

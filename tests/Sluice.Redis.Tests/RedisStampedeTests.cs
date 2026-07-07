@@ -172,6 +172,62 @@ public sealed class RedisStampedeTests
         await db.KeyDeleteAsync($"sluice:lock:{entryKey}");
     }
 
+    [RequireDockerFact]
+    public async Task ClearAsync_RemovesAllLockKeys()
+    {
+        var redis = _fixture.Redis;
+        var db = redis.GetDatabase();
+
+        var stampede = new RedisStampedeCoordinator(redis);
+
+        await db.StringSetAsync(
+            "sluice:lock:op-a:v1:key1",
+            "token1",
+            TimeSpan.FromMinutes(5),
+            When.NotExists
+        );
+        await db.StringSetAsync(
+            "sluice:lock:op-b:v1:key2",
+            "token2",
+            TimeSpan.FromMinutes(5),
+            When.NotExists
+        );
+        await db.StringSetAsync(
+            "sluice:lock:op-c:v1:key3",
+            "token3",
+            TimeSpan.FromMinutes(5),
+            When.NotExists
+        );
+
+        await stampede.ClearAsync(CancellationToken.None);
+
+        var cursor = 0L;
+        var remaining = new List<string>();
+        do
+        {
+            var result = await db.ExecuteAsync(
+                "SCAN",
+                cursor.ToString(),
+                "MATCH",
+                "sluice:lock:*",
+                "COUNT",
+                "500"
+            );
+            var inner = (RedisResult[])result!;
+            cursor = long.Parse((string?)inner[0] ?? "0");
+            foreach (var item in (RedisResult[])inner[1]!)
+            {
+                var keyStr = (string?)item;
+                if (keyStr is not null)
+                {
+                    remaining.Add(keyStr);
+                }
+            }
+        } while (cursor != 0);
+
+        remaining.Should().BeEmpty();
+    }
+
     private sealed class GatedComputeOp : CachedOperation<string, string>
     {
         public int ComputeCount { get; private set; }

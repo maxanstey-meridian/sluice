@@ -29,7 +29,14 @@ public sealed class RedisStampedeCoordinator(
         return acquired ? new Lease(entryKey, lockKey, token, _db) : null;
     }
 
-    public Task ClearAsync(CancellationToken ct) => Task.CompletedTask;
+    public async Task ClearAsync(CancellationToken ct)
+    {
+        var keys = await redis.ScanKeysAsync($"{keyPrefix}:lock:*");
+        if (keys.Count > 0)
+        {
+            await _db.KeyDeleteAsync([.. keys]);
+        }
+    }
 
     private sealed class Lease(string entryKey, string lockKey, string token, IDatabase db)
         : IRefreshLease
