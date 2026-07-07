@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sluice Playground</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; max-width: 720px; }
+h1 { font-size: 1.5rem; color: #58a6ff; margin-bottom: 4px; }
+.subtitle { color: #8b949e; font-size: 0.85rem; margin-bottom: 24px; }
+.subtitle a { color: #58a6ff; }
+.user-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.user-name { font-size: 1.1rem; font-weight: 600; margin-bottom: 10px; }
+.button-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; transition: background .15s, border-color .15s; }
+button:hover { background: #30363d; border-color: #8b949e; }
+button.read { border-color: #1f6feb; }
+button.read:hover { background: rgba(31,111,235,.15); border-color: #1f6feb; }
+button.invalidate { border-color: #f85149; }
+button.invalidate:hover { background: rgba(248,81,73,.15); border-color: #f85149; }
+button.update { border-color: #d29922; }
+button.update:hover { background: rgba(210,153,34,.15); border-color: #d29922; }
+input[type="text"] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; width: 120px; }
+.global-actions { display: flex; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid #21262d; }
+.flash { position: fixed; top: 20px; right: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 16px; font-size: 0.85rem; opacity: 0; transition: opacity .3s; pointer-events: none; }
+.flash.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<h1>Sluice Playground</h1>
+<div class="subtitle">
+  Point the dashboard here: <a href="http://localhost:5200/?source=http://localhost:5300/sluice/events" target="_blank">Open dashboard</a>
+</div>
+
+<div id="users"></div>
+
+<div class="global-actions">
+  <button onclick="flushAll()" class="invalidate">Flush All Cache</button>
+  <button onclick="stampede('alice')" class="read">Stampede: Alice (10x)</button>
+</div>
+
+<div id="flash" class="flash"></div>
+
+<script>
+const users = ['alice', 'bob', 'charlie'];
+
+function render() {
+  document.getElementById('users').innerHTML = users.map(id => {
+    const name = id.charAt(0).toUpperCase() + id.slice(1);
+    return `
+    <div class="user-card">
+      <div class="user-name">${name}</div>
+      <div class="button-row">
+        <button onclick="readUser('${id}')" class="read">Read</button>
+        <button onclick="readSettings('${id}')" class="read">Settings</button>
+        <button onclick="invalidate('${id}')" class="invalidate">Invalidate</button>
+        <input type="text" id="name-${id}" placeholder="New name" />
+        <button onclick="updateUser('${id}')" class="update">Update</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function flash(msg) {
+  const el = document.getElementById('flash');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 1500);
+}
+
+async function readUser(id) {
+  await fetch(`/api/users/${id}/read`, { method: 'POST' });
+  flash(`Read ${id}`);
+}
+
+async function readSettings(id) {
+  await fetch(`/api/users/${id}/settings`, { method: 'POST' });
+  flash(`Read settings ${id}`);
+}
+
+async function invalidate(id) {
+  await fetch(`/api/users/${id}/invalidate`, { method: 'POST' });
+  flash(`Invalidated ${id}`);
+}
+
+async function updateUser(id) {
+  const name = document.getElementById(`name-${id}`).value || 'New Name';
+  await fetch(`/api/users/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  flash(`Updated ${id} -> ${name}`);
+}
+
+async function flushAll() {
+  await fetch('/api/flush', { method: 'POST' });
+  flash('Flushed all');
+}
+
+async function stampede(id) {
+  await fetch(`/api/users/${id}/stampede`, { method: 'POST' });
+  flash(`Stampede ${id}`);
+}
+
+render();
+</script>
+
+</body>
+</html>

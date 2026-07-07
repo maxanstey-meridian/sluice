@@ -57,6 +57,8 @@ h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 16px; color: #58a6ff; }
 
 .empty-state { color: #484f58; text-align: center; padding: 40px; font-size: 0.9rem; }
 
+.connection { margin-bottom: 16px; color: #8b949e; font-size: 0.8rem; }
+
 #pulse { width: 10px; height: 10px; border-radius: 50%; background: #3fb950; display: inline-block; margin-left: 8px; transition: background .3s; vertical-align: middle; }
 #pulse.paused { background: #f85149; }
 </style>
@@ -64,6 +66,9 @@ h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 16px; color: #58a6ff; }
 <body x-cloak>
 
 <h1>Sluice Dashboard <span id="pulse" :class="{ paused: polling || pollFailed }"></span></h1>
+<div class="connection">
+  Source: <a :href="sourceUrl" x-text="sourceUrl" target="_blank" style="color: #58a6ff; font-size: 0.8rem;"></a>
+</div>
 
 <div class="filter-bar">
   <template x-for="filter in filters" :key="filter">
@@ -142,6 +147,8 @@ h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 16px; color: #58a6ff; }
 
 <script>
 function dashboard() {
+  const params = new URLSearchParams(window.location.search);
+  const sourceUrl = params.get('source') || 'http://localhost:5300/sluice/events';
   const pollInterval = 500;
   const eventTypes = ['hit', 'miss', 'compute', 'invalidate', 'stampede'];
 
@@ -155,6 +162,7 @@ function dashboard() {
     lastSeq: 0,
     pollFailed: false,
     polling: false,
+    sourceUrl,
 
     get groupedKeys() {
       const groups = {};
@@ -195,7 +203,9 @@ function dashboard() {
       this.polling = true;
 
       try {
-        const response = await fetch(`/sluice/events?since=${this.lastSeq}`);
+        const url = new URL(this.sourceUrl);
+        url.searchParams.set('since', this.lastSeq);
+        const response = await fetch(url);
         const events = await response.json();
 
         if (events && events.length > 0) this.addEvents(events);
