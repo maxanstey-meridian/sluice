@@ -144,6 +144,7 @@ function makeMode(id, label, description) {
     eventsByKey: {},
     keyOrder: [],
     eventTypeCounts: Object.fromEntries(eventTypes.map(type => [type, 0])),
+    greetingText: 'Hello, Admin!',
     source: null,
     sourceVisible: false,
     sourceTab: 0,
@@ -172,7 +173,7 @@ async function toggleFlag(modeId) {
 }
 
 async function updateGreeting(modeId, user) {
-  const text = document.getElementById(`${modeId}-greeting-text`).value || 'Hello!';
+  const text = mode(modeId).greetingText || 'Hello!';
   await fetch(`/${modeId}/api/greeting/${user}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -180,6 +181,10 @@ async function updateGreeting(modeId, user) {
   });
   flash(`${modeLabel(modeId)} greeting = ${text}`);
   await pollMode(mode(modeId));
+}
+
+function setGreetingText(modeId, text) {
+  mode(modeId).greetingText = text;
 }
 
 async function flushAll(modeId) {
@@ -351,7 +356,7 @@ function renderMode(m) {
         <span>${flagText(m)}</span>
       </div>
       <div class="card row" style="margin-top:9px">
-        <input type="text" id="${m.id}-greeting-text" value="Hello, Admin!" aria-label="${m.label} admin greeting">
+        <input type="text" id="${m.id}-greeting-text" value="${escapeHtml(m.greetingText)}" oninput="setGreetingText('${m.id}', this.value)" aria-label="${m.label} admin greeting">
         <button onclick="updateGreeting('${m.id}', 'alice')">Set Admin Greeting</button>
       </div>
       <button class="danger" onclick="flushAll('${m.id}')">Flush ${m.label} Cache</button>

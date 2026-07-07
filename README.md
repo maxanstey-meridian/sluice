@@ -244,22 +244,6 @@ Key files:
 - `examples/playground/Generated/` — codegen mode
 - `examples/playground/wwwroot/index.html` — tabbed visualization
 
-Route prefixes keep the two modes isolated:
-
-```text
-/manual/api/dashboard/{user}
-/manual/api/flag/toggle
-/manual/api/greeting/{user}
-/manual/sluice/events
-/manual/sluice/state
-
-/generated/api/dashboard/{user}
-/generated/api/flag/toggle
-/generated/api/greeting/{user}
-/generated/sluice/events
-/generated/sluice/state
-```
-
 `Program.cs` creates one runtime per mode:
 
 ```csharp
