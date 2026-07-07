@@ -45,11 +45,22 @@ public sealed class InMemoryEpochFence : IEpochFence
                 continue;
             }
 
+            if (record.Epoch > throughEpoch)
+            {
+                continue;
+            }
+
             if (!record.Addresses.Any(changed => EpochFenceHelper.Overlaps(changed, observedReads)))
             {
                 continue;
             }
 
+            return Task.FromResult(true);
+        }
+
+        var currentEpoch = Interlocked.Read(ref _writeEpoch);
+        if (currentEpoch - MaxRecentInvalidations > afterEpoch)
+        {
             return Task.FromResult(true);
         }
 

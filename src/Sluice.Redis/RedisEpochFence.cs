@@ -77,6 +77,12 @@ public sealed class RedisEpochFence(IConnectionMultiplexer redis, string keyPref
             }
         }
 
+        var currentEpoch = await ReadEpochAsync(ct);
+        if (currentEpoch - MaxRecentInvalidations > afterEpoch)
+        {
+            return true;
+        }
+
         return false;
     }
 }
