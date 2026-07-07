@@ -78,7 +78,8 @@ public sealed class DashboardCache
         var greetingResource = new EntityResource<StringKey>("greeting");
 
         // .Read(storeMethod) pairs a resource address with the actual fetch.
-        // .Get(key, scope) below records that address before calling the store.
+        // Calling .Get(key, scope) inside the query body records the read
+        // into the scope so Sluice can track which resources were observed.
         var userRead = userResource.Read((id, _) => _store.GetUser(id.Value));
         var flagRead = flagResource.Read((id, _) => _store.GetFlag(id.Value));
         var greetingRead = greetingResource.Read((id, _) => _store.GetGreeting(id.Value));
