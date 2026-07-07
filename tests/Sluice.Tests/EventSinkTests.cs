@@ -356,6 +356,9 @@ public sealed class EventSinkTests
             sink.Events.Should().Contain(e => e.Event.Type == "invalidate");
             var invalidate = sink.Events.First(e => e.Event.Type == "invalidate");
             invalidate.Event.Detail.Should().Contain("customer.score:v1:{\"customerId\":\"c1\"}");
+            invalidate
+                .Event.AffectedEntryKeys.Should()
+                .Contain("customer.score:v1:{\"customerId\":\"c1\"}");
         }
 
         [Fact]

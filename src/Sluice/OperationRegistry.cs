@@ -345,7 +345,8 @@ public sealed class OperationRegistry(
                     _clock.GetUtcNow(),
                     "invalidate",
                     ResourceName: string.Join(", ", resourceNames),
-                    Detail: string.Join(", ", affectedEntryKeys)
+                    Detail: string.Join(", ", affectedEntryKeys),
+                    AffectedEntryKeys: affectedEntryKeys
                 )
             );
         }

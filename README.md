@@ -2,289 +2,286 @@
 
 Sluice is a .NET cache library that invalidates by observed dependencies, not broad tags.
 
-A query records the resource addresses it actually read while computing. A write declares the resource addresses it changed. Sluice evicts only cached entries whose observed reads intersect those changed addresses.
+A query records the resource addresses it actually read while computing. A write declares the resource addresses it
+changed. Sluice evicts only cached entries whose observed reads intersect those changed addresses.
 
-**Three tiers, all fully functional:**
-
-1. **Hand-written** — resource definitions + `TrackedRead` + `TrackedWrite` + `CachedQuery`. ~30 lines.
-2. **Codegen** — annotate your store interface with attributes. The generator writes Tier 1 for you.
-3. **Escape hatch** — `sluice.Apply(work, effect, ct)` or `sluice.Invalidate(effect, ct)` for one-off writes.
-
-Queries always stay hand-written — projection composition is application logic.
+The runnable playground in `examples/playground` is the canonical example: a cached dashboard where Alice and Bob share
+one dependency, while only Alice depends on an admin greeting.
 
 ## Status
 
 Prototype / proof of concept. Targets `.NET 10` (`net10.0`). The core library has zero third-party dependencies.
 
-## The domain
+## Example
 
-These types are identical across all tiers. Sluice does not change your domain.
+Run it:
+
+```bash
+dotnet run --project examples/playground/Playground.csproj
+```
+
+Open `http://localhost:5300`.
+
+The example caches `dashboard:v1:{user}` for Alice and Bob:
+
+- both dashboards read `user:{id}`
+- both dashboards read shared `flag:dark_mode`
+- only Alice reads `greeting:alice`
+
+That gives the selective invalidation behavior:
+
+- toggling `dark_mode` invalidates both cached dashboards
+- changing Alice's greeting invalidates Alice only
+- Bob remains a cache hit after the greeting changes
+
+The playground has two isolated app modes with the same behavior:
+
+- `examples/playground/Manual/` — hand-written `EntityResource`, `TrackedRead`, and `TrackedWrite`
+- `examples/playground/Generated/` — annotated store interface; the generator emits the tracked wrapper
+- `examples/playground/wwwroot/index.html` — tabbed visualization (Manual / Generated)
+
+Each mode owns its own store, `SluiceKernel`, event sink, cached query, and UI state. The duplicated folders are intentional: you can compare the manual and generated slices directly.
+
+### Domain in each slice
+
+Sluice does not change your domain. Both slices use the same simple records:
 
 ```csharp
-// Keys implement IResourceKey. ResourceKey is used in resource addresses —
-// it must be stable, culture-invariant, and unique within the resource.
-public sealed record UserId(string Value) : IResourceKey
+public sealed record User(string Id, string Name, string Role);
+
+public sealed record FeatureFlag(string Id, bool Enabled);
+
+public sealed record Greeting(string Id, string Text);
+
+public sealed record Dashboard(User User, FeatureFlag Flag, Greeting? Greeting);
+```
+
+### Manual slice
+
+The manual slice is explicit: resource definitions, tracked reads, tracked writes, and the cached projection all live in `Manual/Application/DashboardCache.cs`.
+
+```csharp
+public sealed record StringKey(string Value) : IResourceKey
 {
+    // ResourceKey is the stable string Sluice stores in resource addresses.
+    // For this demo the user/flag/greeting IDs are already stable strings.
     public string ResourceKey => Value;
 }
 
-public sealed record User(UserId Id, string Name, string Email);
-public sealed record UserSettings(UserId Id, bool DarkMode, string Language);
-public sealed record UserPreferences(UserId Id, string Theme);
-public sealed record UserProfile(
-    UserId Id, string Name, string Email,
-    bool DarkMode, string Language, string Theme);
-public sealed record UpdateUserInput(string Name, bool DarkMode, string Theme);
-
-// Your store. Nothing changes here in any tier.
-public interface IUserStore
+// This is the hand-written Sluice layer for the playground.
+// It names the resources, derives tracked reads/writes, and composes them into
+// the cached dashboard projection that the UI exercises.
+public sealed class DashboardCache
 {
-    Task<User> GetUser(UserId id, CancellationToken ct);
-    Task<UserSettings> GetSettings(UserId id, CancellationToken ct);
-    Task<UserPreferences> GetPreferences(UserId id, CancellationToken ct);
-    Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct);
-}
-```
+    private const string DarkModeFlagId = "dark_mode";
 
----
+    private readonly SluiceKernel _sluice;
+    private readonly PlaygroundStore _store;
+    private readonly CachedQuery<StringKey, Dashboard> _dashboardQuery;
+    private readonly TrackedWrite<StringKey> _flagWrite;
+    private readonly TrackedWrite<StringKey> _greetingWrite;
 
-## Tier 0 — No Sluice
-
-Every call hits the store. No cache, no dependency tracking.
-
-```csharp
-public sealed class UserService(IUserStore store)
-{
-    public async Task<UserProfile> GetProfile(UserId id, CancellationToken ct)
+    public DashboardCache(SluiceKernel sluice, PlaygroundStore store)
     {
-        var user = await store.GetUser(id, ct);
-        var settings = await store.GetSettings(id, ct);
-        var preferences = await store.GetPreferences(id, ct);
+        _sluice = sluice;
+        _store = store;
 
-        return new UserProfile(
-            id, user.Name, user.Email,
-            settings.DarkMode, settings.Language, preferences.Theme);
+        // Resource definitions are pure identity: kind + name + key type.
+        // The same resource name must be used by reads and writes so Sluice can
+        // intersect "what was read" with "what changed" during invalidation.
+        var userResource = new EntityResource<StringKey>("user");
+        var flagResource = new EntityResource<StringKey>("flag");
+        var greetingResource = new EntityResource<StringKey>("greeting");
+
+        // .Read(storeMethod) pairs a resource address with the actual fetch.
+        // .Get(key, scope) below records that address before calling the store.
+        var userRead = userResource.Read((id, _) => _store.GetUser(id.Value));
+        var flagRead = flagResource.Read((id, _) => _store.GetFlag(id.Value));
+        var greetingRead = greetingResource.Read((id, _) => _store.GetGreeting(id.Value));
+
+        // The cached query is the projection users read from the playground.
+        // The cache key becomes dashboard:v1:"alice" or dashboard:v1:"bob".
+        _dashboardQuery = new CachedQuery<StringKey, Dashboard>(
+            "dashboard",
+            id => id.Value,
+            async (id, scope) =>
+            {
+                // Both dashboards depend on their user row and the shared flag.
+                var user = await userRead.Get(id, scope);
+                var flag = await flagRead.Get(new StringKey(DarkModeFlagId), scope);
+                Greeting? greeting = null;
+
+                // Alice is admin, so only Alice's dashboard observes greeting:alice.
+                // Bob never reads it, so a greeting write should not evict Bob.
+                if (user.Role == "admin")
+                {
+                    greeting = await greetingRead.Get(id, scope);
+                }
+
+                return new Dashboard(user, flag, greeting);
+            },
+            ttl: TimeSpan.FromMinutes(5)
+        );
+
+        // Writes declare which resource address changed.
+        // Sluice evicts cached entries whose recorded reads include that address.
+        _flagWrite = new TrackedWrite<StringKey>(_sluice, flagResource.For);
+        _greetingWrite = new TrackedWrite<StringKey>(_sluice, greetingResource.For);
     }
 
-    public Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct) =>
-        store.UpdateUser(id, input, ct);
+    // Cache miss: compute the dashboard, record observed resource reads, store it.
+    // Cache hit: return the stored Dashboard without calling PlaygroundStore.
+    public Task<Dashboard> GetDashboard(string user, CancellationToken ct) =>
+        _sluice.Get(_dashboardQuery, new StringKey(user), ct);
+
+    public async Task<FeatureFlag> ToggleDarkMode(CancellationToken ct)
+    {
+        // dark_mode is shared, so both dashboard:v1:alice and dashboard:v1:bob
+        // are affected after they have observed flag:dark_mode.
+        await _flagWrite.Write(
+            new StringKey(DarkModeFlagId),
+            _ => _store.ToggleFlag(DarkModeFlagId),
+            ct
+        );
+
+        return await _store.GetFlag(DarkModeFlagId);
+    }
+
+    // greeting:{user} is selective. In the seeded data only Alice reads a greeting,
+    // so updating Alice's greeting evicts Alice but leaves Bob cached.
+    public Task UpdateGreeting(string user, string text, CancellationToken ct) =>
+        _greetingWrite.Write(new StringKey(user), _ => _store.UpdateGreeting(user, text), ct);
+
+    // Flush is the broad escape hatch: clear cache entries and dependency edges.
+    public Task FlushAll(CancellationToken ct) => _sluice.FlushAllAsync(ct);
 }
 ```
 
-```csharp
-var svc = new UserService(store);
+### Generated slice
 
-await svc.GetProfile(new UserId("alice"), ct);  // 3 store calls
-await svc.GetProfile(new UserId("alice"), ct);  // 3 more — no cache
-```
-
----
-
-## Tier 1 — Hand-written Sluice
-
-### Resource definitions
-
-Pure data. No store, no sluice. Calling `.For(id)` produces a concrete `ResourceAddress`.
+The generated slice keeps the same domain and query, but replaces the manual resource wrapper with an annotated interface:
 
 ```csharp
-// Static resource definitions — kind + name + key type.
-// These are the identity of the data you cache around.
-// Reads, writes, and wildcards all reference them by name.
-public static class UserResources
-{
-    public static readonly EntityResource<UserId> User = new("user");
-    public static readonly EntityResource<UserId> Settings = new("userSettings");
-    public static readonly EntityResource<UserId> Preferences = new("userPreferences");
-}
-```
-
-### Sluice wrapper
-
-Primary constructor. Field initializers make the derivation from resource definition
-visible at each declaration — `UserResources.User.Read(store.GetUser)` is right there.
-
-```csharp
-// ISluice captured for writes. IUserStore captured for data access.
-// Each TrackedRead is derived from its resource definition via .Read().
-public sealed class UserSluice(ISluice sluice, IUserStore store)
-{
-    // .Read(storeMethod) pairs a resource definition with its store delegate.
-    // .Get(key, scope) records the dependency and fetches the value.
-    public readonly TrackedRead<UserId, User> User =
-        UserResources.User.Read(store.GetUser);
-
-    public readonly TrackedRead<UserId, UserSettings> Settings =
-        UserResources.Settings.Read(store.GetSettings);
-
-    public readonly TrackedRead<UserId, UserPreferences> Preferences =
-        UserResources.Preferences.Read(store.GetPreferences);
-
-    // TrackedWrite captures ISluice + address delegates.
-    // .Write(key, work, ct) runs the work, then invalidates affected entries.
-    public readonly TrackedWrite<UserId> UpdateUser = new(
-        sluice,
-        UserResources.User.For,
-        UserResources.Settings.For,
-        UserResources.Preferences.For);
-}
-```
-
-Queries can't be field initializers on `UserSluice` (CS0236: they reference sibling
-reads). They live in a separate class that captures the `UserSluice` instance:
-
-```csharp
-// Queries compose tracked reads into cached projections.
-// The compute body is application logic — always hand-written.
-public sealed class UserQueries(UserSluice users)
-{
-    public readonly CachedQuery<UserId, UserProfile> Profile =
-        new("user.profile", id => id.Value, async (id, scope) =>
-        {
-            var u = await users.User.Get(id, scope);
-            var s = await users.Settings.Get(id, scope);
-            var p = await users.Preferences.Get(id, scope);
-            return new UserProfile(
-                id, u.Name, u.Email, s.DarkMode, s.Language, p.Theme);
-        });
-}
-```
-
-### Call site
-
-```csharp
-var sluice = new SluiceKernel(new InMemoryCacheStore());
-var store  = new InMemoryUserStore();
-var users  = new UserSluice(sluice, store);
-var queries = new UserQueries(users);
-
-// Cache miss: 3 store calls, tracks 3 dependencies, caches result.
-await sluice.Get(queries.Profile, new UserId("alice"), ct);
-
-// Cache hit: 0 store calls.
-await sluice.Get(queries.Profile, new UserId("alice"), ct);
-
-// Write: runs work delegate, invalidates user/settings/preferences for alice.
-await users.UpdateUser.Write(
-    new UserId("alice"),
-    ct => store.UpdateUser(new UserId("alice"), new("Alice 2", true, "dark"), ct),
-    ct);
-
-// Cache miss: 3 store calls, fresh result.
-await sluice.Get(queries.Profile, new UserId("alice"), ct);
-```
-
----
-
-## Tier 2 — Codegen
-
-Annotate your store interface. The generator writes the resource class and sluice wrapper
-for you.
-
-### What you write
-
-```csharp
-[Sluice]
-public interface IUserStore
+[Sluice("GeneratedDashboard")]
+public interface IGeneratedPlaygroundStore
 {
     [ReadEntity("user")]
-    Task<User> GetUser(UserId id, CancellationToken ct);
+    public Task<User> GetUser(StringKey id, CancellationToken ct);
 
-    [ReadEntity("userSettings")]
-    Task<UserSettings> GetSettings(UserId id, CancellationToken ct);
+    [ReadEntity("flag")]
+    public Task<FeatureFlag> GetFlag(StringKey id, CancellationToken ct);
 
-    [ReadEntity("userPreferences")]
-    Task<UserPreferences> GetPreferences(UserId id, CancellationToken ct);
+    [ReadEntity("greeting")]
+    public Task<Greeting> GetGreeting(StringKey id, CancellationToken ct);
 
-    [WriteEntity("user")]
-    [WriteEntity("userSettings")]
-    [WriteEntity("userPreferences")]
-    Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct);
+    [WriteEntity("flag")]
+    public Task ToggleFlag(StringKey id, CancellationToken ct);
+
+    [WriteEntity("greeting")]
+    public Task UpdateGreeting(StringKey id, string text, CancellationToken ct);
 }
 ```
 
-### What the generator emits
+That interface emits `GeneratedDashboardResources` and `GeneratedDashboardSluice`. The generated cache uses that wrapper, but the projection remains hand-written:
 
 ```csharp
-// UserStoreResources.g.cs — same as hand-written UserResources.
-public static class UserStoreResources
+// Generated mode keeps the same cached projection, but gets tracked reads and
+// writes from the source-generated GeneratedDashboardSluice wrapper.
+public sealed class DashboardCache
 {
-    public static readonly EntityResource<UserId> User = new("user");
-    public static readonly EntityResource<UserId> Settings = new("userSettings");
-    public static readonly EntityResource<UserId> Preferences = new("userPreferences");
-}
+    private const string DarkModeFlagId = "dark_mode";
 
-// UserStoreSluice.g.cs — same as hand-written UserSluice.
-public sealed class UserStoreSluice(ISluice sluice, IUserStore store)
-{
-    public readonly TrackedRead<UserId, User> User =
-        UserStoreResources.User.Read(store.GetUser);
+    private readonly SluiceKernel _sluice;
+    private readonly PlaygroundStore _store;
+    private readonly GeneratedDashboardSluice _generated;
+    private readonly CachedQuery<StringKey, Dashboard> _dashboardQuery;
 
-    public readonly TrackedRead<UserId, UserSettings> Settings =
-        UserStoreResources.Settings.Read(store.GetSettings);
+    public DashboardCache(SluiceKernel sluice, PlaygroundStore store)
+    {
+        _sluice = sluice;
+        _store = store;
+        _generated = new GeneratedDashboardSluice(_sluice, _store);
 
-    public readonly TrackedRead<UserId, UserPreferences> Preferences =
-        UserStoreResources.Preferences.Read(store.GetPreferences);
+        // The query is still hand-written. Codegen replaces the resource wrapper,
+        // not the application projection.
+        _dashboardQuery = new CachedQuery<StringKey, Dashboard>(
+            "dashboard",
+            id => id.Value,
+            async (id, scope) =>
+            {
+                var user = await _generated.User.Get(id, scope);
+                var flag = await _generated.Flag.Get(new StringKey(DarkModeFlagId), scope);
+                Greeting? greeting = null;
 
-    private readonly TrackedWrite<UserId> _updateUser = new(
-        sluice,
-        UserStoreResources.User.For,
-        UserStoreResources.Settings.For,
-        UserStoreResources.Preferences.For);
+                if (user.Role == "admin")
+                {
+                    greeting = await _generated.Greeting.Get(id, scope);
+                }
 
-    // Generated write method mirrors the store signature.
-    // The work delegate (store call) is hidden inside.
-    public Task UpdateUser(UserId id, UpdateUserInput input, CancellationToken ct) =>
-        _updateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct);
+                return new Dashboard(user, flag, greeting);
+            },
+            ttl: TimeSpan.FromMinutes(5)
+        );
+    }
+
+    public Task<Dashboard> GetDashboard(string user, CancellationToken ct) =>
+        _sluice.Get(_dashboardQuery, new StringKey(user), ct);
+
+    public async Task<FeatureFlag> ToggleDarkMode(CancellationToken ct)
+    {
+        await _generated.ToggleFlag(new StringKey(DarkModeFlagId), ct);
+        return await _store.GetFlag(new StringKey(DarkModeFlagId), ct);
+    }
+
+    public Task UpdateGreeting(string user, string text, CancellationToken ct) =>
+        _generated.UpdateGreeting(new StringKey(user), text, ct);
+
+    public Task FlushAll(CancellationToken ct) => _sluice.FlushAllAsync(ct);
 }
 ```
 
-Queries are still hand-written — the generator cannot compose projections:
+### App mode routing
+
+The host maps both modes under separate prefixes:
+
+```text
+/manual/api/dashboard/{user}
+/manual/api/flag/toggle
+/manual/api/greeting/{user}
+/manual/sluice/events
+/manual/sluice/state
+
+/generated/api/dashboard/{user}
+/generated/api/flag/toggle
+/generated/api/greeting/{user}
+/generated/sluice/events
+/generated/sluice/state
+```
+
+### Composition root
+
+`Program.cs` creates one runtime per mode and maps both endpoint slices:
 
 ```csharp
-public sealed class UserQueries(UserStoreSluice users)
-{
-    public readonly CachedQuery<UserId, UserProfile> Profile =
-        new("user.profile", id => id.Value, async (id, scope) =>
-        {
-            var u = await users.User.Get(id, scope);
-            var s = await users.Settings.Get(id, scope);
-            var p = await users.Preferences.Get(id, scope);
-            return new UserProfile(
-                id, u.Name, u.Email, s.DarkMode, s.Language, p.Theme);
-        });
-}
+var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseUrls("http://localhost:5300");
+
+var app = builder.Build();
+app.UseStaticFiles();
+
+// Each mode is a fully isolated app slice: own store, Sluice kernel, event sink,
+// cached query, and materialized UI state.
+var manual = new ManualPlaygroundRuntime();
+var generated = new GeneratedPlaygroundRuntime();
+
+app.MapManualEndpoints(manual);
+app.MapGeneratedEndpoints(generated);
+
+app.MapFallbackToFile("index.html");
+
+Console.WriteLine("Sluice Playground running at http://localhost:5300");
+await app.RunAsync();
 ```
-
-### Call site
-
-```csharp
-var sluice = new SluiceKernel(new InMemoryCacheStore());
-var store  = new InMemoryUserStore();
-var users  = new UserStoreSluice(sluice, store);     // generated
-var queries = new UserQueries(users);                 // hand-written
-
-await sluice.Get(queries.Profile, new UserId("alice"), ct);     // miss
-await sluice.Get(queries.Profile, new UserId("alice"), ct);     // hit
-
-// Generated write: mirrors store signature, hides the work delegate.
-await users.UpdateUser(new UserId("alice"), new("Alice 2", true, "dark"), ct);
-
-await sluice.Get(queries.Profile, new UserId("alice"), ct);     // miss, fresh
-```
-
----
-
-## Call site comparison
-
-| Operation | Tier 0 (no Sluice) | Tier 1 (hand-written) | Tier 2 (codegen) |
-|---|---|---|---|
-| **Read** | `store.GetUser(id, ct)` | `users.User.Get(id, scope)` | `users.User.Get(id, scope)` |
-| **Query** | `svc.GetProfile(id, ct)` | `sluice.Get(queries.Profile, id, ct)` | `sluice.Get(queries.Profile, id, ct)` |
-| **Write** | `store.UpdateUser(id, input, ct)` | `users.UpdateUser.Write(id, ct => store.UpdateUser(id, input, ct), ct)` | `users.UpdateUser(id, input, ct)` |
-
-Reads and queries are identical between Tier 1 and Tier 2. Writes differ: hand-written
-exposes `.Write(key, work, ct)` (you supply the store call), codegen exposes a method
-that mirrors the store signature (the store call is generated for you).
 
 ---
 
@@ -313,17 +310,19 @@ A `ResourceAddress` is the unit of dependency tracking. It has three parts:
 
 ```text
 entity:user:alice
-entity:userSettings:alice
-collection:orders.byCustomer:customer-123
+entity:flag:dark_mode
+entity:greeting:alice
 ```
 
 `EntityResource<TKey>.For(key)` and `CollectionResource<TKey>.For(key)` produce addresses.
 `Wildcard()` produces an address that matches all keys of a resource (for bulk invalidation):
 
 ```csharp
-// Invalidate every cached entry that read any user entity.
+var flagResource = new EntityResource<StringKey>("flag");
+
+// Invalidate every cached entry that read flag:dark_mode.
 await sluice.Invalidate(
-    new WriteEffect(UserResources.User.Wildcard()),
+    new WriteEffect(flagResource.For(new StringKey("dark_mode"))),
     ct);
 ```
 
@@ -334,17 +333,17 @@ await sluice.Invalidate(
 For one-off writes without a `TrackedWrite` field:
 
 ```csharp
+var flagResource = new EntityResource<StringKey>("flag");
+
 // Run the work, then invalidate the declared addresses.
 await sluice.Apply(
-    ct => store.UpdateUser(id, input, ct),
-    new WriteEffect(
-        UserResources.User.For(id),
-        UserResources.Settings.For(id)),
+    ct => store.ToggleFlag("dark_mode"),
+    new WriteEffect(flagResource.For(new StringKey("dark_mode"))),
     ct);
 
 // Or if the work already committed — just invalidate.
 await sluice.Invalidate(
-    new WriteEffect(UserResources.User.For(id)),
+    new WriteEffect(flagResource.For(new StringKey("dark_mode"))),
     ct);
 ```
 
@@ -361,13 +360,13 @@ var order = await sluice.Apply(
 For custom tracking inside a compute body (computed addresses, conditional reads):
 
 ```csharp
-var query = new CachedQuery<UserId, User>("user.byId", id => id.Value,
+var query = new CachedQuery<StringKey, FeatureFlag>("flag.byId", id => id.Value,
     async (id, scope) =>
     {
         // Manual tracking instead of TrackedRead.
         return await scope.Track(
-            new ResourceAddress(ResourceKind.Entity, "user", id.ResourceKey),
-            ct => store.GetUser(id, ct));
+            new ResourceAddress(ResourceKind.Entity, "flag", id.ResourceKey),
+            ct => store.GetFlag(id.Value));
     });
 ```
 
@@ -387,20 +386,28 @@ Example `DumpGraphAsync` output:
 
 ```text
 OPERATIONS:
-  user.profile:v1:"alice"
+  dashboard:v1:"alice"
     reads:
       entity:user:alice
-      entity:userSettings:alice
-      entity:userPreferences:alice
+      entity:flag:dark_mode
+      entity:greeting:alice
     cached: 2026-07-06T10:20:01+00:00
 
+  dashboard:v1:"bob"
+    reads:
+      entity:user:bob
+      entity:flag:dark_mode
+    cached: 2026-07-06T10:20:02+00:00
+
 RESOURCE ADDRESSES:
-  entity:user:alice
+  entity:flag:dark_mode
     invalidates:
-      user.profile:v1:"alice"
-  entity:userSettings:alice
+      dashboard:v1:"alice"
+      dashboard:v1:"bob"
+
+  entity:greeting:alice
     invalidates:
-      user.profile:v1:"alice"
+      dashboard:v1:"alice"
 ```
 
 Each cached entry lists the resources it tracked. Each resource address lists the entries
@@ -408,15 +415,45 @@ it would invalidate.
 
 ---
 
+---
+
+## Error Handling During Compute
+
+If the compute body throws, the exception propagates directly to the caller. Nothing is cached — no partial or stale value is stored.
+
+The stampede lease is always released (`try/finally`), so a failed leader never blocks subsequent callers:
+
+1. **Leader throws** → lease released → entry not stored → exception propagates to the leader's caller.
+2. **Followers** poll the cache for `WaitTimeout` (default 5s). The entry never appears (the leader stored nothing).
+3. After timeout, a follower tries to acquire the lease. Since the leader released it, the follower succeeds and becomes the new leader — it computes itself.
+4. If the lease is still held (another follower grabbed it first), the follower emits `stampede.timeout` and computes without the lease.
+
+If the underlying store consistently throws, every concurrent caller eventually receives the exception. Each follower incurs one `WaitTimeout` delay before its own attempt, so a persistently failing compute body adds up to `WaitTimeout` latency to concurrent requests.
+
+Tune `StampedeOptions` to control this:
+
+```csharp
+var sluice = new SluiceKernel(
+    new InMemoryCacheStore(),
+    stampedeOptions: new StampedeOptions
+    {
+        WaitTimeout = TimeSpan.FromSeconds(2),  // follower poll deadline
+        LeaseTtl = TimeSpan.FromSeconds(30),    // max leader compute time
+        MaxBackoff = TimeSpan.FromMilliseconds(50),
+    });
+```
+
+---
+
 ## Codegen Attributes
 
-| Attribute | Emits |
-|---|---|
-| `[Sluice]` on interface | `{Name}Resources` + `{Name}Sluice` classes |
-| `[ReadEntity("name")]` | `EntityResource<TKey>` field + `TrackedRead` |
-| `[ReadCollection("name", "byKey")]` | `CollectionResource<TKey>` field + `TrackedRead` |
-| `[WriteEntity("name")]` | Address in generated `TrackedWrite` |
-| `[WriteCollection("name", "byKey")]` | Address in generated `TrackedWrite` |
+| Attribute                                   | Emits                                                            |
+|---------------------------------------------|------------------------------------------------------------------|
+| `[Sluice]` on interface                     | `{Name}Resources` + `{Name}Sluice` classes                       |
+| `[ReadEntity("name")]`                      | `EntityResource<TKey>` field + `TrackedRead`                     |
+| `[ReadCollection("name", "byKey")]`         | `CollectionResource<TKey>` field + `TrackedRead`                 |
+| `[WriteEntity("name")]`                     | Address in generated `TrackedWrite`                              |
+| `[WriteCollection("name", "byKey")]`        | Address in generated `TrackedWrite`                              |
 | `ResultKey = nameof(X.Id)` (on write attrs) | Result-derived address resolver in `TrackedWrite<TKey, TResult>` |
 
 Resources are canonicalised by name. `[ReadEntity("user")]` and `[WriteEntity("user")]`
@@ -426,20 +463,6 @@ Generated naming: strip the `I` prefix from the interface, append `Sluice`.
 `IUserStore` → `UserStoreSluice`. Override with `[Sluice("User")]` → `UserSluice`.
 A custom name ending in `Sluice` (e.g. `[Sluice("UserSluice")]`) is treated as invalid
 base-name input and emits `SLUICE002` - no source is generated.
-
----
-
-## Example
-
-```bash
-dotnet run --project examples/user-profile
-```
-
-Key files:
-
-- `examples/user-profile/Domain.cs` — IDs, DTOs, store port, in-memory store
-- `examples/user-profile/UserApi.cs` — resources, UserSluice, UserQueries, use case
-- `examples/user-profile/Program.cs` — runnable walkthrough
 
 ## Build And Test
 
@@ -452,19 +475,26 @@ dotnet test Sluice.sln
 
 Sluice ships two Redis-backed stores in the separate `Sluice.Redis` package:
 
-- `RedisCacheStore` — replaces `InMemoryCacheStore` for distributed caching. Serializes `CacheEntry<TValue>` as JSON using `System.Text.Json` with configurable `JsonSerializerOptions`.
-- `RedisGraphStore` — replaces `InMemoryGraphStore` for distributed invalidation. Stores resource addresses as Redis SET members via `SADD`/`SMEMBERS`/`SREM`.
+- `RedisCacheStore` — replaces `InMemoryCacheStore` for distributed caching. Serializes `CacheEntry<TValue>` as JSON
+  using `System.Text.Json` with configurable `JsonSerializerOptions`.
+- `RedisGraphStore` — replaces `InMemoryGraphStore` for distributed invalidation. Stores resource addresses as Redis SET
+  members via `SADD`/`SMEMBERS`/`SREM`.
 
-Primary wiring uses `SluiceRedis.Create`, which automatically wires all three Redis components with a shared circuit breaker for resilience:
+Primary wiring uses `SluiceRedis.Create`, which automatically wires all three Redis components with a shared circuit
+breaker for resilience:
 
 ```csharp
 var redis = await ConnectionMultiplexer.ConnectAsync("redis://localhost:6379");
 var sluice = SluiceRedis.Create(redis);
 ```
 
-`SluiceRedis.Create` wraps `RedisCacheStore`, `RedisGraphStore`, and `RedisStampedeCoordinator` in resilient decorators that share one circuit breaker. When Redis is unavailable, cache reads return misses, cache writes are silently dropped, and no Redis exceptions propagate to the caller. The circuit opens after 5 consecutive failures and recovers after a 10-second cooldown with a single probe call.
+`SluiceRedis.Create` wraps `RedisCacheStore`, `RedisGraphStore`, and `RedisStampedeCoordinator` in resilient decorators
+that share one circuit breaker. When Redis is unavailable, cache reads return misses, cache writes are silently dropped,
+and no Redis exceptions propagate to the caller. The circuit opens after 5 consecutive failures and recovers after a
+10-second cooldown with a single probe call.
 
-For custom configurations (different key prefix, serializer options, stampede options, or circuit breaker settings), construct the stores manually:
+For custom configurations (different key prefix, serializer options, stampede options, or circuit breaker settings),
+construct the stores manually:
 
 ```csharp
 var redis = await ConnectionMultiplexer.ConnectAsync("redis://localhost:6379");
@@ -474,13 +504,21 @@ var stampede = new RedisStampedeCoordinator(redis);
 var sluice = new SluiceKernel(cacheStore, graphStore, stampedeCoordinator: stampede);
 ```
 
-Both `RedisCacheStore` and `RedisGraphStore` must be passed together to `SluiceKernel` for distributed deployments. Passing only `RedisCacheStore` produces distributed cache + in-process graph — a hybrid that causes invalidation misses across processes.
+Both `RedisCacheStore` and `RedisGraphStore` must be passed together to `SluiceKernel` for distributed deployments.
+Passing only `RedisCacheStore` produces distributed cache + in-process graph — a hybrid that causes invalidation misses
+across processes.
 
-Stampede protection coalesces redundant recompute across processes. When multiple processes miss the same cache entry simultaneously, only one computes while others poll the cache with backoff until the entry appears. The `RedisStampedeCoordinator` uses `SET NX PX` for lease acquisition and an atomic Lua compare-and-delete for release. The Lua constraint (no Lua scripts in Redis backing) is relaxed specifically for this release script — `RedisCacheStore` and `RedisGraphStore` remain Lua-free. Lease TTL (default 30s) bounds how long one process may own a recompute; it is separate from cache entry TTL, which may be minutes or hours.
+Stampede protection coalesces redundant recompute across processes. When multiple processes miss the same cache entry
+simultaneously, only one computes while others poll the cache with backoff until the entry appears. The
+`RedisStampedeCoordinator` uses `SET NX PX` for lease acquisition and an atomic Lua compare-and-delete for release. The
+Lua constraint (no Lua scripts in Redis backing) is relaxed specifically for this release script — `RedisCacheStore` and
+`RedisGraphStore` remain Lua-free. Lease TTL (default 30s) bounds how long one process may own a recompute; it is
+separate from cache entry TTL, which may be minutes or hours.
 
 The caller owns the `ConnectionMultiplexer` and its disposal lifecycle. Sluice does not dispose it.
 
-Serialization uses `System.Text.Json` with default options. Pass `JsonSerializerOptions` to the `RedisCacheStore` constructor for camelCase property naming, string-valued enums, or other customization:
+Serialization uses `System.Text.Json` with default options. Pass `JsonSerializerOptions` to the `RedisCacheStore`
+constructor for camelCase property naming, string-valued enums, or other customization:
 
 ```csharp
 var options = new JsonSerializerOptions
@@ -491,11 +529,14 @@ var options = new JsonSerializerOptions
 var cacheStore = new RedisCacheStore(redis, "sluice", options);
 ```
 
-Topology: single-node or managed endpoint (e.g. Azure Cache for Redis non-cluster mode, AWS ElastiCache non-cluster mode). Primary/replica managed endpoints are acceptable — `StackExchange.Redis` routes writes such as `KeyDeleteAsync` to the primary. Redis Cluster is not supported — `SCAN`-based clear and flush assume single-node key distribution.
+Topology: single-node or managed endpoint (e.g. Azure Cache for Redis non-cluster mode, AWS ElastiCache non-cluster
+mode). Primary/replica managed endpoints are acceptable — `StackExchange.Redis` routes writes such as `KeyDeleteAsync`
+to the primary. Redis Cluster is not supported — `SCAN`-based clear and flush assume single-node key distribution.
 
 Consistency is eventual. TTL is the backstop for distributed recompute and invalidation races.
 
-For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameters (default `"sluice"`) on both `RedisCacheStore` and `RedisGraphStore`.
+For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameters (default `"sluice"`) on both
+`RedisCacheStore` and `RedisGraphStore`.
 
 ## API Surface
 
@@ -527,7 +568,9 @@ For multi-tenant isolation on a shared Redis, use matching `keyPrefix` parameter
 - Writes must declare every resource address they changed. Missing addresses leave stale entries.
 - If a write succeeds and the process crashes before invalidation, stale entries remain until TTL or flush.
 - In-memory cache/graph stores are for tests and single-process apps.
-- Distributed stampede prevention coalesces redundant recompute but does not prevent all cross-process invalidation races. Those remain bounded by TTL unless distributed epoch fencing is added (future work).
+- Distributed stampede prevention coalesces redundant recompute but does not prevent all cross-process invalidation
+  races. Those remain bounded by TTL unless distributed epoch fencing is added (future work).
 - Redis backing is single-node or managed endpoint only. Redis Cluster topology is not supported.
 - The dependency graph is process-local. Cross-process invalidation requires Redis backing.
-- Benchmark overhead is dominated by fixed tracking cost for tiny in-memory operations; Sluice is intended for cached operations expensive enough to justify dependency tracking.
+- Benchmark overhead is dominated by fixed tracking cost for tiny in-memory operations; Sluice is intended for cached
+  operations expensive enough to justify dependency tracking.

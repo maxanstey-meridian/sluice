@@ -7,5 +7,6 @@ public sealed record SluiceEvent(
     string? EntryKey = null,
     string? ResourceName = null,
     long? DurationMs = null,
-    string? Detail = null
+    string? Detail = null,
+    IReadOnlyList<string>? AffectedEntryKeys = null
 );

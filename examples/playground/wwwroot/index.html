@@ -4,63 +4,150 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sluice Playground</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/themes/prism-tomorrow.min.css">
 <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; max-width: 720px; }
-h1 { font-size: 1.5rem; color: #58a6ff; margin-bottom: 4px; }
-.subtitle { color: #8b949e; font-size: 0.85rem; margin-bottom: 24px; }
-.subtitle a { color: #58a6ff; }
-.user-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
-.user-name { font-size: 1.1rem; font-weight: 600; margin-bottom: 10px; }
-.button-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; transition: background .15s, border-color .15s; }
-button:hover { background: #30363d; border-color: #8b949e; }
-button.read { border-color: #1f6feb; }
-button.read:hover { background: rgba(31,111,235,.15); border-color: #1f6feb; }
-button.invalidate { border-color: #f85149; }
-button.invalidate:hover { background: rgba(248,81,73,.15); border-color: #f85149; }
-button.update { border-color: #d29922; }
-button.update:hover { background: rgba(210,153,34,.15); border-color: #d29922; }
-input[type="text"] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; width: 120px; }
-.global-actions { display: flex; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid #21262d; }
-.flash { position: fixed; top: 20px; right: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 16px; font-size: 0.85rem; opacity: 0; transition: opacity .3s; pointer-events: none; }
-.flash.show { opacity: 1; }
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #07111e; color: #e7edf6; }
+body::before { content: ""; position: fixed; inset: 0; pointer-events: none; background: radial-gradient(circle at 15% 0%, rgba(43, 118, 255, .18), transparent 28%), radial-gradient(circle at 85% 20%, rgba(80, 165, 255, .08), transparent 30%); }
+button, input { font: inherit; }
+button { border: 1px solid #244675; border-radius: 8px; background: #102036; color: #6db3ff; cursor: pointer; padding: 8px 13px; }
+button:hover { background: #162b48; }
+input { width: 185px; border: 1px solid #2a405b; border-radius: 8px; background: #091522; color: #e7edf6; padding: 8px 11px; }
+code { color: #68b8ff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.page { position: relative; padding: 26px 30px 38px; }
+.top { display: flex; gap: 28px; align-items: center; margin-bottom: 24px; }
+.logo { width: 48px; height: 48px; border-radius: 12px; background: linear-gradient(145deg, #65a8ff, #144dd6); box-shadow: 0 10px 35px rgba(45, 111, 255, .32); display: grid; place-items: center; font-size: 26px; font-weight: 900; }
+.title h1 { margin: 0; font-size: 32px; line-height: 1; letter-spacing: -.04em; }
+.title p { margin: 7px 0 0; color: #4fa7ff; font-size: 18px; }
+.summary { border-left: 1px solid #314159; color: #c1c9d5; line-height: 1.65; padding-left: 28px; }
+.mode-tabs { display: flex; gap: 6px; margin-bottom: 20px; }
+.mode-tab { padding: 11px 24px; font-size: 15px; font-weight: 700; border-radius: 10px; border: 1px solid #244675; background: #102036; color: #6db3ff; cursor: pointer; }
+.mode-tab.active { background: #1c5bd8; border-color: #3677ff; color: #fff; }
+.panel { border: 1px solid #2b3d54; border-radius: 16px; background: rgba(9, 20, 34, .78); box-shadow: 0 18px 70px rgba(0, 0, 0, .24); padding: 20px; }
+.mode-head { display: flex; justify-content: space-between; gap: 16px; align-items: start; margin-bottom: 16px; }
+.mode-head h2 { margin: 0 0 5px; font-size: 23px; }
+.mode-head p { margin: 0; color: #aeb8c7; font-size: 13px; line-height: 1.45; }
+.pill { border: 1px solid #36537a; border-radius: 999px; color: #9fcaff; padding: 5px 9px; font-size: 12px; font-weight: 800; white-space: nowrap; }
+.hint { border: 1px solid #244675; border-radius: 12px; background: linear-gradient(135deg, rgba(23, 53, 91, .85), rgba(8, 25, 45, .85)); padding: 12px 15px; line-height: 1.6; margin-bottom: 18px; font-size: 14px; }
+.section { margin: 18px 0 9px; color: #bcc4cf; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.card { border: 1px solid #293c54; border-radius: 13px; background: rgba(13, 25, 42, .82); padding: 14px; }
+.control-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.person { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; }
+.avatar { width: 38px; min-width: 38px; height: 38px; min-height: 38px; flex: 0 0 38px; border-radius: 50%; display: grid; place-items: center; background: #17243a; border: 1px solid #314763; }
+.badge { border-radius: 7px; font-size: 12px; font-weight: 600; padding: 3px 7px; }
+.badge.admin { color: #ff655b; border: 1px solid rgba(240, 77, 62, .55); background: rgba(240, 77, 62, .12); }
+.badge.member { color: #58a6ff; border: 1px solid rgba(57, 120, 230, .55); background: rgba(57, 120, 230, .12); }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.danger { color: #ff5d52; border-color: #c73c34; background: rgba(240, 77, 62, .08); margin-top: 16px; }
+.metrics { display: grid; grid-template-columns: repeat(5, 1fr); border: 1px solid #293c54; border-radius: 13px; overflow: hidden; margin: 18px 0; }
+.metric { text-align: center; padding: 12px 6px; border-right: 1px solid #24354b; }
+.metric:last-child { border-right: 0; }
+.metric strong { display: block; font-size: 22px; line-height: 1; }
+.metric span { display: block; margin-top: 7px; color: #b5becb; font-size: 10px; letter-spacing: .05em; }
+.hit { --color: #69c460; }
+.miss { --color: #f5c344; }
+.compute { --color: #3978e6; }
+.invalidate { --color: #f04d3e; }
+.stampede { --color: #8257d7; }
+.metric.hit, .event.hit { color: #69c460; }
+.metric.miss, .event.miss { color: #f5c344; }
+.metric.compute, .event.compute { color: #3978e6; }
+.metric.invalidate, .event.invalidate { color: #f04d3e; }
+.metric.stampede, .event.stampede { color: #8257d7; }
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.cache-card { display: flex; flex-direction: column; height: 600px; }
+.cache-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.cache-title { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 800; }
+.state-pill { border-radius: 999px; border: 1px solid currentColor; padding: 4px 8px; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+.state-pill.hit { color: #69c460; }
+.state-pill.miss { color: #f5c344; }
+.state-pill.compute { color: #3978e6; }
+.state-pill.invalidate { color: #f04d3e; }
+.state-pill.stampede { color: #8257d7; }
+.deps { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
+.dep { border: 1px solid #38506e; border-radius: 7px; padding: 4px 7px; color: #d7deea; font-size: 11px; }
+.dep.user { border-color: #5a9d4f; }
+.dep.flag { border-color: #2d72df; }
+.dep.greeting { border-color: #8257d7; }
+pre.value { flex: 1; min-height: 115px; overflow: auto; margin: 0 0 14px; padding: 12px; border: 1px solid #223348; border-radius: 10px; background: #07111e; color: #dce7f4; font-size: 11px; line-height: 1.45; white-space: pre-wrap; }
+.event-counts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; border-top: 1px solid #263951; padding-top: 12px; }
+.event { text-align: center; font-size: 10px; }
+.event strong { display: block; color: #f2f6fb; font-size: 16px; margin-top: 5px; }
+.trace { margin-top: 16px; }
+.trace-row { display: grid; grid-template-columns: 185px 1fr; gap: 12px; align-items: center; margin-top: 10px; }
+.trace-key { display: flex; align-items: center; gap: 9px; border: 1px solid #293c54; border-radius: 10px; padding: 9px; font-size: 12px; font-weight: 700; }
+.chain { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; color: #8b98a9; }
+.arrow { color: #526176; }
+.note { color: #a7b0bd; font-size: 12px; margin-top: 14px; }
+.source-toggle { margin-top: 14px; width: 100%; text-align: left; font-size: 13px; }
+.source-panel { display: none; margin-top: 10px; }
+.source-panel.open { display: block; }
+.source-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 0; }
+.source-tab { border: 1px solid #293c54; border-radius: 7px 7px 0 0; background: rgba(13, 25, 42, .6); color: #8b98a9; font-size: 11px; padding: 6px 10px; cursor: pointer; border-bottom: 0; }
+.source-tab.active { background: #07111e; color: #68b8ff; }
+pre.source-code { margin: 0; max-height: 420px; overflow: auto; padding: 14px; border: 1px solid #223348; border-radius: 0 10px 10px 10px; background: #07111e; color: #dce7f4; font-size: 11px; line-height: 1.5; white-space: pre; tab-size: 4; }
+.stampede { color: #b88dff; border-color: #5e3d8e; background: rgba(130, 87, 215, .08); margin-top: 9px; }
+.flash { position: fixed; right: 24px; bottom: 24px; opacity: 0; transform: translateY(8px); transition: .2s; border: 1px solid #2b4971; border-radius: 10px; background: #0d1b2d; color: #e7edf6; padding: 10px 14px; }
+.flash.show { opacity: 1; transform: translateY(0); }
+@media (max-width: 1250px) { .cards { grid-template-columns: 1fr; } .top { align-items: flex-start; flex-direction: column; } .summary { border-left: 0; padding-left: 0; } }
+pre[class*="language-"], code[class*="language-"] { background: transparent !important; text-shadow: none !important; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 </style>
 </head>
 <body>
+<main class="page">
+  <header class="top">
+    <div class="logo">S</div>
+    <div class="title">
+      <h1>Sluice Playground</h1>
+      <p>Manual vs generated selective invalidation</p>
+    </div>
+    <div class="summary">
+      <div>Two isolated app modes run the same dashboard scenario.</div>
+      <div>Manual writes the Sluice wrapper by hand. Generated uses <code>[Sluice]</code> to emit that wrapper.</div>
+    </div>
+  </header>
 
-<h1>Sluice Playground</h1>
-<div class="subtitle">
-  Point the dashboard here: <a href="http://localhost:5200/?source=http://localhost:5300/sluice/events" target="_blank">Open dashboard</a>
-</div>
+  <div class="mode-tabs">
+    <button class="mode-tab active" id="tab-manual" onclick="setMode('manual')">Manual</button>
+    <button class="mode-tab" id="tab-generated" onclick="setMode('generated')">Generated</button>
+  </div>
 
-<div id="users"></div>
-
-<div class="global-actions">
-  <button onclick="flushAll()" class="invalidate">Flush All Cache</button>
-  <button onclick="stampede('alice')" class="read">Stampede: Alice (10x)</button>
-</div>
+  <div id="mode-content"></div>
+</main>
 
 <div id="flash" class="flash"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-clike.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-json.min.js"></script>
 <script>
-const users = ['alice', 'bob', 'charlie'];
+const eventTypes = ['hit', 'miss', 'compute', 'invalidate', 'stampede'];
+const users = {
+  alice: { avatar: 'A', deps: ['user:alice', 'flag:dark_mode', 'greeting:alice'] },
+  bob: { avatar: 'B', deps: ['user:bob', 'flag:dark_mode'] },
+};
 
-function render() {
-  document.getElementById('users').innerHTML = users.map(id => {
-    const name = id.charAt(0).toUpperCase() + id.slice(1);
-    return `
-    <div class="user-card">
-      <div class="user-name">${name}</div>
-      <div class="button-row">
-        <button onclick="readUser('${id}')" class="read">Read</button>
-        <button onclick="readSettings('${id}')" class="read">Settings</button>
-        <button onclick="invalidate('${id}')" class="invalidate">Invalidate</button>
-        <input type="text" id="name-${id}" placeholder="New name" />
-        <button onclick="updateUser('${id}')" class="update">Update</button>
-      </div>
-    </div>`;
-  }).join('');
+const modes = [
+  makeMode('manual', 'Manual', 'Hand-written EntityResource, TrackedRead, TrackedWrite, and CachedQuery.'),
+  makeMode('generated', 'Generated', 'Annotated store interface emits the tracked resource wrapper; query stays hand-written.'),
+];
+
+function makeMode(id, label, description) {
+  return {
+    id,
+    label,
+    description,
+    lastSeq: 0,
+    state: {},
+    eventsByKey: {},
+    keyOrder: [],
+    eventTypeCounts: Object.fromEntries(eventTypes.map(type => [type, 0])),
+    source: null,
+    sourceVisible: false,
+    sourceTab: 0,
+  };
 }
 
 function flash(msg) {
@@ -71,43 +158,298 @@ function flash(msg) {
   el._t = setTimeout(() => el.classList.remove('show'), 1500);
 }
 
-async function readUser(id) {
-  await fetch(`/api/users/${id}/read`, { method: 'POST' });
-  flash(`Read ${id}`);
+async function readDashboard(modeId, user) {
+  await fetch(`/${modeId}/api/dashboard/${user}`, { method: 'POST' });
+  flash(`${modeLabel(modeId)} read ${user}`);
+  await pollMode(mode(modeId));
 }
 
-async function readSettings(id) {
-  await fetch(`/api/users/${id}/settings`, { method: 'POST' });
-  flash(`Read settings ${id}`);
+async function toggleFlag(modeId) {
+  const res = await fetch(`/${modeId}/api/flag/toggle`, { method: 'POST' });
+  const flag = await res.json();
+  flash(`${modeLabel(modeId)} dark_mode = ${flag.enabled}`);
+  await pollMode(mode(modeId));
 }
 
-async function invalidate(id) {
-  await fetch(`/api/users/${id}/invalidate`, { method: 'POST' });
-  flash(`Invalidated ${id}`);
-}
-
-async function updateUser(id) {
-  const name = document.getElementById(`name-${id}`).value || 'New Name';
-  await fetch(`/api/users/${id}`, {
-    method: 'PUT',
+async function updateGreeting(modeId, user) {
+  const text = document.getElementById(`${modeId}-greeting-text`).value || 'Hello!';
+  await fetch(`/${modeId}/api/greeting/${user}`, {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ text }),
   });
-  flash(`Updated ${id} -> ${name}`);
+  flash(`${modeLabel(modeId)} greeting = ${text}`);
+  await pollMode(mode(modeId));
 }
 
-async function flushAll() {
-  await fetch('/api/flush', { method: 'POST' });
-  flash('Flushed all');
+async function flushAll(modeId) {
+  const m = mode(modeId);
+  await fetch(`/${modeId}/api/flush`, { method: 'POST' });
+  m.eventsByKey = {};
+  m.keyOrder = [];
+  m.eventTypeCounts = Object.fromEntries(eventTypes.map(type => [type, 0]));
+  flash(`${m.label} flushed`);
+  await pollMode(m);
 }
 
-async function stampede(id) {
-  await fetch(`/api/users/${id}/stampede`, { method: 'POST' });
-  flash(`Stampede ${id}`);
+async function triggerStampede(modeId, user) {
+  await fetch(`/${modeId}/api/stampede/${user}`, { method: 'POST' });
+  flash(`${modeLabel(modeId)} stampede on ${user}`);
+  await pollMode(mode(modeId));
+}
+
+async function toggleSource(modeId) {
+  const m = mode(modeId);
+  m.sourceVisible = !m.sourceVisible;
+  if (m.sourceVisible && !m.source) {
+    const res = await fetch(`/${modeId}/source`);
+    m.source = await res.json();
+  }
+  render();
+}
+
+function setSourceTab(modeId, index) {
+  const m = mode(modeId);
+  m.sourceTab = index;
+  render();
+}
+
+async function poll() {
+  await Promise.all(modes.map(pollMode));
+}
+
+async function pollMode(m) {
+  const eventsRes = await fetch(`/${m.id}/sluice/events?since=${m.lastSeq}`);
+  const events = await eventsRes.json();
+  addEvents(m, events || []);
+
+  const stateRes = await fetch(`/${m.id}/sluice/state`);
+  m.state = await stateRes.json();
+  render();
+}
+
+function addEvents(m, events) {
+  for (const event of events) {
+    if (event.seq > m.lastSeq) m.lastSeq = event.seq;
+
+    for (const key of entryKeysForEvent(event)) {
+      if (!m.eventsByKey[key]) {
+        m.eventsByKey[key] = [];
+        m.keyOrder.push(key);
+      }
+      m.eventsByKey[key].push(event);
+    }
+
+    const type = baseType(event.type);
+    if (m.eventTypeCounts[type] !== undefined) m.eventTypeCounts[type] += 1;
+  }
+}
+
+function entryKeysForEvent(event) {
+  if (event.entryKey) return [event.entryKey];
+  if (event.type === 'invalidate' && event.affectedEntryKeys?.length) return event.affectedEntryKeys;
+  return event.operation ? [event.operation] : [];
+}
+
+function baseType(type) {
+  return type && type.startsWith('stampede.') ? 'stampede' : type;
+}
+
+function userFromEntryKey(entryKey) {
+  const versionIndex = entryKey.indexOf(':v');
+  if (versionIndex < 0) return null;
+  const keyIndex = entryKey.indexOf(':', versionIndex + 2);
+  const raw = keyIndex > 0 ? entryKey.substring(keyIndex + 1) : entryKey.substring(versionIndex);
+  return raw.replace(/^"|"$/g, '');
+}
+
+function shortKey(entryKey) {
+  const user = userFromEntryKey(entryKey);
+  return user ? `dashboard:v1:${user}` : entryKey;
+}
+
+function latestType(m, entryKey) {
+  const events = m.eventsByKey[entryKey] || [];
+  return events.length ? baseType(events[events.length - 1].type) : 'miss';
+}
+
+function countByType(m, entryKey, type) {
+  return (m.eventsByKey[entryKey] || []).filter(event => baseType(event.type) === type).length;
+}
+
+function valueFor(m, entryKey) {
+  const user = userFromEntryKey(entryKey);
+  const value = user ? m.state[user] : undefined;
+  return value === undefined ? 'No value read yet.' : JSON.stringify(value, null, 2);
+}
+
+function depsFor(user) {
+  return (users[user]?.deps || []).map(dep => {
+    const kind = dep.split(':')[0];
+    return `<span class="dep ${kind}">${dep}</span>`;
+  }).join('');
+}
+
+function flagText(m) {
+  const first = Object.values(m.state)[0];
+  return `dark_mode = ${first?.flag ? first.flag.enabled : '?'}`;
+}
+
+let activeMode = 'manual';
+
+function setMode(modeId) {
+  activeMode = modeId;
+  document.getElementById('tab-manual').classList.toggle('active', modeId === 'manual');
+  document.getElementById('tab-generated').classList.toggle('active', modeId === 'generated');
+  render();
+}
+
+function render() {
+  const scrolls = {};
+  document.querySelectorAll('pre.source-code, pre.value').forEach(el => {
+    scrolls[el.dataset.scrollKey || el.id] = { top: el.scrollTop, left: el.scrollLeft };
+  });
+
+  document.getElementById('mode-content').innerHTML = renderMode(mode(activeMode));
+
+  Object.entries(scrolls).forEach(([key, pos]) => {
+    const el = document.querySelector(`[data-scroll-key="${key}"]`);
+    if (el) { el.scrollTop = pos.top; el.scrollLeft = pos.left; }
+  });
+}
+
+function renderMode(m) {
+  return `
+    <section class="panel">
+      <div class="mode-head">
+        <div>
+          <h2>${m.label}</h2>
+          <p>${m.description}</p>
+        </div>
+        <span class="pill">/${m.id}</span>
+      </div>
+
+      <div class="hint">
+        <div><b>1.</b> Read both dashboards</div>
+        <div><b>2.</b> Toggle dark mode &rarr; both invalidated</div>
+        <div><b>3.</b> Read both again &rarr; both miss</div>
+        <div><b>4.</b> Set admin greeting &rarr; only Alice invalidated</div>
+        <div><b>5.</b> Read Bob &rarr; still a hit</div>
+      </div>
+
+      <div class="section">Controls</div>
+      <div class="card control-card">
+        <div class="person"><span class="avatar">A</span> Alice <span class="badge admin">admin</span></div>
+        <button onclick="readDashboard('${m.id}', 'alice')">Read Dashboard</button>
+      </div>
+      <div class="card control-card">
+        <div class="person"><span class="avatar">B</span> Bob <span class="badge member">member</span></div>
+        <button onclick="readDashboard('${m.id}', 'bob')">Read Dashboard</button>
+      </div>
+      <div class="card row">
+        <button onclick="toggleFlag('${m.id}')">Toggle Dark Mode</button>
+        <span>${flagText(m)}</span>
+      </div>
+      <div class="card row" style="margin-top:9px">
+        <input type="text" id="${m.id}-greeting-text" value="Hello, Admin!" aria-label="${m.label} admin greeting">
+        <button onclick="updateGreeting('${m.id}', 'alice')">Set Admin Greeting</button>
+      </div>
+      <button class="danger" onclick="flushAll('${m.id}')">Flush ${m.label} Cache</button>
+      <button class="stampede" onclick="triggerStampede('${m.id}', 'alice')">Hammer Alice (10x concurrent)</button>
+
+      <div class="metrics">${renderMetrics(m)}</div>
+
+      <div class="section">Cached Queries</div>
+      <div class="cards">${renderCards(m)}</div>
+
+      <div class="card trace">
+        <h3>Dependency Trace</h3>
+        <div class="trace-row">
+          <div class="trace-key"><span class="avatar">A</span> dashboard:v1:alice</div>
+          <div class="chain"><span class="dep user">user:alice</span><span class="arrow">&rarr;</span><span class="dep flag">flag:dark_mode</span><span class="arrow">&rarr;</span><span class="dep greeting">greeting:alice</span></div>
+        </div>
+        <div class="trace-row">
+          <div class="trace-key"><span class="avatar">B</span> dashboard:v1:bob</div>
+          <div class="chain"><span class="dep user">user:bob</span><span class="arrow">&rarr;</span><span class="dep flag">flag:dark_mode</span></div>
+        </div>
+        <div class="note">Event counts reflect this ${m.label.toLowerCase()} app mode only.</div>
+      </div>
+
+      <button class="source-toggle" onclick="toggleSource('${m.id}')">${m.sourceVisible ? '&#9660; Hide' : '&#9654; View'} Source</button>
+      ${m.sourceVisible ? renderSource(m) : ''}
+    </section>
+  `;
+}
+
+function renderMetrics(m) {
+  return eventTypes.map(type => `
+    <div class="metric ${type}">
+      <strong>${m.eventTypeCounts[type] || 0}</strong>
+      <span>${type.toUpperCase()}${type === 'miss' ? 'ES' : 'S'}</span>
+    </div>
+  `).join('');
+}
+
+function renderCards(m) {
+  return m.keyOrder.length
+    ? m.keyOrder.map(key => renderCard(m, key)).join('')
+    : '<div class="card">No cached queries yet.</div>';
+}
+
+function renderCard(m, entryKey) {
+  const user = userFromEntryKey(entryKey);
+  const meta = users[user] || { avatar: '?' };
+  const latest = latestType(m, entryKey);
+  return `
+    <article class="card cache-card">
+      <div class="cache-head">
+        <div class="cache-title"><span class="avatar">${meta.avatar}</span>${shortKey(entryKey)}</div>
+        <span class="state-pill ${latest}">${latest}</span>
+      </div>
+      <div class="deps">${depsFor(user)}</div>
+      <pre class="value language-json" data-scroll-key="${m.id}-${user}"><code class="language-json">${valueFor(m, entryKey).startsWith('{') ? highlight(valueFor(m, entryKey), 'json') : escapeHtml(valueFor(m, entryKey))}</code></pre>
+      <div class="event-counts">
+        ${eventTypes.map(type => `<div class="event ${type}"><span>${type}</span><strong>${countByType(m, entryKey, type)}</strong></div>`).join('')}
+      </div>
+    </article>
+  `;
+}
+
+function renderSource(m) {
+  if (!m.source || !m.source.length) return '<div class="card">No source available.</div>';
+  const files = m.source;
+  const active = files[m.sourceTab] || files[0];
+  return `
+    <div class="source-panel open">
+      <div class="source-tabs">
+        ${files.map((f, i) => `<span class="source-tab ${i === m.sourceTab ? 'active' : ''}" onclick="setSourceTab('${m.id}', ${i})">${f.name}</span>`).join('')}
+      </div>
+      <pre class="source-code language-csharp" data-scroll-key="${m.id}-source"><code class="language-csharp">${highlight(active.code, 'csharp')}</code></pre>
+    </div>
+  `;
+}
+
+function mode(id) {
+  return modes.find(m => m.id === id);
+}
+
+function modeLabel(id) {
+  return mode(id)?.label || id;
+}
+
+function escapeHtml(value) {
+  return value.replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+}
+
+function highlight(code, lang) {
+  return typeof Prism !== 'undefined' && Prism.languages[lang]
+    ? Prism.highlight(code, Prism.languages[lang], lang)
+    : escapeHtml(code);
 }
 
 render();
+poll();
+setInterval(poll, 750);
 </script>
-
 </body>
 </html>
