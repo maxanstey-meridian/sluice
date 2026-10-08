@@ -11,3 +11,5 @@ drafts/
 bin/
 obj/
 .playwright-mcp
+
+.plans/
