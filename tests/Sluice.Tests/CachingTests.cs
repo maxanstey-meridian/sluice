@@ -1,0 +1,80 @@
+using Sluice.Tests.Support;
+using ZiggyCreatures.Caching.Fusion;
+
+namespace Sluice.Tests;
+
+public sealed class CachingTests
+{
+    private static readonly Source<int> _rows = new("caching-rows");
+    private static readonly Query<string, string> _summary = new("caching-summary");
+    private static readonly Query<string, string> _report = new("caching-report");
+
+    // T1
+    [Fact]
+    public async Task A_second_call_for_the_same_key_does_not_run_the_compute()
+    {
+        await using var node = new SluiceNode();
+        var reader = new CountingReader(node.Cache, _summary);
+
+        var first = await reader.GetAsync("a", _rows.For(1));
+        var second = await reader.GetAsync("a", _rows.For(1));
+
+        second.Should().Be(first);
+        reader.Runs("a").Should().Be(1);
+    }
+
+    // T5
+    [Fact]
+    public async Task Different_keys_hold_independent_dependencies()
+    {
+        await using var node = new SluiceNode();
+        var reader = new CountingReader(node.Cache, _summary);
+        await reader.GetAsync("a", _rows.For(1));
+        await reader.GetAsync("b", _rows.For(2));
+
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        await reader.GetAsync("a", _rows.For(1));
+        await reader.GetAsync("b", _rows.For(2));
+
+        reader.Runs("a").Should().Be(2);
+        reader.Runs("b").Should().Be(1);
+    }
+
+    // T18
+    [Fact]
+    public async Task A_query_duration_overrides_the_cache_default_duration()
+    {
+        // A zero default duration means nothing is kept unless the query says otherwise.
+        await using var node = new SluiceNode(cache =>
+            cache.WithDefaultEntryOptions(o => o.Duration = TimeSpan.Zero)
+        );
+        var kept = new CountingReader(
+            node.Cache,
+            new Query<string, string>("caching-kept") { Duration = TimeSpan.FromMinutes(5) }
+        );
+        var defaulted = new CountingReader(node.Cache, _report);
+
+        await kept.GetAsync("a", _rows.For(1));
+        await kept.GetAsync("a", _rows.For(1));
+        await defaulted.GetAsync("a", _rows.For(1));
+        await defaulted.GetAsync("a", _rows.For(1));
+
+        kept.Runs("a").Should().Be(1);
+        defaulted.Runs("a").Should().Be(2);
+    }
+
+    // T18
+    [Fact]
+    public async Task Two_queries_with_the_same_key_do_not_share_entries()
+    {
+        await using var node = new SluiceNode();
+        var summary = new CountingReader(node.Cache, _summary);
+        var report = new CountingReader(node.Cache, _report);
+
+        await summary.GetAsync("a", _rows.For(1));
+        await report.GetAsync("a", _rows.For(1));
+
+        summary.Runs("a").Should().Be(1);
+        report.Runs("a").Should().Be(1);
+    }
+}

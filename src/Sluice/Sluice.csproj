@@ -9,5 +9,7 @@
 
     <ItemGroup>
         <InternalsVisibleTo Include="Sluice.Tests" />
+        <!-- Only for ActiveCompute.IsActive (DESIGN §5.3); nothing else crosses. -->
+        <InternalsVisibleTo Include="Sluice.EntityFrameworkCore" />
     </ItemGroup>
 </Project>
