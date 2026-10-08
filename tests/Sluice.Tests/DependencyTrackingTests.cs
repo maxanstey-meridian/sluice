@@ -49,7 +49,6 @@ public sealed class DependencyTrackingTests
             )
             .AsTask();
 
-    // T2
     [Fact]
     public async Task A_conditional_read_creates_a_dependency_only_when_it_runs()
     {
@@ -82,7 +81,6 @@ public sealed class DependencyTrackingTests
         _dashboardRuns.Should().Be(4);
     }
 
-    // T3
     [Fact]
     public async Task Invalidating_a_dependency_leaves_entries_that_did_not_read_it_cached()
     {
@@ -100,7 +98,6 @@ public sealed class DependencyTrackingTests
         orders.Runs("c1").Should().Be(1);
     }
 
-    // T4
     [Fact]
     public async Task A_recompute_that_stops_reading_a_dependency_is_no_longer_evicted_by_it()
     {
@@ -119,7 +116,6 @@ public sealed class DependencyTrackingTests
         _dashboardRuns.Should().Be(2);
     }
 
-    // T19
     [Fact]
     public async Task Reading_two_dependencies_in_one_call_records_both()
     {
@@ -130,7 +126,6 @@ public sealed class DependencyTrackingTests
         (await Eviction.IsEvictedBy(Record, _orders.For(3))).Should().BeFalse();
     }
 
-    // T26
     [Fact]
     public async Task Reads_from_concurrent_tasks_inside_one_compute_are_all_recorded()
     {
@@ -161,7 +156,6 @@ public sealed class DependencyTrackingTests
         }
     }
 
-    // T27
     [Fact]
     public async Task Recording_a_read_after_the_compute_returned_throws()
     {
@@ -200,7 +194,6 @@ public sealed class DependencyTrackingTests
         fetched.Should().BeFalse("the fetch must not run once its read can't be recorded");
     }
 
-    // T30
     [Fact]
     public async Task A_fused_read_returns_the_fetch_result_with_the_compute_token_and_records_the_dependency()
     {
@@ -248,7 +241,6 @@ public sealed class DependencyTrackingTests
             .BeFalse();
     }
 
-    // T30
     [Fact]
     public async Task A_fused_read_of_several_dependencies_records_them_all()
     {
@@ -260,7 +252,6 @@ public sealed class DependencyTrackingTests
         (await Eviction.IsEvictedBy(Record, _orders.For(3))).Should().BeFalse();
     }
 
-    // T30
     [Fact]
     public async Task A_null_dependency_in_a_read_throws_before_the_fetch_runs()
     {
@@ -284,7 +275,6 @@ public sealed class DependencyTrackingTests
         fetched.Should().BeFalse();
     }
 
-    // T31
     [Fact]
     public async Task A_fallback_for_a_failed_fused_fetch_is_evicted_by_its_dependency()
     {
@@ -326,7 +316,6 @@ public sealed class DependencyTrackingTests
         runs.Should().Be(2);
     }
 
-    // T31
     [Fact]
     public async Task A_failed_fused_fetch_that_escapes_reaches_the_caller_unchanged_and_caches_nothing()
     {
@@ -367,7 +356,6 @@ public sealed class DependencyTrackingTests
         runs.Should().Be(2);
     }
 
-    // T29
     [Fact]
     public async Task From_accepts_a_list_and_a_projection_and_records_every_item()
     {

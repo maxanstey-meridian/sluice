@@ -39,7 +39,8 @@ public sealed class Query<TKey, TValue>
         }
 
         // FusionCache keeps tag data under "__fc:t:<tag>" ("__fc-t-<tag>" after SetToSafeStrings), in the same
-        // key space as entries, so a query named "__fc" with key "t:*" would overwrite the clear sentinel's data.
+        // key space as entries, and treats any key under that prefix as tag data. A query named "__fc" with a key
+        // starting "t:" would never be invalidated, and key "t:*" would also overwrite the clear sentinel's data.
         if (name.StartsWith(ReservedPrefix, StringComparison.Ordinal))
         {
             throw new ArgumentException(

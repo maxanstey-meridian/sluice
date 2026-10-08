@@ -15,9 +15,10 @@ public sealed class CoreReferenceTests
     ];
 
     private static bool IsDataAccess(string name) =>
-        _dataAccessPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.Ordinal));
+        _dataAccessPrefixes.Any(prefix =>
+            name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+        );
 
-    // T0
     [Fact]
     public void The_core_assembly_references_no_EF_or_data_access_library()
     {
@@ -45,7 +46,7 @@ public sealed class CoreReferenceTests
         closure.Where(IsDataAccess).Should().BeEmpty();
     }
 
-    // T0. The compiler drops unused references from assembly metadata, so the walk above misses a package
+    // The compiler drops unused references from assembly metadata, so the walk above misses a package
     // the core references but doesn't call; the package graph still carries it to every user.
     [Fact]
     public void The_core_package_graph_contains_no_EF_or_data_access_package()

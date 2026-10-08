@@ -9,7 +9,6 @@ public sealed class InvalidationTests
     private static readonly Source<int> _payments = new("invalidation-payments");
     private static readonly Query<string, string> _summary = new("invalidation-summary");
 
-    // T6
     [Fact]
     public async Task Invalidating_one_key_evicts_readers_of_that_key_and_of_the_whole_source_but_not_of_other_keys()
     {
@@ -29,7 +28,6 @@ public sealed class InvalidationTests
         reader.Runs("other").Should().Be(1);
     }
 
-    // T7
     [Fact]
     public async Task Invalidating_the_whole_source_evicts_every_reader_of_anything_in_it()
     {
@@ -52,7 +50,6 @@ public sealed class InvalidationTests
         reader.Runs("unrelated").Should().Be(1);
     }
 
-    // T8
     [Fact]
     public async Task A_batch_invalidation_evicts_the_union()
     {
@@ -72,7 +69,6 @@ public sealed class InvalidationTests
         reader.Runs("payment").Should().Be(1);
     }
 
-    // T25
     [Fact]
     public async Task Sync_Invalidate_evicts_like_InvalidateAsync()
     {
@@ -96,7 +92,6 @@ public sealed class InvalidationTests
         reader.Runs("untouched").Should().Be(1);
     }
 
-    // T25
     [Fact]
     public async Task A_null_dependency_throws()
     {
@@ -111,7 +106,6 @@ public sealed class InvalidationTests
         syncInList.Should().ThrowExactly<ArgumentException>().WithMessage("*null*");
     }
 
-    // T17
     [Fact]
     public async Task ClearAsync_evicts_everything()
     {

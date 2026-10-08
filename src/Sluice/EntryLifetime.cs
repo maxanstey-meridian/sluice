@@ -74,7 +74,7 @@ internal static class EntryLifetime
         if (lifetime > tagLifetime)
         {
             throw new InvalidOperationException(
-                $"{subject} keeps entries {level} for {lifetime}, longer than Sluice's tag data there ({tagLifetime}), "
+                $"{subject} keeps entries {level} for up to {lifetime}, longer than Sluice's tag data there ({tagLifetime}), "
                     + $"so an invalidated entry could come back once its tag data expires. Shorten {shorten}, or lengthen {lengthen}."
             );
         }

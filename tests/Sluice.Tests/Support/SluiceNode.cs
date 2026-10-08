@@ -41,14 +41,11 @@ public sealed class SluiceNode : IAsyncDisposable
     ) =>
         new(cache =>
         {
-            // Awaiting backplane delivery (an entry option in FusionCache) means a peer has processed a
-            // notification by the time the call that sent it returns.
+            // FusionCache then awaits each backplane publish (tag data already does by default), and
+            // MemoryBackplane runs every peer's handler inline, so a peer has processed a notification
+            // by the time the call that sent it returns.
             cache
-                .WithOptions(options =>
-                {
-                    options.WaitForInitialBackplaneSubscribe = true;
-                    options.TagsDefaultEntryOptions.AllowBackgroundBackplaneOperations = false;
-                })
+                .WithOptions(options => options.WaitForInitialBackplaneSubscribe = true)
                 .WithDefaultEntryOptions(options =>
                     options.AllowBackgroundBackplaneOperations = false
                 )

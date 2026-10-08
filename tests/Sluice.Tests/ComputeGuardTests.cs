@@ -46,7 +46,6 @@ public sealed class ComputeGuardTests
             return "nested";
         };
 
-    // T10
     [Fact]
     public async Task A_compute_that_records_no_reads_throws_and_caches_nothing()
     {
@@ -60,7 +59,6 @@ public sealed class ComputeGuardTests
         (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
     }
 
-    // T10
     [Fact]
     public async Task A_compute_that_records_no_reads_stores_nothing_another_node_can_read()
     {
@@ -73,7 +71,6 @@ public sealed class ComputeGuardTests
         (await b.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
     }
 
-    // T10
     [Fact]
     public async Task A_compute_that_records_no_reads_evicts_nothing_on_another_node()
     {
@@ -81,7 +78,8 @@ public sealed class ComputeGuardTests
         await using var b = SluiceNode.Clustered(_l2, _bus);
         await b.Cache.GetOrSetAsync(_outer, "k", Good);
 
-        // Node A must miss to run its compute: drop the entry from L2 without telling node B.
+        // Node A must miss to run its compute: drop the entry from L2 without telling node B. That also means
+        // node B, told of a newer entry, finds none in L2 and drops its own, which is what this test detects.
         await a.Fusion.RemoveAsync(
             "guard-outer:k",
             new FusionCacheEntryOptions { SkipBackplaneNotifications = true }
@@ -92,7 +90,6 @@ public sealed class ComputeGuardTests
         (await b.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
     }
 
-    // T11
     [Fact]
     public async Task Calling_GetOrSetAsync_inside_a_compute_throws()
     {
@@ -117,7 +114,6 @@ public sealed class ComputeGuardTests
         _runs.Should().Be(0, "the inner compute must never run");
     }
 
-    // T23
     [Fact]
     public async Task The_zero_reads_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry()
     {
@@ -135,7 +131,6 @@ public sealed class ComputeGuardTests
         (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#3");
     }
 
-    // T23
     [Fact]
     public async Task The_nesting_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry()
     {

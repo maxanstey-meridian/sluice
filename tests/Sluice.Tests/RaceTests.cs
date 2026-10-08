@@ -38,7 +38,6 @@ public sealed class RaceTests
             )
             .AsTask();
 
-    // T9
     [Fact]
     public async Task An_overlapping_invalidation_mid_compute_returns_the_value_but_leaves_no_entry()
     {
@@ -55,7 +54,6 @@ public sealed class RaceTests
         _runs.Should().Be(2);
     }
 
-    // T9
     [Fact]
     public async Task A_non_overlapping_invalidation_mid_compute_keeps_the_entry()
     {

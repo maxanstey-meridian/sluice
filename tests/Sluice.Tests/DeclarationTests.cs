@@ -7,6 +7,12 @@ public sealed class DeclarationTests
 {
     public sealed record CustomerId(string Value);
 
+    // A second type named CustomerId, in another namespace scope.
+    public static class Other
+    {
+        public sealed record CustomerId(string Value);
+    }
+
     // A user IFormattable whose text differs for every key.
     public readonly record struct Sku(int Value) : IFormattable
     {
@@ -14,7 +20,6 @@ public sealed class DeclarationTests
             Value.ToString(formatProvider);
     }
 
-    // T12
     [Theory]
     [InlineData("")]
     [InlineData(" ")]
@@ -25,7 +30,6 @@ public sealed class DeclarationTests
         declare.Should().Throw<ArgumentException>();
     }
 
-    // T12
     [Theory]
     [InlineData("")]
     [InlineData(" ")]
@@ -36,7 +40,6 @@ public sealed class DeclarationTests
         declare.Should().Throw<ArgumentException>();
     }
 
-    // T12
     [Fact]
     public void Query_names_containing_a_colon_are_rejected()
     {
@@ -45,8 +48,8 @@ public sealed class DeclarationTests
         declare.Should().Throw<ArgumentException>().WithMessage("*':'*");
     }
 
-    // T12. FusionCache keeps tag data under "__fc:t:<tag>" (or "__fc-t-<tag>" after SetToSafeStrings) in the
-    // entries' key space, so "__fc" with key "t:*" would be the clear sentinel's tag data.
+    // FusionCache keeps tag data under "__fc:t:<tag>" (or "__fc-t-<tag>" after SetToSafeStrings) in the
+    // entries' key space and treats any key there as tag data.
     [Theory]
     [InlineData("__fc")]
     [InlineData("__fc-t-decl-rows")]
@@ -54,10 +57,9 @@ public sealed class DeclarationTests
     {
         var declare = () => new Query<string, long>(name);
 
-        declare.Should().Throw<ArgumentException>().WithMessage("*__fc*");
+        declare.Should().Throw<ArgumentException>().WithMessage("*FusionCache uses*");
     }
 
-    // T12
     [Fact]
     public void Without_a_format_a_key_type_that_is_neither_string_nor_IFormattable_is_rejected()
     {
@@ -71,7 +73,6 @@ public sealed class DeclarationTests
             .WithMessage("*CustomerId*format*");
     }
 
-    // T12
     [Fact]
     public void Without_a_format_interface_and_abstract_key_types_are_rejected()
     {
@@ -91,7 +92,6 @@ public sealed class DeclarationTests
             .WithMessage("*Enum*format*");
     }
 
-    // T12
     [Fact]
     public void Without_a_format_DateTime_DateTimeOffset_and_TimeOnly_keys_are_rejected()
     {
@@ -109,7 +109,6 @@ public sealed class DeclarationTests
             .WithMessage("*TimeOnly*format*");
     }
 
-    // T12
     [Fact]
     public void Without_a_format_value_types_that_print_every_key_differently_are_accepted()
     {
@@ -124,7 +123,6 @@ public sealed class DeclarationTests
         declare.Should().NotThrow();
     }
 
-    // T12
     [Fact]
     public void With_a_format_the_rejected_key_types_are_accepted()
     {
@@ -153,7 +151,6 @@ public sealed class DeclarationTests
         declare.Should().NotThrow();
     }
 
-    // T12
     [Fact]
     public async Task A_null_key_throws()
     {
@@ -169,7 +166,6 @@ public sealed class DeclarationTests
         await get.Should().ThrowAsync<ArgumentNullException>();
     }
 
-    // T12
     [Fact]
     public void A_format_that_returns_null_throws()
     {
@@ -180,7 +176,6 @@ public sealed class DeclarationTests
         record.Should().Throw<InvalidOperationException>().WithMessage("*returned null*");
     }
 
-    // T28
     [Fact]
     public void Redeclaring_a_query_name_with_a_different_key_or_value_type_throws()
     {
@@ -199,25 +194,23 @@ public sealed class DeclarationTests
             .WithMessage("*already declared as Query<System.Int32, System.String>*");
     }
 
-    // T28
     [Fact]
     public void A_redeclaration_names_types_by_namespace_so_same_named_types_are_told_apart()
     {
         _ = new Query<CustomerId, string>("decl-same-named-types", id => id.Value);
 
         var other = () =>
-            new Query<KeyTextTests.CustomerId, string>("decl-same-named-types", id => id.Value);
+            new Query<Other.CustomerId, string>("decl-same-named-types", id => id.Value);
 
         other
             .Should()
             .Throw<ArgumentException>()
             .WithMessage(
                 "*Query<Sluice.Tests.DeclarationTests+CustomerId, System.String>*"
-                    + "Query<Sluice.Tests.KeyTextTests+CustomerId, System.String>*"
+                    + "Query<Sluice.Tests.DeclarationTests+Other+CustomerId, System.String>*"
             );
     }
 
-    // T28
     [Fact]
     public void Redeclaring_a_query_name_with_the_same_types_is_allowed()
     {

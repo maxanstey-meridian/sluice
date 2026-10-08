@@ -27,7 +27,6 @@ public sealed class FusionCacheConfigurationTests
             .WithDefaultEntryOptions(o => o.IsFailSafeEnabled = true)
             .WithOptions(o => o.RemoveByTagBehavior = RemoveByTagBehavior.Expire);
 
-    // T13
     [Fact]
     public async Task With_fail_safe_on_a_failing_compute_after_invalidation_throws_instead_of_serving_the_invalidated_value()
     {
@@ -40,11 +39,12 @@ public sealed class FusionCacheConfigurationTests
         await call.Should().ThrowAsync<TimeoutException>();
     }
 
-    // T13
     [Fact]
     public async Task With_fail_safe_on_a_failing_compute_after_ClearAsync_throws_instead_of_serving_the_cleared_value()
     {
-        await using var node = new SluiceNode(FailSafeWithExpire);
+        await using var node = new SluiceNode(cache =>
+            cache.WithDefaultEntryOptions(o => o.IsFailSafeEnabled = true)
+        );
         await node.Cache.GetOrSetAsync(_view, "k", Read);
         await node.Cache.ClearAsync();
 
@@ -53,7 +53,6 @@ public sealed class FusionCacheConfigurationTests
         await call.Should().ThrowAsync<TimeoutException>();
     }
 
-    // T13
     [Fact]
     public async Task A_user_who_disables_tagging_still_gets_invalidation()
     {
@@ -69,7 +68,6 @@ public sealed class FusionCacheConfigurationTests
         reader.Runs("k").Should().Be(2);
     }
 
-    // T15
     [Fact]
     public void Resolving_SluiceCache_fails_when_the_default_duration_outlives_the_tag_data()
     {
@@ -84,7 +82,6 @@ public sealed class FusionCacheConfigurationTests
             .WithMessage("*DefaultEntryOptions*in memory*tag data*");
     }
 
-    // T22
     [Fact]
     public void Resolving_SluiceCache_fails_when_the_distributed_duration_outlives_the_tag_data()
     {
@@ -101,7 +98,6 @@ public sealed class FusionCacheConfigurationTests
             .WithMessage("*in the distributed cache*tag data*");
     }
 
-    // T22
     [Fact]
     public void Resolving_SluiceCache_fails_when_the_distributed_fail_safe_lifetime_outlives_the_tag_data()
     {
@@ -121,7 +117,6 @@ public sealed class FusionCacheConfigurationTests
             .WithMessage("*in the distributed cache*tag data*");
     }
 
-    // T22
     [Fact]
     public void Resolving_SluiceCache_fails_when_the_fail_safe_lifetime_outlives_the_tag_data()
     {
@@ -137,7 +132,6 @@ public sealed class FusionCacheConfigurationTests
         resolve.Should().Throw<InvalidOperationException>().WithMessage("*in memory*tag data*");
     }
 
-    // T22
     [Fact]
     public void Resolving_SluiceCache_fails_when_the_memory_duration_outlives_the_tag_data()
     {
@@ -149,7 +143,6 @@ public sealed class FusionCacheConfigurationTests
         resolve.Should().Throw<InvalidOperationException>().WithMessage("*in memory*tag data*");
     }
 
-    // T22
     [Fact]
     public void Resolving_SluiceCache_fails_when_memory_jitter_can_push_an_entry_past_the_tag_data()
     {
@@ -175,7 +168,6 @@ public sealed class FusionCacheConfigurationTests
             .WithMessage("*in memory*tag data*JitterMaxDuration*");
     }
 
-    // T22
     [Fact]
     public async Task Resolving_SluiceCache_succeeds_when_the_tag_data_is_lengthened_to_match()
     {
@@ -195,7 +187,6 @@ public sealed class FusionCacheConfigurationTests
         await using var node = resolve.Should().NotThrow().Subject;
     }
 
-    // T22
     [Fact]
     public async Task A_query_whose_duration_outlives_the_tag_data_fails_on_first_use()
     {
@@ -225,7 +216,6 @@ public sealed class FusionCacheConfigurationTests
         ran.Should().BeFalse();
     }
 
-    // T16
     [Fact]
     public async Task Cancelling_the_caller_cancels_the_compute()
     {
@@ -261,7 +251,6 @@ public sealed class FusionCacheConfigurationTests
             .ThrowAsync<OperationCanceledException>();
     }
 
-    // T16
     [Fact]
     public async Task An_already_cancelled_caller_gets_neither_a_hit_nor_a_compute()
     {
@@ -285,7 +274,6 @@ public sealed class FusionCacheConfigurationTests
         ran.Should().BeFalse();
     }
 
-    // T32
     [Fact]
     public async Task A_cancelled_caller_resumes_only_after_its_compute_ends()
     {
@@ -330,7 +318,6 @@ public sealed class FusionCacheConfigurationTests
         await call.Invoking(c => c).Should().ThrowAsync<OperationCanceledException>();
     }
 
-    // T24
     [Fact]
     public async Task A_compute_outliving_the_factory_hard_timeout_completes_before_the_caller_resumes()
     {
@@ -365,7 +352,6 @@ public sealed class FusionCacheConfigurationTests
         finished.Should().BeTrue();
     }
 
-    // T24
     [Fact]
     public async Task A_compute_outliving_the_factory_soft_timeout_completes_before_the_caller_resumes()
     {
@@ -403,7 +389,6 @@ public sealed class FusionCacheConfigurationTests
         (await call).Should().Be("new value");
     }
 
-    // T21
     [Fact]
     public async Task Another_FusionCache_on_the_same_L2_is_unaffected_by_Sluice_tags_and_clear()
     {

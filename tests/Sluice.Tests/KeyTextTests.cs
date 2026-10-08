@@ -47,21 +47,18 @@ public sealed class KeyTextTests
         return runs;
     }
 
-    // T20
     [Fact]
     public async Task A_decimal_key_gets_the_same_entry_under_a_German_culture()
     {
         (await EntriesAcrossCultures(_byAmount, 1.5m)).Should().Be(1);
     }
 
-    // T20
     [Fact]
     public async Task A_double_key_gets_the_same_entry_under_a_German_culture()
     {
         (await EntriesAcrossCultures(_byRatio, 1.5)).Should().Be(1);
     }
 
-    // T20
     [Fact]
     public async Task A_format_is_used_as_given()
     {
@@ -79,5 +76,10 @@ public sealed class KeyTextTests
         await node.Cache.GetOrSetAsync(_byCustomer, new CustomerId("c_42"), Statement);
 
         runs.Should().Be(1, "the format gives both keys the same text, so they share an entry");
+        (await node.Fusion.TryGetAsync<string>("keytext-by-customer:c_42"))
+            .HasValue.Should()
+            .BeTrue(
+                "the entry key is the documented <name>:<key text>, with the format's text unchanged"
+            );
     }
 }

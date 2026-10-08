@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using ZiggyCreatures.Caching.Fusion;
 
@@ -51,9 +52,8 @@ public static class SluiceServiceCollectionExtensions
             return new SluiceCache(
                 cache,
                 tagOptions
-                    ?? throw new InvalidOperationException(
-                        $"FusionCache built the '{SluiceCache.CacheName}' cache without running Sluice's options action, "
-                            + "so the tag-data lifetimes can't be checked. Register that cache only through AddSluice."
+                    ?? throw new UnreachableException(
+                        "FusionCache built the Sluice cache without running Sluice's options action."
                     )
             );
         });

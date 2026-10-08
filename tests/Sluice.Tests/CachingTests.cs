@@ -9,7 +9,6 @@ public sealed class CachingTests
     private static readonly Query<string, string> _summary = new("caching-summary");
     private static readonly Query<string, string> _report = new("caching-report");
 
-    // T1
     [Fact]
     public async Task A_second_call_for_the_same_key_does_not_run_the_compute()
     {
@@ -23,7 +22,6 @@ public sealed class CachingTests
         reader.Runs("a").Should().Be(1);
     }
 
-    // T5
     [Fact]
     public async Task Different_keys_hold_independent_dependencies()
     {
@@ -40,7 +38,6 @@ public sealed class CachingTests
         reader.Runs("b").Should().Be(1);
     }
 
-    // T18
     [Fact]
     public async Task A_query_duration_overrides_the_cache_default_duration()
     {
@@ -63,7 +60,6 @@ public sealed class CachingTests
         defaulted.Runs("a").Should().Be(2);
     }
 
-    // T18
     [Fact]
     public async Task Two_queries_with_the_same_key_do_not_share_entries()
     {

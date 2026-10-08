@@ -32,7 +32,6 @@ public sealed class MultiNodeTests
             )
             .AsTask();
 
-    // T14
     [Fact]
     public async Task An_invalidation_on_one_node_evicts_on_another()
     {
@@ -49,7 +48,6 @@ public sealed class MultiNodeTests
         _runs.Should().Be(2);
     }
 
-    // T12
     [Theory]
     [InlineData("*", false)]
     [InlineData("!", false)]
