@@ -260,6 +260,30 @@ public sealed class DependencyTrackingTests
         (await Eviction.IsEvictedBy(Record, _orders.For(3))).Should().BeFalse();
     }
 
+    // T30
+    [Fact]
+    public async Task A_null_dependency_in_a_read_throws_before_the_fetch_runs()
+    {
+        await using var node = new SluiceNode();
+        var fetched = false;
+
+        Task<string> Fetch(CancellationToken ct)
+        {
+            fetched = true;
+            return Task.FromResult("fetched");
+        }
+
+        Task<string> Get(string key, Func<SluiceReads, Task<string>> compute) =>
+            node.Cache.GetOrSetAsync(_invoiceSummary, key, (read, _) => compute(read)).AsTask();
+
+        var single = () => Get("single", read => read.From((Dependency)null!, Fetch));
+        var inList = () => Get("list", read => read.From([_invoices.For(1), null!], Fetch));
+
+        await single.Should().ThrowExactlyAsync<ArgumentNullException>();
+        await inList.Should().ThrowExactlyAsync<ArgumentException>().WithMessage("*null*");
+        fetched.Should().BeFalse();
+    }
+
     // T31
     [Fact]
     public async Task A_fallback_for_a_failed_fused_fetch_is_evicted_by_its_dependency()

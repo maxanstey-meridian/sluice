@@ -7,6 +7,13 @@ public sealed class DeclarationTests
 {
     public sealed record CustomerId(string Value);
 
+    // A user IFormattable whose text differs for every key.
+    public readonly record struct Sku(int Value) : IFormattable
+    {
+        public string ToString(string? format, IFormatProvider? formatProvider) =>
+            Value.ToString(formatProvider);
+    }
+
     // T12
     [Theory]
     [InlineData("")]
@@ -22,12 +29,32 @@ public sealed class DeclarationTests
     [Theory]
     [InlineData("")]
     [InlineData(" ")]
-    [InlineData("statement:v2")]
-    public void Blank_query_names_and_names_containing_a_colon_are_rejected(string name)
+    public void Blank_query_names_are_rejected(string name)
     {
         var declare = () => new Query<int, string>(name);
 
         declare.Should().Throw<ArgumentException>();
+    }
+
+    // T12
+    [Fact]
+    public void Query_names_containing_a_colon_are_rejected()
+    {
+        var declare = () => new Query<int, string>("statement:v2");
+
+        declare.Should().Throw<ArgumentException>().WithMessage("*':'*");
+    }
+
+    // T12. FusionCache keeps tag data under "__fc:t:<tag>" (or "__fc-t-<tag>" after SetToSafeStrings) in the
+    // entries' key space, so "__fc" with key "t:*" would be the clear sentinel's tag data.
+    [Theory]
+    [InlineData("__fc")]
+    [InlineData("__fc-t-decl-rows")]
+    public void Query_names_starting_with_FusionCache_s_internal_prefix_are_rejected(string name)
+    {
+        var declare = () => new Query<string, long>(name);
+
+        declare.Should().Throw<ArgumentException>().WithMessage("*__fc*");
     }
 
     // T12
@@ -42,6 +69,26 @@ public sealed class DeclarationTests
             .Should()
             .Throw<ArgumentException>()
             .WithMessage("*CustomerId*format*");
+    }
+
+    // T12
+    [Fact]
+    public void Without_a_format_interface_and_abstract_key_types_are_rejected()
+    {
+        // The runtime type would decide the text: int 1 and long 1 would share an entry, and a DateTime key
+        // would skip the precision check.
+        new Func<object>(() => new Source<IFormattable>("decl-interface-source"))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage("*IFormattable*format*");
+        new Func<object>(() => new Query<IFormattable, string>("decl-interface-query"))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage("*IFormattable*format*");
+        new Func<object>(() => new Source<Enum>("decl-abstract-source"))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage("*Enum*format*");
     }
 
     // T12
@@ -64,6 +111,21 @@ public sealed class DeclarationTests
 
     // T12
     [Fact]
+    public void Without_a_format_value_types_that_print_every_key_differently_are_accepted()
+    {
+        var declare = () =>
+        {
+            _ = new Source<Guid>("decl-guid");
+            _ = new Source<DayOfWeek>("decl-enum");
+            _ = new Source<DateOnly>("decl-dateonly");
+            _ = new Query<Sku, string>("decl-user-formattable");
+        };
+
+        declare.Should().NotThrow();
+    }
+
+    // T12
+    [Fact]
     public void With_a_format_the_rejected_key_types_are_accepted()
     {
         var declare = () =>
@@ -81,6 +143,10 @@ public sealed class DeclarationTests
             _ = new Query<TimeOnly, string>(
                 "decl-formatted-timeonly",
                 time => time.ToString("O", CultureInfo.InvariantCulture)
+            );
+            _ = new Source<IFormattable>(
+                "decl-formatted-interface",
+                key => $"{key.GetType().Name}:{key.ToString(null, CultureInfo.InvariantCulture)}"
             );
         };
 
@@ -103,6 +169,17 @@ public sealed class DeclarationTests
         await get.Should().ThrowAsync<ArgumentNullException>();
     }
 
+    // T12
+    [Fact]
+    public void A_format_that_returns_null_throws()
+    {
+        var customers = new Source<CustomerId>("decl-null-format", _ => null!);
+
+        var record = () => customers.For(new CustomerId("c_1"));
+
+        record.Should().Throw<InvalidOperationException>().WithMessage("*returned null*");
+    }
+
     // T28
     [Fact]
     public void Redeclaring_a_query_name_with_a_different_key_or_value_type_throws()
@@ -115,11 +192,29 @@ public sealed class DeclarationTests
         otherKey
             .Should()
             .Throw<ArgumentException>()
-            .WithMessage("*already declared as Query<Int32, String>*");
+            .WithMessage("*already declared as Query<System.Int32, System.String>*");
         otherValue
             .Should()
             .Throw<ArgumentException>()
-            .WithMessage("*already declared as Query<Int32, String>*");
+            .WithMessage("*already declared as Query<System.Int32, System.String>*");
+    }
+
+    // T28
+    [Fact]
+    public void A_redeclaration_names_types_by_namespace_so_same_named_types_are_told_apart()
+    {
+        _ = new Query<CustomerId, string>("decl-same-named-types", id => id.Value);
+
+        var other = () =>
+            new Query<KeyTextTests.CustomerId, string>("decl-same-named-types", id => id.Value);
+
+        other
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage(
+                "*Query<Sluice.Tests.DeclarationTests+CustomerId, System.String>*"
+                    + "Query<Sluice.Tests.KeyTextTests+CustomerId, System.String>*"
+            );
     }
 
     // T28
@@ -133,7 +228,7 @@ public sealed class DeclarationTests
         query.Should().NotThrow();
     }
 
-    // D13: a source name clash only over-invalidates, so it isn't guarded.
+    // A source name clash only over-invalidates, so it isn't guarded.
     [Fact]
     public void Source_names_are_not_checked_for_duplicates()
     {

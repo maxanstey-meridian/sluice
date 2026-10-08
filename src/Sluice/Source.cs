@@ -18,13 +18,15 @@ public sealed class Source<TKey>
     /// Declares a source whose key is a <c>string</c> or <see cref="IFormattable"/>, formatted with the invariant culture.
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The name is blank, or <typeparamref name="TKey"/> is neither <c>string</c> nor <see cref="IFormattable"/>,
-    /// or is <see cref="DateTime"/>, <see cref="DateTimeOffset"/> or <see cref="TimeOnly"/> (pass a format function instead).
+    /// The name is blank, or <typeparamref name="TKey"/> is an interface or abstract type, is neither <c>string</c> nor
+    /// <see cref="IFormattable"/>, or is <see cref="DateTime"/>, <see cref="DateTimeOffset"/> or <see cref="TimeOnly"/>
+    /// (pass a format function instead).
     /// </exception>
     public Source(string name)
         : this(name, KeyText.Default<TKey>()) { }
 
     /// <summary>Declares a source whose key text is produced by <paramref name="format"/>, which must give different text for different keys.</summary>
+    /// <exception cref="ArgumentException">The name is blank.</exception>
     public Source(string name, Func<TKey, string> format)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);

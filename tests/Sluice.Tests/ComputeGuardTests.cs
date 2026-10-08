@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Options;
 using Sluice.Tests.Support;
 using ZiggyCreatures.Caching.Fusion;
 
@@ -9,6 +12,10 @@ public sealed class ComputeGuardTests
     private static readonly Query<string, string> _outer = new("guard-outer");
     private static readonly Query<string, string> _inner = new("guard-inner");
 
+    private readonly MemoryDistributedCache _l2 = new(
+        Options.Create(new MemoryDistributedCacheOptions())
+    );
+    private readonly string _bus = Guid.NewGuid().ToString();
     private int _runs;
 
     private Task<string> Good(SluiceReads read, CancellationToken ct)
@@ -51,6 +58,38 @@ public sealed class ComputeGuardTests
             .ThrowAsync<InvalidOperationException>()
             .WithMessage("*use IFusionCache directly*");
         (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+    }
+
+    // T10
+    [Fact]
+    public async Task A_compute_that_records_no_reads_stores_nothing_another_node_can_read()
+    {
+        await using var a = SluiceNode.Clustered(_l2, _bus);
+        await using var b = SluiceNode.Clustered(_l2, _bus);
+
+        var call = () => a.Cache.GetOrSetAsync(_outer, "k", NoReads).AsTask();
+
+        await call.Should().ThrowAsync<InvalidOperationException>();
+        (await b.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+    }
+
+    // T10
+    [Fact]
+    public async Task A_compute_that_records_no_reads_evicts_nothing_on_another_node()
+    {
+        await using var a = SluiceNode.Clustered(_l2, _bus);
+        await using var b = SluiceNode.Clustered(_l2, _bus);
+        await b.Cache.GetOrSetAsync(_outer, "k", Good);
+
+        // Node A must miss to run its compute: drop the entry from L2 without telling node B.
+        await a.Fusion.RemoveAsync(
+            "guard-outer:k",
+            new FusionCacheEntryOptions { SkipBackplaneNotifications = true }
+        );
+        var call = () => a.Cache.GetOrSetAsync(_outer, "k", NoReads).AsTask();
+
+        await call.Should().ThrowAsync<InvalidOperationException>();
+        (await b.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
     }
 
     // T11

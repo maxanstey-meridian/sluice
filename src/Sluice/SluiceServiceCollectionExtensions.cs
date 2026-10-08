@@ -3,6 +3,7 @@ using ZiggyCreatures.Caching.Fusion;
 
 namespace Sluice;
 
+/// <summary>Registers Sluice in a service collection.</summary>
 public static class SluiceServiceCollectionExtensions
 {
     /// <summary>
@@ -14,6 +15,12 @@ public static class SluiceServiceCollectionExtensions
     /// Sluice then enforces the settings it depends on (key prefix, remove-by-tag behaviour, tagging on),
     /// overriding any conflicting value set here.
     /// </param>
+    /// <returns><paramref name="services"/>, for chaining.</returns>
+    /// <remarks>
+    /// The entry lifetimes configured here are checked against the tag-data lifetimes when <see cref="SluiceCache"/>
+    /// is first resolved, which throws <see cref="InvalidOperationException"/> if an entry could outlive the tag data
+    /// that invalidates it.
+    /// </remarks>
     public static IServiceCollection AddSluice(
         this IServiceCollection services,
         Action<IFusionCacheBuilder>? configure = null
@@ -41,7 +48,14 @@ public static class SluiceServiceCollectionExtensions
             var cache = provider
                 .GetRequiredService<IFusionCacheProvider>()
                 .GetCache(SluiceCache.CacheName);
-            return new SluiceCache(cache, tagOptions!);
+            return new SluiceCache(
+                cache,
+                tagOptions
+                    ?? throw new InvalidOperationException(
+                        $"FusionCache built the '{SluiceCache.CacheName}' cache without running Sluice's options action, "
+                            + "so the tag-data lifetimes can't be checked. Register that cache only through AddSluice."
+                    )
+            );
         });
 
         return services;

@@ -10,9 +10,11 @@ public sealed class KeyTextTests
     private static readonly Source<int> _rows = new("keytext-rows");
     private static readonly Query<decimal, int> _byAmount = new("keytext-by-amount");
     private static readonly Query<double, int> _byRatio = new("keytext-by-ratio");
+
+    // Customer ids are case-insensitive here, so the format folds case.
     private static readonly Query<CustomerId, string> _byCustomer = new(
         "keytext-by-customer",
-        id => $"customer-{id.Value}"
+        id => id.Value.ToLowerInvariant()
     );
 
     /// <summary>
@@ -64,21 +66,18 @@ public sealed class KeyTextTests
     public async Task A_format_is_used_as_given()
     {
         await using var node = new SluiceNode();
+        var runs = 0;
 
-        await node.Cache.GetOrSetAsync(
-            _byCustomer,
-            new CustomerId("c_42"),
-            (read, _) =>
-            {
-                read.From(_rows.For(1));
-                return Task.FromResult("statement");
-            }
-        );
+        Task<string> Statement(SluiceReads read, CancellationToken ct)
+        {
+            runs++;
+            read.From(_rows.For(1));
+            return Task.FromResult("statement");
+        }
 
-        // DESIGN §4.4: the entry key is "<query name>:<key text>".
-        (await node.Fusion.TryGetAsync<string>("keytext-by-customer:customer-c_42"))
-            .GetValueOrDefault()
-            .Should()
-            .Be("statement");
+        await node.Cache.GetOrSetAsync(_byCustomer, new CustomerId("C_42"), Statement);
+        await node.Cache.GetOrSetAsync(_byCustomer, new CustomerId("c_42"), Statement);
+
+        runs.Should().Be(1, "the format gives both keys the same text, so they share an entry");
     }
 }

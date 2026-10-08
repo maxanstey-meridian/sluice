@@ -3,10 +3,10 @@ using System.Collections.Concurrent;
 namespace Sluice;
 
 /// <summary>
-/// The duplicate <see cref="Query{TKey, TValue}"/> name guard (DESIGN §4.3, D13). Nothing ever reads a
-/// declaration back from here. Source names aren't checked: a clash there only over-invalidates.
+/// The duplicate <see cref="Query{TKey, TValue}"/> name guard. Nothing ever reads a declaration back from
+/// here. Source names aren't checked: a clash there only over-invalidates.
 /// </summary>
-internal static class Declarations
+internal static class QueryNames
 {
     private static readonly ConcurrentDictionary<string, Type> _queries = new(
         StringComparer.Ordinal
@@ -26,5 +26,5 @@ internal static class Declarations
     }
 
     private static string Describe(Type query) =>
-        $"Query<{string.Join(", ", query.GetGenericArguments().Select(t => t.Name))}>";
+        $"Query<{string.Join(", ", query.GetGenericArguments().Select(t => t.ToString()))}>";
 }

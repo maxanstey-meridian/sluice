@@ -19,8 +19,8 @@ public sealed class SluiceCache
         _cache = cache;
         _tagOptions = tagOptions;
 
-        // Per-call pins (DESIGN §5.4): every one of these would let a compute outlive its caller or
-        // stamp its entry at completion, which reopens the invalidation race.
+        // Per-call pins: every one of these would let a compute outlive its caller or stamp its entry at
+        // completion, which reopens the invalidation race.
         _entryOptions = cache.DefaultEntryOptions.Duplicate();
         _entryOptions.EagerRefreshThreshold = null;
         _entryOptions.AllowTimedOutFactoryBackgroundCompletion = false;
@@ -38,9 +38,20 @@ public sealed class SluiceCache
     /// Returns the cached value for <paramref name="key"/>, or runs <paramref name="compute"/> and caches
     /// its result, tagged with every dependency it recorded through <c>read.From</c>.
     /// </summary>
+    /// <param name="query">The query whose entry to read.</param>
+    /// <param name="key">The query key.</param>
+    /// <param name="compute">Computes the value on a miss, recording what it reads through <c>read.From</c>.</param>
+    /// <param name="ct">
+    /// Passed to <paramref name="compute"/>, so cancelling cancels the compute; the call returns once the compute
+    /// has ended. Waiting on another caller's compute for the same key can't be cancelled.
+    /// </param>
     /// <exception cref="InvalidOperationException">
     /// The compute recorded no dependencies, or this was called from inside another compute.
     /// Nothing is cached in either case.
+    /// </exception>
+    /// <exception cref="OperationCanceledException">
+    /// The compute was cancelled, or <paramref name="ct"/> was already cancelled, in which case no cached value is
+    /// returned and nothing is computed.
     /// </exception>
     public async ValueTask<TValue> GetOrSetAsync<TKey, TValue>(
         Query<TKey, TValue> query,
@@ -64,13 +75,16 @@ public sealed class SluiceCache
             throw nested;
         }
 
+        // An already-cancelled caller gets neither a hit nor a compute.
+        ct.ThrowIfCancellationRequested();
+
         var entryKey = query.EntryKey(key);
         var options = OptionsFor(query);
         var reads = new SluiceReads(ct);
 
         // The caller's token goes to the compute, not to FusionCache: on a cancelled token FusionCache throws
-        // without awaiting its factory, so the caller would resume while the compute still uses its resources
-        // (DESIGN §5.4, D14). Cancelling ends the compute first, and the caller resumes after it.
+        // without awaiting its factory, so the caller would resume while the compute still uses its resources.
+        // Cancelling ends the compute first, and the caller resumes after it.
         var value = await _cache
             .GetOrSetAsync<TValue>(
                 entryKey,
@@ -84,32 +98,38 @@ public sealed class SluiceCache
     }
 
     /// <summary>Evicts every cached value that read <paramref name="dependency"/>. Call it after your write commits.</summary>
-    public ValueTask InvalidateAsync(Dependency dependency, CancellationToken ct = default) =>
-        InvalidateAsync([dependency], ct);
+    /// <param name="dependency">What was written.</param>
+    /// <param name="ct">Cancels the invalidation.</param>
+    public ValueTask InvalidateAsync(Dependency dependency, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(dependency);
+        return InvalidateAsync([dependency], ct);
+    }
 
     /// <summary>Evicts every cached value that read any of <paramref name="dependencies"/>. Call it after your write commits.</summary>
+    /// <param name="dependencies">What was written.</param>
+    /// <param name="ct">Cancels the invalidation.</param>
     public async ValueTask InvalidateAsync(
         IEnumerable<Dependency> dependencies,
         CancellationToken ct = default
     )
     {
         var tags = Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags);
+
+        // FusionCache's multi-tag overload removes one tag at a time, so run them side by side.
         await Task.WhenAll(tags.Select(tag => _cache.RemoveByTagAsync(tag, token: ct).AsTask()))
             .ConfigureAwait(false);
     }
 
     /// <summary>The synchronous twin of <see cref="InvalidateAsync(IEnumerable{Dependency}, CancellationToken)"/>.</summary>
-    public void Invalidate(params IEnumerable<Dependency> dependencies)
-    {
-        foreach (
-            var tag in Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags)
-        )
-        {
-            _cache.RemoveByTag(tag);
-        }
-    }
+    /// <param name="dependencies">What was written.</param>
+    public void Invalidate(params IEnumerable<Dependency> dependencies) =>
+        _cache.RemoveByTag(
+            Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags)
+        );
 
     /// <summary>Evicts everything Sluice cached.</summary>
+    /// <param name="ct">Cancels the clear.</param>
     public ValueTask ClearAsync(CancellationToken ct = default) =>
         _cache.ClearAsync(allowFailSafe: false, token: ct);
 
@@ -163,7 +183,7 @@ public sealed class SluiceCache
         if (reads.HasViolation)
         {
             // Returning (rather than throwing) keeps FusionCache's fail-safe from serving a stale
-            // value over a guard violation (DESIGN §5.3); these flags make sure nothing is stored.
+            // value over a guard violation; these flags make sure nothing is stored.
             var options = ctx.Options;
             options.SkipMemoryCacheWrite = true;
             options.SkipDistributedCacheWrite = true;

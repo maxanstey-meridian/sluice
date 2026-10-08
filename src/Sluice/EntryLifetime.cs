@@ -4,7 +4,7 @@ namespace Sluice;
 
 /// <summary>
 /// Entry lifetime must not exceed tag-data lifetime at either level, or an invalidated entry comes back once
-/// its tag data expires: from L2 on a fresh node, or from memory on the same node (DESIGN §5.4, D15, research/01 §3).
+/// its tag data expires: from L2 on a fresh node, or from memory on the same node.
 /// </summary>
 internal static class EntryLifetime
 {
@@ -14,12 +14,13 @@ internal static class EntryLifetime
         string subject
     )
     {
+        // FusionCache jitters memory expiry only. Jitter on the tag side only lengthens tag data, so it's ignored.
         Ensure(
-            InMemory(entry),
+            Jittered(InMemory(entry), entry.JitterMaxDuration),
             InMemory(tags),
             subject,
             "in memory",
-            "Duration, MemoryCacheDuration or FailSafeMaxDuration",
+            "Duration, MemoryCacheDuration, FailSafeMaxDuration or JitterMaxDuration",
             "TagsDefaultEntryOptions.MemoryCacheDuration or TagsDefaultEntryOptions.FailSafeMaxDuration"
         );
         Ensure(
@@ -27,8 +28,9 @@ internal static class EntryLifetime
             InDistributed(tags),
             subject,
             "in the distributed cache",
-            "Duration, DistributedCacheDuration or FailSafeMaxDuration",
-            "TagsDefaultEntryOptions.DistributedCacheDuration or TagsDefaultEntryOptions.FailSafeMaxDuration"
+            "Duration, DistributedCacheDuration, DistributedCacheFailSafeMaxDuration or FailSafeMaxDuration",
+            "TagsDefaultEntryOptions.DistributedCacheDuration, TagsDefaultEntryOptions.DistributedCacheFailSafeMaxDuration "
+                + "or TagsDefaultEntryOptions.FailSafeMaxDuration"
         );
     }
 
@@ -53,6 +55,12 @@ internal static class EntryLifetime
         TimeSpan logical,
         TimeSpan failSafe
     ) => options.IsFailSafeEnabled && failSafe > logical ? failSafe : logical;
+
+    // The worst case of FusionCache's random jitter, saturating at TimeSpan.MaxValue as FusionCache does.
+    private static TimeSpan Jittered(TimeSpan lifetime, TimeSpan jitter) =>
+        jitter <= TimeSpan.Zero ? lifetime
+        : lifetime > TimeSpan.MaxValue - jitter ? TimeSpan.MaxValue
+        : lifetime + jitter;
 
     private static void Ensure(
         TimeSpan lifetime,

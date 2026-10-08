@@ -96,6 +96,21 @@ public sealed class InvalidationTests
         reader.Runs("untouched").Should().Be(1);
     }
 
+    // T25
+    [Fact]
+    public async Task A_null_dependency_throws()
+    {
+        await using var node = new SluiceNode();
+
+        var single = () => node.Cache.InvalidateAsync((Dependency)null!).AsTask();
+        var inList = () => node.Cache.InvalidateAsync([_invoices.For(1), null!]).AsTask();
+        var syncInList = () => node.Cache.Invalidate([_invoices.For(1), null!]);
+
+        await single.Should().ThrowExactlyAsync<ArgumentNullException>();
+        await inList.Should().ThrowExactlyAsync<ArgumentException>().WithMessage("*null*");
+        syncInList.Should().ThrowExactly<ArgumentException>().WithMessage("*null*");
+    }
+
     // T17
     [Fact]
     public async Task ClearAsync_evicts_everything()

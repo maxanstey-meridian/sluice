@@ -41,8 +41,17 @@ public sealed class SluiceNode : IAsyncDisposable
     ) =>
         new(cache =>
         {
+            // Awaiting backplane delivery (an entry option in FusionCache) means a peer has processed a
+            // notification by the time the call that sent it returns.
             cache
-                .WithOptions(options => options.WaitForInitialBackplaneSubscribe = true)
+                .WithOptions(options =>
+                {
+                    options.WaitForInitialBackplaneSubscribe = true;
+                    options.TagsDefaultEntryOptions.AllowBackgroundBackplaneOperations = false;
+                })
+                .WithDefaultEntryOptions(options =>
+                    options.AllowBackgroundBackplaneOperations = false
+                )
                 .WithSerializer(new FusionCacheSystemTextJsonSerializer())
                 .WithDistributedCache(l2)
                 .WithBackplane(

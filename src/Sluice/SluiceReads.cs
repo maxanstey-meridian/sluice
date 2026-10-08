@@ -23,8 +23,11 @@ public sealed class SluiceReads
     /// the compute returns instead is still evicted by it. Safe to call from concurrent tasks inside one compute.
     /// </summary>
     /// <exception cref="InvalidOperationException">The compute has already returned; the fetch doesn't run.</exception>
-    public Task<T> From<T>(Dependency dependency, Func<CancellationToken, Task<T>> fetch) =>
-        From([dependency], fetch);
+    public Task<T> From<T>(Dependency dependency, Func<CancellationToken, Task<T>> fetch)
+    {
+        ArgumentNullException.ThrowIfNull(dependency);
+        return From([dependency], fetch);
+    }
 
     /// <summary>
     /// Records that the compute read <paramref name="dependencies"/>, then runs <paramref name="fetch"/> with the

@@ -21,7 +21,9 @@ public sealed class Dependency
 
     internal string Text => _key is null ? $"{_source} (all)" : $"{_source}:{_key}";
 
-    // DESIGN §5.1. Every tag contains ':', so none can equal a FusionCache clear sentinel.
+    // A key's readers carry "n:k" and "n:", a whole-source reader "n:*" and "n:". Invalidating a key hits "n:k"
+    // and "n:*"; invalidating the source hits "n:". Every tag contains ':', so none can equal a FusionCache
+    // clear sentinel.
     internal string[] ReadTags =>
         _key is null ? [$"{_source}:*", $"{_source}:"] : [$"{_source}:{_key}", $"{_source}:"];
 
