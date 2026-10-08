@@ -1,0 +1,8 @@
+#nullable enable
+Sluice.DbSetDependencyExtensions
+Sluice.SluiceReadsExtensions
+static Sluice.DbSetDependencyExtensions.AllDependencies<T>(this Microsoft.EntityFrameworkCore.DbSet<T!>! set) -> System.Collections.Generic.IEnumerable<Sluice.Dependency!>!
+static Sluice.DbSetDependencyExtensions.Dependency<T>(this Microsoft.EntityFrameworkCore.DbSet<T!>! set, object! key) -> Sluice.Dependency!
+static Sluice.SluiceReadsExtensions.All<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set) -> System.Linq.IQueryable<T!>!
+static Sluice.SluiceReadsExtensions.Children<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, System.Linq.Expressions.Expression<System.Func<T!, object?>!>! foreignKey, object! principalKey) -> System.Linq.IQueryable<T!>!
+static Sluice.SluiceReadsExtensions.Entity<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, object! key) -> System.Linq.IQueryable<T!>!

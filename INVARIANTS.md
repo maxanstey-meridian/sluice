@@ -1,6 +1,6 @@
 # Invariants
 
-Rules a reasonable-looking change could break. Each names the one place that enforces it and the test that fails if it stops. Test names are in `tests/Sluice.Tests`.
+Rules a reasonable-looking change could break. Each names the one place that enforces it and the test that fails if it stops. `SLUICE-CORE-` test names are in `tests/Sluice.Tests`, `SLUICE-EF-` ones in `tests/Sluice.EntityFrameworkCore.Tests`.
 
 ## SLUICE-CORE-001 The core references no EF or data-access library
 
@@ -87,3 +87,49 @@ The cache defaults are checked when `SluiceCache` is first resolved, and a `Quer
 **Why:** a compute that catches the fetch's failure and returns a fallback caches that fallback; recording only on success would leave it with no dependency to evict it but the TTL.
 **Owner:** `SluiceReads.From<T>(IEnumerable<Dependency>, Func<CancellationToken, Task<T>>)`.
 **Proof:** `DependencyTrackingTests.A_fallback_for_a_failed_fused_fetch_is_evicted_by_its_dependency`, `A_failed_fused_fetch_that_escapes_reaches_the_caller_unchanged_and_caches_nothing`, `A_fused_read_returns_the_fetch_result_with_the_compute_token_and_records_the_dependency`.
+
+## SLUICE-EF-001 EF reads never track
+
+**Rule:** `read.Entity`, `read.Children` and `read.All` return `AsNoTracking()` queries.
+**Why:** a tracked query hands back the context's existing instance, so the cache would store the caller's unsaved edits, or a stale identity-resolved value, for every caller.
+**Accepts:** cached entities are detached; callers who want to edit one load it again on their own context.
+**Owner:** `SluiceReadsExtensions.WhereEquals` and `SluiceReadsExtensions.All`.
+**Proof:** `EntityReadTests.Reads_do_not_track_so_an_unsaved_edit_on_the_callers_context_is_not_cached`.
+
+## SLUICE-EF-002 EF reads refuse to run inside a transaction
+
+**Rule:** `read.Entity`, `read.Children` and `read.All` throw `InvalidOperationException` when the context's connection has a current EF transaction, an enlisted transaction or an ambient one: the inputs EF's batch executor checks, so a `TransactionScope` over a connection with `Enlist=false` doesn't count, as it doesn't for EF.
+**Why:** a compute inside a transaction caches rows other callers can't see yet (and that may roll back), or an old snapshot under RepeatableRead or Serializable, and serves them to everyone.
+**Accepts:** the check runs when the helper is called, not when its query executes. Generic-path computes aren't checked; "don't compute inside your own open transaction" is documentation there.
+**Owner:** `SluiceReadsExtensions.EnsureNoTransaction`.
+**Proof:** `ReadGuardTests.Reads_throw_inside_an_EF_transaction_and_run_again_after_it_commits`, `Reads_throw_inside_an_enlisted_transaction`, `Reads_throw_inside_a_TransactionScope`, `Reads_run_inside_a_TransactionScope_when_the_connection_does_not_enlist`.
+
+## SLUICE-EF-003 EF reads and dependencies refuse types not mapped to a table
+
+**Rule:** the read helpers, `set.Dependency(key)` and `set.AllDependencies()` throw `NotSupportedException` for keyless types and for types mapped with `ToView`, `ToFunction` or `ToSqlQuery`, or to no table.
+**Why:** no tracked write ever publishes for those types, so a cached read of one would only ever be evicted by its TTL.
+**Accepts:** such data can still be cached through `read.From` with a declared `Source`, invalidated by hand.
+**Owner:** `ModelSources.EnsureTable`.
+**Proof:** `ReadGuardTests.Reads_and_dependencies_of_types_not_mapped_to_a_table_throw`.
+
+## SLUICE-EF-004 EF keys are typed by the model
+
+**Rule:** a key passed to `read.Entity` or `set.Dependency` must have exactly the CLR type of the single-column primary key, and one passed to `read.Children` the CLR type of the FK property, nullability ignored; otherwise `ArgumentException` names the expected type. Composite primary keys throw `NotSupportedException` for single-row reads and dependencies.
+**Why:** a key of another type (`1L` for an `int` key, a raw `int` for a typed id) would format to its own text, so a read and a write of the same row could record different dependencies.
+**Owner:** `ModelSources.EnsureKeyType` and `ModelSources.KeyProperty`.
+**Proof:** `ReadGuardTests.A_key_of_the_wrong_type_throws_naming_the_expected_type`, `A_nullable_foreign_key_takes_a_key_of_its_underlying_type`, `Reading_or_invalidating_one_row_by_composite_key_throws_but_the_whole_set_works`.
+
+## SLUICE-EF-005 EF key text is the folded column value
+
+**Rule:** a model-derived dependency's key text is the key converted to its provider value through the property's value converter, then folded: `decimal` scale normalised, strings right-trimmed and upper-cased invariantly, `DateTime` (local converted to UTC) and `DateTimeOffset` (UTC) as ticks truncated to whole microseconds, `byte[]` as hex, other `IFormattable` values invariant.
+**Why:** values the database treats as equal (`1m` and `1.00m` in `numeric`, `"abc"` and `"ABC"` in `citext`) must give the same dependency, or a write keyed one way misses a reader keyed the other.
+**Accepts:** folding can merge values the database tells apart, which only over-invalidates. Accent- and culture-sensitive string collations aren't folded.
+**Owner:** `ModelSources.Build` (with `ModelSources.ToProvider`) and `KeyFolding.Fold`.
+**Proof:** `FoldedKeyTests.A_numeric_key_read_as_1_is_evicted_by_the_same_value_written_as_1_00`, `A_citext_key_read_in_one_case_is_evicted_by_the_same_key_in_another`, `A_strongly_typed_key_folds_the_value_its_converter_stores`, `KeyFoldingTests.*`.
+
+## SLUICE-EF-006 Model-derived sources are named by EF's root entity type
+
+**Rule:** an entity type's source is named `IEntityType.GetRootType().Name`, and a foreign key's source `<root type name>[<FK property names, comma-joined>]`, built once per model through the core's public `Source<object>(name, format)` constructor and kept as runtime annotations on the model.
+**Why:** reads and writes of a derived type (TPH, TPT) must meet on one source, and a `Children` read in any form (FK property, shadow FK, navigation) must meet the writes to that foreign key. The names are wire format: changing them changes every EF tag.
+**Owner:** `ModelSources.Entity` and `ModelSources.ForeignKey`.
+**Proof:** `EntityReadTests.A_derived_type_shares_its_root_type_dependencies`, `ChildrenReadTests.Each_Children_form_depends_on_the_foreign_key_value_it_reads`.

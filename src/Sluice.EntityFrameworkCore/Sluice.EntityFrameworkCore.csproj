@@ -1,9 +1,39 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <ItemGroup>
         <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" />
+        <PackageReference
+            Include="Microsoft.CodeAnalysis.PublicApiAnalyzers"
+            Version="5.6.0"
+            PrivateAssets="all"
+        />
     </ItemGroup>
 
     <ItemGroup>
         <ProjectReference Include="..\Sluice\Sluice.csproj" />
     </ItemGroup>
+
+    <!-- KeyFolding's unit tests. -->
+    <ItemGroup>
+        <InternalsVisibleTo Include="Sluice.EntityFrameworkCore.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <AdditionalFiles Include="PublicAPI.Shipped.txt" />
+        <AdditionalFiles Include="PublicAPI.Unshipped.txt" />
+    </ItemGroup>
+
+    <!--
+        This package uses an internal of Sluice (InternalsVisibleTo), so it must ship against the exact core version
+        it was built with: a mismatch fails at runtime with MissingMethodException. NuGet packs a ProjectReference as
+        ">= version" and offers no metadata to change that, so wrap the version it reads from the core in [ ].
+    -->
+    <Target Name="PinSluiceCoreVersion" AfterTargets="_GetProjectReferenceVersions">
+        <ItemGroup>
+            <_ProjectReferencesWithVersions
+                Update="@(_ProjectReferencesWithVersions)"
+                Condition="'%(Filename)' == 'Sluice'"
+                ProjectVersion="[%(ProjectVersion)]"
+            />
+        </ItemGroup>
+    </Target>
 </Project>

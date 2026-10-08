@@ -11,4 +11,10 @@ internal static class ActiveCompute
         get => _current.Value is { IsOpen: true } reads ? reads : null;
         set => _current.Value = value;
     }
+
+    /// <summary>
+    /// Whether the current flow is inside a compute. The one internal <c>Sluice.EntityFrameworkCore</c> uses,
+    /// which is why that package depends on this exact core version.
+    /// </summary>
+    internal static bool IsActive => Current is not null;
 }

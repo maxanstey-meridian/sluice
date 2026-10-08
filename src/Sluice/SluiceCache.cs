@@ -99,29 +99,36 @@ public sealed class SluiceCache
 
     /// <summary>Evicts every cached value that read <paramref name="dependency"/>. Call it after your write commits.</summary>
     /// <param name="dependency">What was written.</param>
-    /// <param name="ct">Cancels the invalidation.</param>
-    public ValueTask InvalidateAsync(Dependency dependency, CancellationToken ct = default)
+    /// <remarks>
+    /// Takes no cancellation token: a request aborted after its write committed must still invalidate. Bound a slow
+    /// distributed cache with FusionCache's <c>DistributedCacheHardTimeout</c> or circuit breaker instead.
+    /// </remarks>
+    public ValueTask InvalidateAsync(Dependency dependency)
     {
         ArgumentNullException.ThrowIfNull(dependency);
-        return InvalidateAsync([dependency], ct);
+        return InvalidateAsync([dependency]);
     }
 
     /// <summary>Evicts every cached value that read any of <paramref name="dependencies"/>. Call it after your write commits.</summary>
     /// <param name="dependencies">What was written.</param>
-    /// <param name="ct">Cancels the invalidation.</param>
-    public async ValueTask InvalidateAsync(
-        IEnumerable<Dependency> dependencies,
-        CancellationToken ct = default
-    )
+    /// <remarks>
+    /// Takes no cancellation token: a request aborted after its write committed must still invalidate. Bound a slow
+    /// distributed cache with FusionCache's <c>DistributedCacheHardTimeout</c> or circuit breaker instead.
+    /// </remarks>
+    public async ValueTask InvalidateAsync(IEnumerable<Dependency> dependencies)
     {
         var tags = Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags);
 
         // FusionCache's multi-tag overload removes one tag at a time, so run them side by side.
-        await Task.WhenAll(tags.Select(tag => _cache.RemoveByTagAsync(tag, token: ct).AsTask()))
+        await Task.WhenAll(
+                tags.Select(tag =>
+                    _cache.RemoveByTagAsync(tag, token: CancellationToken.None).AsTask()
+                )
+            )
             .ConfigureAwait(false);
     }
 
-    /// <summary>The synchronous twin of <see cref="InvalidateAsync(IEnumerable{Dependency}, CancellationToken)"/>.</summary>
+    /// <summary>The synchronous twin of <see cref="InvalidateAsync(IEnumerable{Dependency})"/>.</summary>
     /// <param name="dependencies">What was written.</param>
     public void Invalidate(params IEnumerable<Dependency> dependencies) =>
         _cache.RemoveByTag(

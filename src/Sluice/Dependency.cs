@@ -5,7 +5,7 @@ namespace Sluice;
 /// <summary>
 /// Something a cached value can depend on: one key of a <see cref="Source{TKey}"/> or the whole source.
 /// Obtain it from <see cref="Source{TKey}.For"/> or <see cref="Source{TKey}.All"/>, record it with
-/// <c>read.From</c> and invalidate it with <see cref="SluiceCache.InvalidateAsync(Dependency, CancellationToken)"/>.
+/// <c>read.From</c> and invalidate it with <see cref="SluiceCache.InvalidateAsync(Dependency)"/>.
 /// </summary>
 [DebuggerDisplay("{Text}")]
 public sealed class Dependency
