@@ -132,11 +132,14 @@ internal sealed class CapturedSave
                     }
                 }
 
-                // A row deleted through its base type may be a derived one, whose own foreign keys it can't key.
+                // A row deleted through its base type may be a derived one, whose foreign keys, and those pointing at
+                // it, it can't key: it leaves its parents' lists under a derived type's foreign keys too.
                 dependencies.AddRange(
                     entityType
                         .GetDerivedTypes()
                         .SelectMany(derived => derived.GetDeclaredReferencingForeignKeys())
+                        .Concat(entityType.GetDerivedForeignKeys())
+                        .Where(foreignKey => !foreignKey.IsOwnership && !foreignKey.IsBaseLinking())
                         .Select(foreignKey => ModelSources.ForeignKey(foreignKey).All)
                 );
 
@@ -182,16 +185,18 @@ internal sealed class CapturedSave
     }
 
     // Whether the database holds the original values of the properties when a save that succeeds runs. A primary key
-    // can't change. EF's UPDATE or DELETE of a row it writes matches the originals of its concurrency tokens, and with
-    // a row version the row is unchanged since it was loaded, or the save fails. Any other value is what EF loaded,
-    // which another writer may have changed since, re-parenting the row without the save noticing.
+    // can't change. EF's UPDATE or DELETE of a row it writes, stored in one table, matches the originals of its
+    // concurrency tokens, and with a row version the row is unchanged since it was loaded, or the save fails. Any other
+    // value is what EF loaded, which another writer may have changed since, re-parenting the row without the save
+    // noticing; so is a token of a row split across tables, which a write to another of its tables doesn't check.
     private static bool Checked(
         IEntityType entityType,
         bool written,
         IReadOnlyList<IProperty> properties
     ) =>
         properties.All(property =>
-            property.IsPrimaryKey() || (written && property.IsConcurrencyToken)
+            property.IsPrimaryKey()
+            || (written && property.IsConcurrencyToken && ModelSources.SingleTable(entityType))
         ) || (written && ModelSources.HasRowVersion(entityType));
 
     // A row saved without being loaded (attached, removed or updated from an object the context didn't query) has

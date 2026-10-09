@@ -98,10 +98,17 @@ internal static class ModelSources
                         && property.ValueGenerated
                             is ValueGenerated.OnAddOrUpdate
                                 or ValueGenerated.OnUpdate
-                    )
-                && entityType.GetTableMappings().Count() == 1,
+                    ) && SingleTable(entityType!),
             entityType
         );
+
+    /// <summary>
+    /// Whether a row of <paramref name="entityType"/> is stored in one table, so EF's <c>UPDATE</c> of it checks its
+    /// concurrency tokens whichever columns it writes. A row split across tables (table-per-type, entity splitting)
+    /// is written one table at a time, and a token in one table isn't checked by a write to another.
+    /// </summary>
+    internal static bool SingleTable(IEntityType entityType) =>
+        entityType.GetTableMappings().Count() == 1;
 
     /// <summary>
     /// The entity types whose tables <paramref name="sql"/> names, as the provider quotes them, mapped to the types
@@ -336,7 +343,7 @@ internal static class ModelSources
     }
 
     // Every foreign key a row of the type may have: its own and its base types', and its derived types'.
-    private static IEnumerable<IForeignKey> RowForeignKeys(IEntityType entityType) =>
+    internal static IEnumerable<IForeignKey> RowForeignKeys(IEntityType entityType) =>
         entityType.GetForeignKeys().Concat(entityType.GetDerivedForeignKeys());
 
     /// <summary>

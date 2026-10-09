@@ -42,6 +42,10 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     private const string ReadsTag = "Sluice reads: ";
     private const string UntrackableTag = "Sluice can't track: ";
     private const string ContextStateTag = "Sluice reads the context's state: ";
+
+    // The ignore-by-name remedy for each context-state tag's filters, built by the analysis that wrote the tag, which
+    // always runs before the query's commands do.
+    private static readonly ConcurrentDictionary<string, string> _contextStateRemedies = new();
     private const string HelperSuffix = " (helper)";
     private const string Separator = "; ";
     private const string DependenciesAnnotation = "Sluice:TagDependencies";
@@ -103,7 +107,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         if (
             ActiveCompute.Reads is { } reads
             && !ActiveCompute.InFetch(reads)
-            && ComputeContexts.StateOf(reads, context) is null
+            && ComputeContexts.StateOf(reads, context) == ComputeContext.Foreign
         )
         {
             throw ActiveCompute.Violate(reads, ForeignContext("A read helper's query"));
@@ -181,7 +185,11 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         var context = eventData.Context;
         if (!ActiveCompute.InFetch(reads))
         {
-            if (context is null || ComputeContexts.StateOf(reads, context) is not { } configured)
+            if (
+                context is null
+                || ComputeContexts.StateOf(reads, context) is var configured
+                    && configured == ComputeContext.Foreign
+            )
             {
                 return ForeignContext($"An EF command ({Statement(command)})");
             }
@@ -205,17 +213,15 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
             // The state is the context's, so it's right for this compute only if the compute set it, from its
             // arguments: read.Db's configure. Sluice can't check what the configure set, so that is on trust.
-            if (tags.ContextState is { } state && !configured)
+            if (tags.ContextState is { } state && configured == ComputeContext.Unconfigured)
             {
                 var name = context.GetType().Name;
                 return new(
-                    $"Sluice can't track an EF query inside a compute ({Statement(command)}): {state}. The compute's "
-                        + "context has the state the compute gives it, and the cached value is served to every "
-                        + $"caller with this key. Set it from the cache key when the compute first asks for the "
-                        + $"context, with read.Db<{name}>(db => …). Or ignore the filter by its name "
-                        + "(IgnoreQueryFilters([\"Tenant\"]) for one named Tenant; IgnoreQueryFilters() with no names "
-                        + "drops every filter, soft delete included, so name an unnamed one first), filter by that "
-                        + "value yourself, and put it in the cache key."
+                    $"Sluice can't track an EF query inside a compute ({Statement(command)}): {state}. That state "
+                        + "came from the context's constructor (the first caller's request, say), not the cache key, "
+                        + "and the cached value is served to every caller with this key. Set it from the cache key "
+                        + $"when the compute first asks for the context, with read.Db<{name}>(db => …). Or filter "
+                        + $"by hand: {_contextStateRemedies[state]}."
                 );
             }
 
@@ -452,13 +458,16 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         private IEntityType? _filter;
         private string? _filterName;
         private readonly HashSet<ParameterExpression> _rows = [];
-        private readonly List<RefusedFilter> _refusedFilters = [];
+        private readonly List<FilterRead> _refusedFilters = [];
         private string? _untrackable;
 
         // What the query filters read of the context's own state, which the compute must set (read.Db's configure).
-        private List<string>? _contextState;
+        private List<FilterRead>? _contextState;
 
-        /// <summary>The tag for the query: what it reads, or why that can't be known.</summary>
+        /// <summary>
+        /// The tags for the query: what it reads and the context's state its filters read, or why what it reads can't
+        /// be known.
+        /// </summary>
         internal static IReadOnlyList<string> Of(IModel model, Expression query)
         {
             var analysis = new Analysis(model);
@@ -491,9 +500,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                     foreach (var state in ContextState.In(node))
                     {
                         (_contextState ??= []).Add(
-                            $"{_filter.DisplayName()}'s query filter"
-                                + (_filterName is null ? "" : $" \"{_filterName}\"")
-                                + $" reads the context's state ({Describe(state)})"
+                            new(_filter, _filterName, Describe(state), true)
                         );
                     }
                 }
@@ -652,9 +659,9 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         private static bool IsRuntime(MethodBase? method) =>
             method is null || method.DeclaringType?.Assembly == typeof(object).Assembly;
 
-        // A filter that reads the context (a tenant, the current user) gives each context its own rows, so one cached
-        // value would be served to all of them; other shared state, to every caller whatever it is. Each filter is
-        // refused once, for the first such part.
+        // A filter that reads the context's state where read.Db's configure can't set it gives each context its own
+        // rows, so one cached value would be served to all of them; other shared state, to every caller whatever it
+        // is. Each filter is refused once, for the first such part.
         private void Refuse(Expression unfixed)
         {
             if (
@@ -693,47 +700,59 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 : $"{_refusedFilters.Count} query filters read state that can differ between calls, and the "
                     + "cached value is served to every caller whatever it is: "
                     + string.Join("; ", _refusedFilters.Select(Reads));
-            var named = _refusedFilters.Select(refused => refused.Name).OfType<string>();
-            var anonymous = _refusedFilters
-                .Where(refused => refused.Name is null)
-                .Select(refused => refused.Type.DisplayName())
+            var ignore = IgnoreByName(_refusedFilters);
+
+            // State the configure can set is a plain value stored on the context itself (SLUICE-EF-022).
+            Untrackable(
+                _refusedFilters.Exists(refused => refused.ReadsContext)
+                    ? $"{reason}. Read the context's state from a settable field or auto-property of the context "
+                        + "(not readonly, init-only or get-only) holding a plain value instead, so read.Db's "
+                        + $"configure can set it from the cache key. Or filter by hand: {ignore}"
+                    : $"{reason}. {char.ToUpperInvariant(ignore[0])}{ignore[1..]}"
+            );
+        }
+
+        // How to ignore just these filters and filter by hand: by name, since IgnoreQueryFilters() without names
+        // drops every filter in the query, such as a soft delete that must still apply. EF can ignore an anonymous
+        // filter only that way, so for one it says to name it. Starts in lower case, to follow a colon.
+        private static string IgnoreByName(IReadOnlyList<FilterRead> filters)
+        {
+            var one = filters.Count == 1;
+            var named = filters.Select(filter => filter.Name).OfType<string>();
+            var anonymous = filters
+                .Where(filter => filter.Name is null)
+                .Select(filter => filter.Type.DisplayName())
                 .ToList();
             var yourself = one
                 ? "filter by that value yourself, and put it in the cache key"
                 : "filter by what they read yourself, and put it in the cache key";
-            // State the configure can set is a plain value stored on the context itself (SLUICE-EF-022).
-            var fromAField = _refusedFilters.Exists(refused => refused.ReadsContext)
-                ? " Read the context's state from a settable field or auto-property of the context (not readonly, "
-                    + "init-only or get-only) holding a plain value instead, so read.Db's configure can set it from "
-                    + "the cache key."
-                : "";
             if (anonymous.Count == 0)
             {
-                Untrackable(
-                    $"{reason}.{fromAField} {(fromAField == "" ? "Ignore" : "Or ignore")} just "
-                        + $"{(one ? "that filter" : "those filters")} with "
-                        + $"{IgnoreFilters(named)}, so any other filters still apply, then {yourself}"
-                );
-                return;
+                return $"ignore just {(one ? "that filter" : "those filters")} with {IgnoreFilters(named)}, so any "
+                    + $"other filters still apply, then {yourself}";
             }
 
             var it = anonymous.Count == 1 ? "it" : "them";
             var unnamed =
-                one ? "It has no name"
+                one ? "the filter has no name"
                 : anonymous.Count == 1 ? $"{anonymous[0]}'s query filter has no name"
-                : $"The query filters of {string.Join(" and ", anonymous)} have no names";
-            Untrackable(
-                $"{reason}.{fromAField} {unnamed}, so only IgnoreQueryFilters() ignores {it}, and that drops every query filter "
-                    + $"in the query, not just {(one ? "this one" : "the refused ones")}. Name {it}, as in "
-                    + $"HasQueryFilter(\"Tenant\", …), and ignore just {(one ? "it" : "the refused ones")} with "
-                    + $"{IgnoreFilters(named.Append("Tenant"))}, so any other filters still apply (or call "
-                    + $"IgnoreQueryFilters() if no other filter should), then {yourself}"
-            );
+                : $"the query filters of {string.Join(" and ", anonymous)} have no names";
+            var names =
+                anonymous.Count == 1
+                    ? ["Tenant"]
+                    : anonymous.Select(type => $"<{type}'s filter name>");
+            return $"{unnamed}, so only IgnoreQueryFilters() ignores {it}, and that drops every query filter in the "
+                + $"query, not just {(one ? "this one" : "these")}. Name {it}, as in HasQueryFilter(\"Tenant\", …), "
+                + $"and ignore just {(one ? "it" : "these")} with {IgnoreFilters(named.Concat(names))}, so any other "
+                + $"filters still apply (or call IgnoreQueryFilters() if no other filter should), then {yourself}";
         }
 
-        private static string Reads(RefusedFilter refused) =>
-            $"{refused.Type.DisplayName()}'s query filter"
-            + (refused.Name is null ? "" : $" \"{refused.Name}\"")
+        private static string Filter(FilterRead filter) =>
+            $"{filter.Type.DisplayName()}'s query filter"
+            + (filter.Name is null ? "" : $" \"{filter.Name}\"");
+
+        private static string Reads(FilterRead refused) =>
+            Filter(refused)
             + (
                 refused.ReadsContext
                     ? $" reads the context's state through {refused.What}, which read.Db's configure can't set"
@@ -1153,8 +1172,8 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
         private void Untrackable(string reason) => _untrackable ??= reason;
 
-        // A query filter that reads more than its rows: what it reads, and whether that's the context's state.
-        private readonly record struct RefusedFilter(
+        // A query filter's read of more than its rows: the filter, what it reads, and whether that's the context's state.
+        private readonly record struct FilterRead(
             IEntityType Type,
             string? Name,
             string What,
@@ -1191,7 +1210,19 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             {
                 if (_contextState is not null)
                 {
-                    tags.Add(ContextStateTag + string.Join(Separator, _contextState.Distinct()));
+                    var state = string.Join(
+                        Separator,
+                        _contextState
+                            .Distinct()
+                            .Select(read =>
+                                $"{Filter(read)} reads the context's state ({read.What})"
+                            )
+                    );
+                    _contextStateRemedies.TryAdd(
+                        state,
+                        IgnoreByName([.. _contextState.Distinct()])
+                    );
+                    tags.Add(ContextStateTag + state);
                 }
 
                 // A type every reach of which is a helper's root is covered by those helpers.

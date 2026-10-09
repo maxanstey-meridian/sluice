@@ -16,8 +16,11 @@ namespace Sluice.EntityFrameworkCore;
 /// </remarks>
 internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposable
 {
+    // Taken to make a context, so a task beside the configure can't get it half-configured.
     private readonly Lock _lock = new();
-    private readonly List<(Type Type, DbContext Context, bool Configured)> _contexts = [];
+
+    // Replaced whole under the lock, and read without it, so a command never waits on a configure.
+    private volatile (Type Type, DbContext Context, bool Configured)[] _contexts = [];
 
     /// <summary>The compute's contexts, with its scope opened on first use.</summary>
     internal static ComputeContexts Of(SluiceReads read) =>
@@ -25,10 +28,10 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
 
     /// <summary>
     /// Whether <paramref name="context"/> is one <c>read.Db</c> made for <paramref name="reads"/>' compute (compared by
-    /// reference): null if not, else whether it was configured. Opens nothing.
+    /// reference), and if so whether it was configured. Opens nothing.
     /// </summary>
-    internal static bool? StateOf(SluiceReads reads, DbContext context) =>
-        ActiveCompute.Held<ComputeContexts>(reads)?.StateOf(context);
+    internal static ComputeContext StateOf(SluiceReads reads, DbContext context) =>
+        ActiveCompute.Held<ComputeContexts>(reads)?.StateOf(context) ?? ComputeContext.Foreign;
 
     /// <summary>
     /// The compute's <typeparamref name="TContext"/>, taken from its scope on first use and configured there, before
@@ -37,7 +40,6 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
     internal TContext Get<TContext>(SluiceReads read, Action<TContext>? configure)
         where TContext : DbContext
     {
-        // Held while configure runs, so a task beside it can't get the context half-configured.
         lock (_lock)
         {
             foreach (var (type, existing, _) in _contexts)
@@ -53,8 +55,7 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
             var context = Resolve<TContext>();
             TrackedReads.EnsureOn(context);
             context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
-            var index = _contexts.Count;
-            _contexts.Add((typeof(TContext), context, false));
+            _contexts = [.. _contexts, (typeof(TContext), context, false)];
             if (configure is not null)
             {
                 // A configure that fails may have left the context half set up (one tenant's filter, another's
@@ -69,39 +70,36 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
                     throw;
                 }
 
-                _contexts[index] = (typeof(TContext), context, true);
+                _contexts = [.. _contexts[..^1], (typeof(TContext), context, true)];
             }
 
             return context;
         }
     }
 
-    private bool? StateOf(DbContext context)
+    private ComputeContext StateOf(DbContext context)
     {
-        lock (_lock)
+        foreach (var (_, held, configured) in _contexts)
         {
-            foreach (var (_, held, configured) in _contexts)
+            if (ReferenceEquals(held, context))
             {
-                if (ReferenceEquals(held, context))
-                {
-                    return configured;
-                }
+                return configured ? ComputeContext.Configured : ComputeContext.Unconfigured;
             }
-
-            return null;
         }
+
+        return ComputeContext.Foreign;
     }
 
     private TContext Resolve<TContext>()
         where TContext : DbContext
     {
         var name = typeof(TContext).Name;
-        object? resolved;
+        TContext? resolved;
         try
         {
-            resolved = scope.ServiceProvider.GetService(typeof(TContext));
+            resolved = scope.ServiceProvider.GetService<TContext>();
         }
-        catch (InvalidOperationException failure)
+        catch (InvalidOperationException failure) when (failure is not ObjectDisposedException)
         {
             throw new InvalidOperationException(
                 $"read.Db<{name}>() couldn't make a {name} in the compute's own DI scope: {failure.Message} If "
@@ -112,7 +110,7 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
             );
         }
 
-        return resolved as TContext
+        return resolved
             ?? throw new InvalidOperationException(
                 $"read.Db<{name}>() takes a {name} from the compute's own DI scope, and none is registered. Register "
                     + $"it with services.AddDbContext<{name}>(...), AddDbContextFactory<{name}>(...) or a pool, "
@@ -122,10 +120,23 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
 
     private static InvalidOperationException ConfiguredLate(string name) =>
         new(
-            $"read.Db<{name}>(configure) was called after the compute already had its {name}, which may have run "
-                + $"queries without that configuration. Configure it on the compute's first read.Db<{name}> call, "
-                + $"and call read.Db<{name}>() after that."
+            $"read.Db<{name}>(configure) was called after an earlier call had already made the compute's {name} (and "
+                + "maybe configured it and run queries on it). Configure it on the compute's first "
+                + $"read.Db<{name}> call, and call read.Db<{name}>() after that."
         );
 
     public ValueTask DisposeAsync() => scope.DisposeAsync();
+}
+
+/// <summary>Whether a context is one <c>read.Db</c> made for the running compute, and whether its configure ran.</summary>
+internal enum ComputeContext
+{
+    /// <summary>Not made by <c>read.Db</c> for this compute.</summary>
+    Foreign,
+
+    /// <summary>Made for this compute without a configure.</summary>
+    Unconfigured,
+
+    /// <summary>Made for this compute, and its configure has returned.</summary>
+    Configured,
 }

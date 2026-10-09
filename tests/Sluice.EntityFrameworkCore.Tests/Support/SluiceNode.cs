@@ -6,8 +6,9 @@ using ZiggyCreatures.Caching.Fusion;
 namespace Sluice.EntityFrameworkCore.Tests.Support;
 
 /// <summary>
-/// One application instance: a service provider with <c>AddSluice</c>, logging, and a <see cref="ShopDb"/> factory
-/// configured with <c>UseSluice</c> for <c>read.Db&lt;ShopDb&gt;()</c>, as an app would build it.
+/// One application instance: a service provider with <c>AddSluice</c>, logging, and <see cref="ShopDb"/> registered
+/// through <c>AddDbContextFactory</c> with <c>UseSluice</c>, which also registers the scoped <see cref="ShopDb"/> that
+/// <c>read.Db&lt;ShopDb&gt;()</c> takes, as an app would build it.
 /// </summary>
 public sealed class SluiceNode : IAsyncDisposable
 {

@@ -202,6 +202,43 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         _node.Logs.GetSnapshot().Should().NotContain(record => record.Id.Id == 3);
     }
 
+    // A row split across tables is written a table at a time, so no token covers it, and the log says so rather than
+    // suggesting a row version.
+    [Fact]
+    public async Task Editing_a_row_split_across_tables_evicts_every_Children_reader_and_logs_why()
+    {
+        var ada = await AddCustomer("Ada");
+        var truck = new Truck
+        {
+            Plate = "T-3",
+            Axles = 2,
+            OwnerId = ada.Id,
+        };
+        _db.Vehicles.Add(truck);
+        await _db.SaveChangesAsync();
+        var bob = await AddCustomer("Bob");
+        var bobTrucks = await Read(
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().Set<Truck>(), t => t.OwnerId, bob.Id)
+                    .ToListAsync(ct)
+        );
+
+        truck.Axles = 3;
+        await _db.SaveChangesAsync();
+
+        (await bobTrucks.WasEvicted())
+            .Should()
+            .BeTrue("the truck's owner may not be the one EF loaded");
+        _node
+            .Logs.GetSnapshot()
+            .Where(record => record.Id.Id == 4)
+            .Select(record => record.Message)
+            .Should()
+            .ContainSingle()
+            .Which.Should()
+            .Contain("Truck is stored across several tables");
+    }
+
     // EF's UPDATE or DELETE matches the row version EF loaded, so a row another writer changed since fails the save,
     // and the parent EF loaded is the one the row had whenever a save succeeds.
     [Theory]
@@ -1156,6 +1193,32 @@ public sealed class WriteDerivationTests : IAsyncLifetime
 
         (await _reader.Trailers.AnyAsync(t => t.TruckId == truck.Id)).Should().BeFalse();
         (await trailers.WasEvicted()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Deleting_a_derived_row_through_a_base_type_stub_evicts_lists_through_the_derived_type_s_own_foreign_keys()
+    {
+        var ada = await AddCustomer("Ada");
+        var truck = new Truck
+        {
+            Plate = "T-2",
+            Axles = 2,
+            OwnerId = ada.Id,
+        };
+        _db.Vehicles.Add(truck);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        var trucks = await Read(
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().Set<Truck>(), t => t.OwnerId, ada.Id)
+                    .ToListAsync(ct)
+        );
+
+        // The context only knows the row as a vehicle, which has no owner.
+        _db.Vehicles.Remove(new Vehicle { Id = truck.Id });
+        await _db.SaveChangesAsync();
+
+        (await trucks.WasEvicted()).Should().BeTrue();
     }
 
     [Fact]

@@ -320,7 +320,7 @@ public static class ShopViews
                                     .OrderBy(s => s.Id)
                                     .ToListAsync(ct)
                             ).Select(s =>
-                                $"{s.Id} {s.Note} {s.CouponId} {string.Join(",", s.Legs.Select(l => l.Place))}"
+                                $"{s.Id} {s.Note} {s.CouponId} {string.Join(",", s.Legs.Select(l => l.Place).Order())}"
                             )
                         )
                 )
@@ -539,8 +539,9 @@ public static class ShopViews
 /// inserts, edits and deletes, deletes of rows it never loaded, <c>Update</c> of a detached row, several changes in
 /// one save, saves in a transaction that commits or rolls back, and bulk statements that edit, re-parent and delete
 /// rows, alone or in a transaction. Shipments have a row version, so concurrent writers' saves of the same one fail
-/// rather than overwrite each other, and Sluice evicts their parents' lists exactly. It reads the rows it may pick from the database before each change, through the
-/// same context, so it sees its own uncommitted rows inside a transaction.
+/// rather than overwrite each other, and Sluice evicts their parents' lists exactly, except when only their legs
+/// change. It reads the rows it may pick from the database before each change, through the same context, so it sees
+/// its own uncommitted rows inside a transaction.
 /// </summary>
 public sealed class RandomWriter(ShopDb db, Keys first, Random random)
 {

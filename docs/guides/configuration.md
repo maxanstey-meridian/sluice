@@ -8,6 +8,7 @@ each server's memory cache in sync), the serialiser, fail-safe (serving the last
 when a compute fails), timeouts and auto-clone.
 
 ```csharp
+using Sluice;
 using ZiggyCreatures.Caching.Fusion;
 
 builder.Services.AddSluice(cache =>
@@ -61,6 +62,12 @@ The EF package also logs, at `Information`, the first time each cached query rea
 It's event id 2, under the category `Sluice.EntityFrameworkCore.TrackedReads`, and it goes
 through EF's logger factory, which under dependency injection is your app's. To hide it, raise
 that category to `Warning`.
+
+It also logs once per entity type when a save of that type has to evict `read.Children` lists
+under every parent, not just the parent the row had (see
+[Row versions](/guides/ef-core#row-versions)): event id 3 when the type has no row version, 4
+when it's stored across several tables. Those are under the category
+`Sluice.EntityFrameworkCore.SluiceInterceptor`, so raise that one to hide them.
 
 FusionCache logs several lines at `Information` for every cache call. To keep them out of your
 logs, raise its category in `appsettings.json`:
@@ -203,6 +210,7 @@ FusionCache's auto-clone, which hands each caller its own copy. It copies throug
 serialiser, so it needs one, and every cached value must survive a round trip through it:
 
 ```csharp
+using Sluice;
 using ZiggyCreatures.Caching.Fusion;
 using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
 

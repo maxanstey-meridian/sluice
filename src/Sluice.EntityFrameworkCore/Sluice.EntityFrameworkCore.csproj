@@ -31,7 +31,10 @@
     -->
     <Target Name="PinCoreToExactVersion" AfterTargets="_GetProjectReferenceVersions">
         <ItemGroup>
-            <_ProjectReferencesWithVersions Update="@(_ProjectReferencesWithVersions)">
+            <_ProjectReferencesWithVersions
+                Update="@(_ProjectReferencesWithVersions)"
+                Condition="'%(_ProjectReferencesWithVersions.Filename)' == 'Sluice'"
+            >
                 <ProjectVersion>[%(_ProjectReferencesWithVersions.ProjectVersion)]</ProjectVersion>
             </_ProjectReferencesWithVersions>
         </ItemGroup>

@@ -15,8 +15,8 @@ checked, and every query runs as it would without Sluice.
 ### A query whose reads Sluice can't work out
 
 When EF compiles a query, Sluice works out what it reads and notes it in a comment at the head
-of its SQL (`-- Sluice reads: …`). It can't for these, so they throw when they run inside a
-compute:
+of its SQL (`-- Sluice reads: …`, and `-- Sluice reads the context's state: …` when its filters
+read the context). It can't for these, so they throw when they run inside a compute:
 
 - raw SQL: `FromSql` and `SqlQuery`. SQL can read any table;
 - table-valued functions, and database functions you've mapped yourself, which can read any
@@ -26,9 +26,11 @@ compute:
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
   `ToSqlQuery`. No tracked write ever invalidates them;
 - a query filter that reads the context's state, such as a tenant id held on the context,
-  unless the compute set it with `read.Db<AppDb>(configure)`, or other state that can change,
-  such as a static tenant accessor, a captured service or `DateTime.Now`. See
-  [Tenants](#tenants-and-other-context-state);
+  unless the compute set it with `read.Db<AppDb>(configure)`; one that reads it where the
+  configure can't set it (through a service the context holds, a property with a body, a
+  method, a readonly field, or an init-only or get-only property), configured or not; or one
+  that reads other state that can change, such as a static tenant accessor, a captured service
+  or `DateTime.Now`. See [Tenants](#tenants-and-other-context-state);
 - entities that load lazily or hold their context: lazy-loading proxies, an injected lazy
   loader or `DbContext`, or an owned value that holds one. A cached one would read related rows
   later, outside the compute, or keep its context alive. They're refused even when they arrive
@@ -53,6 +55,7 @@ which depends on the reason:
 | raw SQL, a function, a table-valued function, a temporal query or another query root Sluice doesn't know | read it in a fused fetch: [the declared route](#the-declared-route) |
 | a type not mapped to a table | read it in a fused fetch |
 | a query filter that reads the context's state | put the tenant in the query key and set it on the compute's context with `read.Db<AppDb>(db => db.TenantId = tenantId)`: [Tenants](#tenants-and-other-context-state) |
+| a query filter that reads the context's state where the configure can't set it | copy the value into a settable field or auto-property in the constructor, filter by that, and configure it; or ignore that filter by name and filter by hand: [Tenants](#tenants-and-other-context-state) |
 | a query filter that reads other state that can change | put whatever it reads in the query key, filter by it yourself, and ignore just the filters the message names, by name (`IgnoreQueryFilters(["Tenant"])`), so the others still apply. An unnamed filter can only be ignored with `IgnoreQueryFilters()`, which drops every filter, so name it first unless it's the only one: [Tenants](#tenants-and-other-context-state) |
 | entities that load lazily or hold their context | select the values you need (`Select(o => new { o.Id, o.Total })`), not the entities |
 | an `Include` path that isn't a constant | include by a lambda (`Include(o => o.Lines)`) or a constant path (`Include("Lines")`) |
@@ -170,6 +173,13 @@ value is served to every caller with its key. So inside a compute it only runs o
 compute set up itself, from the key: pass a configure to the compute's first `read.Db`.
 
 ```csharp
+// A struct, so the filter reads a plain value; a class here (a record class) would be refused.
+public readonly record struct TenantId(string Value);
+
+// On AppDb, settable, so the configure can set it:
+//     public TenantId TenantId { get; set; }
+//     model.Entity<Invoice>().HasQueryFilter("Tenant", invoice => invoice.TenantId == TenantId);
+
 public static readonly Query<TenantId, IReadOnlyList<InvoiceSummary>> TenantInvoices = new(
     "invoice-summaries",
     id => id.Value
@@ -201,17 +211,20 @@ Sluice takes three things on trust here, as it takes a fused fetch's dependencie
   only sets a timeout leaves whatever the context's constructor put there.
 - **The values come from the key.** `db.TenantId = tenantId`, where `tenantId` is the key, is
   right; `db.TenantId = tenantProvider.TenantId` reads the request, not the key.
-- **The constructor's own value doesn't matter.** The compute's context is made in a DI scope
-  of the compute's own, so it can take scoped services, but it runs on the flow of whichever
-  caller computes first. A tenant provider over `IHttpContextAccessor` gives that caller's
-  tenant, and the configure must overwrite it.
+- **The configure overwrites what the constructor set.** The compute's context is made in a DI
+  scope of the compute's own, so it can take scoped services, but it's made on the async
+  context (`AsyncLocal`, `IHttpContextAccessor`) of whichever caller computes first. A tenant
+  provider over `IHttpContextAccessor` gives that caller's tenant, and the configure must
+  overwrite it.
 
-What Sluice does check: the filter must read the state where it's stored, a field or
-auto-property of the context holding a plain value (a string, number, `Guid`, enum or a struct
-of those). A filter that reads it through a tenant service the context holds
-(`i.TenantId == _tenants.TenantId`), a property with a body or a method is refused even on a
-configured context, since the configure can't set it. Copy the value into a field in the
-constructor, and filter by that.
+What Sluice does check: the filter must read the state where it's stored and where the
+configure can set it: a field that isn't readonly, or an auto-property with a setter that isn't
+`init`, of the context, holding a plain value (a string, number, `Guid`, enum or a struct of
+those). A filter that reads it through a tenant service the context holds
+(`i.TenantId == _tenants.TenantId`), a property with a body, a method, a `readonly` field or a
+`{ get; }` or `{ get; init; }` property is refused even on a configured context, since the
+configure can't set it. Copy the value into a settable field or property in the constructor, and
+filter by that.
 
 The configure can also point the context at a tenant's own database before its first query,
 for database-per-tenant:

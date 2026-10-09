@@ -153,6 +153,9 @@ public class Vehicle
 public sealed class Truck : Vehicle
 {
     public int Axles { get; set; }
+
+    /// <summary>A foreign key only trucks have, so a vehicle's row doesn't hold it.</summary>
+    public int? OwnerId { get; set; }
 }
 
 /// <summary>Points at trucks only, and the database deletes it with its truck.</summary>
@@ -731,7 +734,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .HasColumnType("citext");
 
         model.Entity<Vehicle>().UseTptMappingStrategy();
-        model.Entity<Truck>();
+        model.Entity<Truck>().HasOne<Customer>().WithMany().HasForeignKey(t => t.OwnerId);
         model.Entity<Trailer>().HasOne<Truck>().WithMany().HasForeignKey(t => t.TruckId);
         model.Entity<Shape>().UseTpcMappingStrategy();
         model.Entity<Parcel>().HasOne<Customer>().WithMany().HasForeignKey(p => p.CustomerId);

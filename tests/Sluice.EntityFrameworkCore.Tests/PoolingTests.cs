@@ -32,7 +32,7 @@ public sealed class PoolingTests(PostgresFixture postgres)
         {
             switch (registration)
             {
-                // Computes get their context from a factory, which EF configures alongside the pool.
+                // A factory beside the pool, as an app might register both; computes take the pool's scoped context.
                 case Registration.DbContextPool:
                     services.AddDbContextPool<ShopDb>(Configure, poolSize: 1);
                     services.AddDbContextFactory<ShopDb>(Configure);

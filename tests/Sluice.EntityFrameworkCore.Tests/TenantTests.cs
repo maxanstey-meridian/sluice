@@ -97,13 +97,13 @@ public sealed class TenantTests : IAsyncLifetime
         "a service the context holds",
         "*HelpNote's query filter reads the context's state through HelpdeskDb.Tenants.TenantId, which read.Db's configure can't set*"
             + "Read the context's state from a settable field or auto-property of the context*"
-            + "It has no name, so only IgnoreQueryFilters() ignores it*"
+            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*"
     )]
     [InlineData(
         "a property with a body",
         "*HelpTag's query filter reads the context's state through HelpdeskModel.TenantName, which read.Db's configure can't set*"
             + "Read the context's state from a settable field or auto-property of the context*"
-            + "It has no name, so only IgnoreQueryFilters() ignores it*"
+            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*"
     )]
     public async Task A_filter_reading_state_a_configure_cannot_set_is_refused_even_on_a_configured_context(
         string through,
@@ -182,10 +182,10 @@ public sealed class TenantTests : IAsyncLifetime
             }
             catch (InvalidOperationException)
             {
-                // Swallowing it doesn't help: the compute caches nothing.
+                // Swallowing it doesn't help: the compute caches nothing, though it read something.
             }
 
-            return Task.FromResult(new List<string>());
+            return r.Db<HelpdeskDb>().Set<HelpTenant>().Select(t => t.Id).ToListAsync(ct);
         }
 
         var read = () => node.Cache.GetOrSetAsync(_tickets, "acme", Compute).AsTask();
@@ -193,10 +193,50 @@ public sealed class TenantTests : IAsyncLifetime
         await read.Should()
             .ThrowAsync<InvalidOperationException>()
             .WithMessage(
-                "*read.Db<HelpdeskDb>(configure) was called after the compute already had its*"
+                "*read.Db<HelpdeskDb>(configure) was called after an earlier call had already made the compute's*"
             );
         await read.Should().ThrowAsync<InvalidOperationException>();
         computes.Should().Be(2, "the first call cached nothing");
+    }
+
+    // A task beside the configure that asks for the context waits for the configure, so it never gets the context
+    // half set up.
+    [Fact]
+    public async Task A_task_asking_for_the_context_while_its_configure_runs_gets_it_configured()
+    {
+        await using var node = Node("AddDbContext");
+        using var configuring = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        string? seen = null;
+
+        await node.Cache.GetOrSetAsync(
+            _tickets,
+            "acme",
+            async (r, ct) =>
+            {
+                var configured = Task.Run(
+                    () =>
+                        r.Db<HelpdeskDb>(db =>
+                        {
+                            configuring.Set();
+                            release.Wait(ct);
+                            db.TenantId = "acme";
+                        }),
+                    ct
+                );
+                configuring.Wait(ct);
+                var beside = Task.Run(() => seen = r.Db<HelpdeskDb>().TenantId, ct);
+                (await Task.WhenAny(beside, Task.Delay(200, ct)))
+                    .Should()
+                    .NotBe(beside, "it waits for the configure");
+                release.Set();
+                var db = await configured;
+                await beside;
+                return await db.Tickets.Select(t => t.Title).ToListAsync(ct);
+            }
+        );
+
+        seen.Should().Be("acme");
     }
 
     [Fact]
@@ -210,7 +250,7 @@ public sealed class TenantTests : IAsyncLifetime
                 .Cache.GetOrSetAsync(
                     _tickets,
                     "acme",
-                    (r, _) =>
+                    (r, ct) =>
                     {
                         computes++;
                         try
@@ -219,7 +259,11 @@ public sealed class TenantTests : IAsyncLifetime
                         }
                         catch (FormatException) { }
 
-                        return Task.FromResult(new List<string>());
+                        // Reads something, so only the failed configure stops it being cached.
+                        return r.Db<HelpdeskDb>()
+                            .Set<HelpTenant>()
+                            .Select(t => t.Id)
+                            .ToListAsync(ct);
                     }
                 )
                 .AsTask();
@@ -237,6 +281,7 @@ public sealed class TenantTests : IAsyncLifetime
         await using var node = Node("AddDbContext");
         string? constructedWith = null;
         string? serviceSays = null;
+        await AddTicket(node, HelpdeskModel.A, "acme");
         AmbientTenant.Current = "acme";
 
         var tickets = await node.Cache.GetOrSetAsync(

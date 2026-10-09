@@ -25,8 +25,8 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     private const string Declare =
         "*Run it in the fetch of read.From(dependency, fetch)*invalidate that source when its data changes*";
     private const string Configure =
-        "*Set it from the cache key when the compute first asks for the context, with read.Db<ShopDb>(db => …). Or "
-        + """ignore the filter by its name (IgnoreQueryFilters(["Tenant"]) for one named Tenant*""";
+        "*That state came from the context's constructor*Set it from the cache key when the compute first asks for "
+        + "the context, with read.Db<ShopDb>(db => …). Or filter by hand: *";
     private const string SelectValues = "*Select the values you need instead*";
     private const string ForeignContext = "*didn't get from read.Db<TContext>()*";
     private const string Rename = """update "Customers" set "Name" = 'Cy' where "Id" = -1""";
@@ -218,13 +218,13 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             (db, ct) => LedgersFilteredBy(db, "readonly field").ToListAsync(ct),
             """*Ledger's query filter "readonly field" reads the context's state through ShopDb._fixedTenant, """
                 + "which read.Db's configure can't set*settable field or auto-property*"
-                + """Or ignore just that filter with IgnoreQueryFilters(["readonly field"])*"""
+                + """Or filter by hand: ignore just that filter with IgnoreQueryFilters(["readonly field"])*"""
         ),
         ["query filter reading an init-only property of the context"] = (
             (db, ct) => LedgersFilteredBy(db, "init property").ToListAsync(ct),
             """*Ledger's query filter "init property" reads the context's state through ShopDb.SeededTenant, """
                 + "which read.Db's configure can't set*settable field or auto-property*"
-                + """Or ignore just that filter with IgnoreQueryFilters(["init property"])*"""
+                + """Or filter by hand: ignore just that filter with IgnoreQueryFilters(["init property"])*"""
         ),
         ["query filter calling a built-in database function given no column"] = (
             (db, ct) => LedgersFilteredBy(db, "database function").ToListAsync(ct),
@@ -253,6 +253,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             (db, ct) => db.Issues.ToListAsync(ct),
             """*Issue's query filter "Tenant" reads the context's state (ShopDb.TenantId)*"""
                 + Configure
+                + """ignore just that filter with IgnoreQueryFilters(["Tenant"]), so any other filters still apply*"""
         ),
         ["named query filter reading the context on a type reached through a navigation"] = (
             (db, ct) =>
@@ -272,8 +273,11 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ["named and anonymous query filters reading the context"] = (
             (db, ct) => db.Watches.Include(w => w.Account).ToListAsync(ct),
             "*: Account's query filter reads the context's state (ShopDb.TenantId); "
-                + """Issue's query filter "Tenant" reads the context's state (ShopDb.TenantId). The compute's*"""
+                + """Issue's query filter "Tenant" reads the context's state (ShopDb.TenantId).*"""
                 + Configure
+                + "Account's query filter has no name, so only IgnoreQueryFilters() ignores it*not just these. "
+                + """Name it, as in HasQueryFilter("Tenant", …), and ignore just these with """
+                + """IgnoreQueryFilters(["Tenant"]), so any other filters still apply*"""
         ),
         ["save"] = (
             (db, ct) =>

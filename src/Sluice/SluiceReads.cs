@@ -149,7 +149,12 @@ public sealed class SluiceReads
     private T? Find<T>()
         where T : class, IAsyncDisposable
     {
-        foreach (var (type, resource) in _held ?? [])
+        if (_held is null)
+        {
+            return null;
+        }
+
+        foreach (var (type, resource) in _held)
         {
             if (type == typeof(T))
             {

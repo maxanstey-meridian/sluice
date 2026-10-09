@@ -20,8 +20,11 @@ builder.Services.AddDbContextFactory<ShopDb>(
   `AddDbContextPool` or `AddPooledDbContextFactory`. Each compute opens a DI scope of its own
   and takes `ShopDb` from it, as a request does (see [Reading](#reading)); each of those
   registers `ShopDb` as a scoped service. If you register it more than one way, `UseSluice`
-  runs once per context either way.
-- A context whose constructor takes scoped services (a tenant provider) needs a registration
+  runs once per context either way. Registered only through a factory class of your own (EF's
+  pattern for setting a pooled context's tenant)? Register the context too, so the scope can
+  make it: `services.AddScoped(sp => sp.GetRequiredService<TenantDbFactory>().CreateDbContext())`.
+- A context whose constructor takes scoped services (a
+  [tenant provider](/guides/strict-reads#tenants-and-other-context-state)) needs a registration
   that makes it in the scope: `AddDbContext`, or `AddDbContextFactory(..., ServiceLifetime.Scoped)`.
   The default singleton factory makes it from the root provider, which refuses scoped services
   in Development and, elsewhere, hands every context one shared instance.
@@ -98,13 +101,12 @@ var orders = await computeDb.Orders
 
 The context comes from a DI scope the compute opens the first time it asks for one, and the
 same one comes back for every call in that compute. The scope, and the context with it, is
-disposed when the compute ends. To set the context up before its first query (the tenant its
-query filters read, or the tenant's database), pass a configure:
-`read.Db<ShopDb>(db => db.TenantId = tenantId)`. See
-[Tenants](/guides/strict-reads#tenants-and-other-context-state). It holds nothing
-from outside the compute, so it can't hand back your request's tracked entities or their unsaved
-edits. Its queries don't track unless you call `AsTracking()`, and it isn't in your request's
-transaction, so it reads what's committed.
+disposed when the compute ends. The context holds nothing from outside the compute, so it can't
+hand back your request's tracked entities or their unsaved edits. Its queries don't track unless
+you call `AsTracking()`, and it isn't in your request's transaction, so it reads what's
+committed. To set it up before its first query (the tenant its query filters read, or the
+tenant's database), pass a configure: `read.Db<ShopDb>(db => db.TenantId = tenantId)`. See
+[Tenants](/guides/strict-reads#tenants-and-other-context-state).
 
 ### What a query records
 
@@ -131,8 +133,8 @@ see which queries do this, Sluice logs each one the first time it runs, at `Info
 naming the query and the types it reads whole (see [Logging](/guides/configuration#logging)).
 
 Dependencies belong to entity types, the classes in your EF model, not to tables. Each is named
-by its class's full name, such as `Shop.Domain.Order` (in an inheritance hierarchy, the base
-class's). So a second class mapped to the same table, such as a read model in another context,
+by EF's entity type name, usually its class's full name, such as `Shop.Domain.Order` (in an
+inheritance hierarchy, the base class's). So a second class mapped to the same table, such as a read model in another context,
 isn't linked to the first: a write through one doesn't evict reads through the other. And
 moving or renaming an entity class changes its dependencies' names. See
 [Limitations](/misc/limitations#ef-core).
@@ -213,7 +215,7 @@ anyway:
 - writes.
 
 The helpers also refuse types not mapped to a table, with `NotSupportedException`, and a
-context without `UseSluice`.
+context without `UseSluice`, with `InvalidOperationException`.
 
 To read a view or a keyless type, or to run Dapper or raw SQL over your tables, use a fused
 fetch declared with the dependencies of the entity types underneath it. Then EF writes to those
@@ -278,7 +280,7 @@ is customer 1, not 2. A delete has the same gap.
 So for a type without a row version, Sluice doesn't trust the parent EF loaded: updating or
 deleting one of its rows evicts every `Children` list of that foreign key, under every parent.
 Editing one order evicts every customer's cached order list. Inserts stay exact, and Sluice logs
-once per type (event 3, at Information) when this happens.
+once per type and cache (event 3, at Information) when this happens.
 
 A row version is a concurrency token the database changes on every write. With one, EF fails the
 save (`DbUpdateConcurrencyException`) unless the row is unchanged since it was loaded, so the
@@ -306,10 +308,14 @@ What doesn't count:
   bulk update, raw SQL or another service can re-parent the row without bumping it. A foreign
   key that is itself a concurrency token does stay exact, since EF's `WHERE` checks it.
 - **A row split across tables** (table-per-type, entity splitting). The token is in one table,
-  and the foreign key may be in another.
-- **A change only to owned rows in a table of their own** (`OwnsMany`). EF writes only that
-  table, so it checks nothing of the owner's, and the owner's lists are evicted under every
-  parent.
+  and the foreign key may be in another. A foreign key that is a concurrency token doesn't help
+  either, and Sluice logs event 4 instead of 3.
+- **A change only to owned rows** (`OwnsOne` or `OwnsMany`, wherever they're stored). The owner
+  is saved for their sake, and the owner's lists are evicted under every parent.
+- **A token the model says the database maintains, but that it doesn't change on every write**:
+  `IsRowVersion()` on SQLite without a trigger, a `[Timestamp] byte[]` on PostgreSQL instead of
+  `xmin`, or a computed column that doesn't depend on the foreign key. Sluice takes the model's
+  word for it, so eviction is exact but can miss a re-parent.
 
 Foreign keys that are part of the primary key, such as a many-to-many join row's, are always
 exact: a key can't change.

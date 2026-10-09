@@ -50,9 +50,9 @@ compute that catches their exception still caches nothing.
 
 A compute also runs outside the caller's ambient transaction (`TransactionScope`), so a
 connection it opens can't see the caller's uncommitted rows. And it can hold resources for its
-own lifetime: the EF package's `read.Db` context is one, made on first use. Everything a compute
-holds is disposed when it ends, newest first. A dispose that throws takes the guards' route too, so it can't hide
-the compute's own exception or let fail-safe serve a stale value.
+own lifetime: the EF package's DI scope for `read.Db` is one, opened on first use. Everything a
+compute holds is disposed when it ends, newest first. A dispose that throws takes the guards'
+route too, so it can't hide the compute's own exception or let fail-safe serve a stale value.
 
 "A compute is running" is an `AsyncLocal` set inside the factory, so it flows into tasks the
 compute starts, and not into anything else.
@@ -89,11 +89,13 @@ Recording what a query reads is one EF interceptor for the whole process:
   their owner. The result goes into a `TagWith` on the query, so its SQL starts
   `-- Sluice reads: <types>` every time it runs. EF caches the compiled query, tag included, so
   this runs once per query shape. A query whose reads can't be known (raw SQL, a function, a view)
-  is tagged `-- Sluice can't track: <why>` instead.
+  is tagged `-- Sluice can't track: <why>` instead. A query whose filters read a field or
+  auto-property of the context gets one more line, `-- Sluice reads the context's state: <what>`.
 - **On every command** (`CommandInitialized`, before it runs): inside a compute, a write throws; a
   command from a context other than `read.Db`'s throws, unless it runs in a fused fetch; otherwise
   the tag is read, and each type it names is recorded as a whole-type dependency, or the command
-  throws if the tag says it can't be tracked, or has none. A read inside a transaction throws.
+  throws if the tag says it can't be tracked, or has none, or reads the context's state on a
+  context the compute didn't configure. A read inside a transaction throws.
   Outside a compute it returns at once.
 
 `read.Entity` and `read.Children` record a narrower dependency, one row or one parent's rows, then

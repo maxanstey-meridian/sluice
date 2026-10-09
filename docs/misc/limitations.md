@@ -21,10 +21,11 @@ no longer than the entry's duration.
   a restart. See
   [Transactions](/guides/transactions#what-s-not-covered).
 - **A FusionCache 2.9 race can lose an invalidation on one server.** An invalidation that lands
-  in the same microseconds as a read checking that dependency can be overwritten by the check,
-  and the stale value is then served on that server until the dependency is invalidated again.
-  The window opens when a server first checks a dependency, and again about once an hour after
-  that. It's a FusionCache bug; Sluice has no workaround.
+  in the same microseconds as a read checking that dependency can be overwritten by the check.
+  That server then keeps serving the values cached before it until they expire or are replaced,
+  or the dependency is invalidated again. The window opens when a server first checks a
+  dependency, and again about once an hour after that. It's a FusionCache bug; Sluice has no
+  workaround.
 - **Computes must read committed data from the primary database**, not inside your own open
   transaction or from a replica that may lag behind. See
   [Computes and transactions](/guides/transactions#computes-and-transactions).
@@ -48,7 +49,7 @@ no longer than the entry's duration.
 - **FusionCache's factory timeouts and its per-key `DefaultEntryOptionsProvider` don't apply**
   to Sluice calls. See [What Sluice sets](/guides/configuration#what-sluice-sets).
 - **Work started under `ExecutionContext.SuppressFlow`** can't see the compute, so the nesting
-  and strict-read guards are off there. See
+  and read checks are off there. See
   [What isn't checked](/guides/strict-reads#what-isn-t-checked).
 
 ## Multi-node
@@ -113,10 +114,12 @@ no longer than the entry's duration.
   database functions. See [The declared route](/guides/strict-reads#the-declared-route).
 - **Query filters that read the context's state need the compute to set it**, from the query
   key, with `read.Db<AppDb>(db => db.TenantId = tenantId)`; Sluice can't check what the
-  configure sets. Filters that read it through a service the context holds are refused. See
+  configure sets. Filters that read it where the configure can't set it (through a service the
+context holds, a property with a body, a method, a readonly field or an init-only property)
+are refused. See
   [Tenants](/guides/strict-reads#tenants-and-other-context-state).
 - **Invalidation isn't per tenant.** A write in one tenant evicts other tenants' cached reads
-  of the same table, unless they read through `read.Children` on a tenant foreign key.
+  of the same entity type, unless they read through `read.Children` on a tenant foreign key.
 - **Entities that load lazily or hold their context can't be returned by a query in a
   compute.** Select the values you need. See
   [What throws inside a compute](/guides/strict-reads#what-throws-inside-a-compute).

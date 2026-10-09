@@ -3,57 +3,65 @@
 ## 0.3.0 — breaking
 
 EF Core reads inside a compute are ordinary queries now. Sluice records the entity types each
-one reads, instead of refusing everything but its helpers.
+one reads (by class, not table), instead of refusing everything but its helpers.
 
 - **Breaking: upgrade `Meridian.Sluice` and `Meridian.Sluice.EntityFrameworkCore` together.**
   The EF package 0.2.0 calls a hidden core member that 0.3.0 removed, so mixing the two versions
   fails at run time with `MissingMethodException`. From 0.3.0 the EF package depends on exactly
-  its own version of the core (`[0.3.0]`, not `>= 0.3.0`), so NuGet refuses a mismatched pair
-  when it restores.
-- **New: `read.Db<TContext>()`.** A compute queries a context of its own, made in a DI scope
+  its own version of the core (`[0.3.0]`, not `>= 0.3.0`): NuGet fails the restore when your
+  project asks for an older core, but only warns (NU1608) when it asks for a newer one. Don't
+  reference `Meridian.Sluice` yourself alongside the EF package, or treat NU1608 as an error.
+- **New: `read.Db<TContext>()`.** A compute queries a context of its own, taken from a DI scope
   the compute opens for itself and disposed with it when the compute ends. It tracks nothing by
   default and isn't in the caller's transaction, so it can't cache a request's unsaved edits or
   uncommitted rows. Any EF registration of the context works (`AddDbContext`,
   `AddDbContextFactory`, `AddDbContextPool`, `AddPooledDbContextFactory`), and its constructor
-  may take scoped services; with a factory, register it `ServiceLifetime.Scoped` for that.
-  **Breaking:** a context registered only through an `IDbContextFactory<TContext>` of your own,
-  without the context itself, throws. Inside a compute, EF commands on any other context throw,
-  the read helpers included; pass them `read.Db<TContext>()`'s sets.
+  may take scoped services; with a factory, register it `ServiceLifetime.Scoped` for that. The
+  scope's services are made on the flow of whichever caller computes first, so a tenant provider
+  over `IHttpContextAccessor` gives that caller's tenant: set the tenant with a configure, below.
+  `read.Db` resolves the context itself from DI, so register it, not only a factory of your own.
+  Inside a compute, EF commands on any other context throw, the read helpers included; pass
+  them `read.Db<TContext>()`'s sets. Raw ADO.NET or Dapper on its connection outside a fused
+  fetch isn't tracked.
 - **New: `read.Db<TContext>(configure)`, for tenants.** It sets the compute's context up from the
   cache key before its first query: the tenant its query filters read
   (`read.Db<AppDb>(db => db.TenantId = tenantId)`), or a tenant's database
-  (`db.Database.SetConnectionString(...)`). A query filter that reads a field or auto-property of
-  the context runs only on a context the compute configured; Sluice takes on trust that the
-  configure sets it from the key. Only the compute's first `read.Db<TContext>` may configure;
-  a later configure throws. A pooled context keeps what the configure set into its next lease,
-  so set the tenant on every lease, as EF's docs show.
+  (`db.Database.SetConnectionString(...)`). A query filter that reads a settable field or
+  auto-property of the context runs only on a context the compute configured, and such a query
+  carries a third SQL comment, `-- Sluice reads the context's state: …`. Sluice takes on trust
+  that the configure sets it from the key. Only the compute's first `read.Db<TContext>` may
+  configure; a later configure throws. A pooled context keeps what the configure set into its
+  next lease, so set the tenant on every lease, as EF's docs show.
 - **Plain EF queries work inside a compute,** with `Include`, navigations, joins, subqueries,
   set operations, many-to-many navigations, `Find`, explicit loading and compiled queries. Each
   query records every entity type it reads, query filters and auto-includes included, and a write
   to any of them evicts the value. The first time each cached query reads a whole type, Sluice
   logs it at `Information`, so you can see what to narrow.
 - **`read.Entity` and `read.Children` narrow a query** to one row or one parent's rows. Their
-  queries may now follow navigations and `Include`, which record the types they reach.
+  queries may now follow navigations and `Include`, which record the types they reach. They turn
+  off auto-includes for the whole query, so what you `Include` loads without its own
+  auto-included navigations. `read.Children` never takes a null key.
 - **Removed: `read.All`.** A plain query on `read.Db`'s context does the same, except that it
   also loads auto-included navigations (ones the model includes in every query); add
   `.IgnoreAutoIncludes()` to get `read.All`'s shape.
 - **Every query on a `UseSluice` context now starts with a SQL comment,** inside a compute or
   not: `-- Sluice reads: …` naming the entity types it reads, or `-- Sluice can't track: …` with
-  the reason. You'll see it in logs, `ToQueryString()` and SQL snapshot tests.
+  the reason, and `-- Sluice reads the context's state: …` when its filters read the context.
+  You'll see them in logs, `ToQueryString()` and SQL snapshot tests.
 - **Still refused inside a compute:** raw SQL, views, keyless types, your own database functions,
   query filters that read the context's state on a context the compute didn't configure, or
-  through a service, a property with a body or a method, entities that load lazily or hold their
-  context, writes, and reads inside a transaction. Read the first four in a fused `read.From`
-  fetch.
+  where the configure can't set it (through a service, a property with a body, a method, a
+  readonly field, or an init-only or get-only property), entities that load lazily or hold
+  their context, writes, and reads inside a transaction. Read the first four in a fused
+  `read.From` fetch; declare it with the sets' `AllDependencies()` and EF writes evict it.
 - **Newly refused inside a compute:** a query filter that reads state that can change, such as a
   static tenant accessor, a captured service or `DateTime.Now`, since its value differs per
   call; and another compute's `read` (its `read.From`, `read.Db` or a helper), captured and used
   in this one, which would record what this compute read on the other.
-- **The refusal of a query filter names it.** When a query filter reads the context's or other
-  shared state, the message names each refused filter by its type and filter name, and says to
-  ignore just those (`IgnoreQueryFilters(["Tenant"])`), not `IgnoreQueryFilters()`, which drops
-  every filter, soft delete included. For a filter with no name, it says to name it first. The
-  Tenants section of "What a compute can't read" shows the named form.
+- **The refusal of a query filter names it.** The message names each refused filter by its type
+  and filter name, and says to ignore just those (`IgnoreQueryFilters(["Tenant"])`), not
+  `IgnoreQueryFilters()`, which drops every filter, soft delete included. For a filter with no
+  name, it says to name it first.
 - **New: `ExecuteUpdate` and `ExecuteDelete` invalidate by themselves,** once they commit: every
   read of the types stored in the table they wrote, and for a delete what the database cascades
   into. One that fails or is cancelled still invalidates, as a save does; one that changes no
@@ -61,10 +69,14 @@ one reads, instead of refusing everything but its helpers.
 - **Changed: without a row version, updating or deleting a row evicts its `Children` lists
   under every parent.** The parent EF loaded may not be the one the row leaves, if another
   writer moved it since, which left that parent's list stale. Map a concurrency token the
-  database maintains (`xmin` with `IsRowVersion()` on PostgreSQL, `rowversion` on SQL Server)
-  to keep eviction exact; EF then refuses a save on a row that changed since it was loaded.
-  Sluice logs once per type at `Information` when it falls back. Inserts, join rows and
-  foreign keys in the primary key stay exact.
+  database maintains (`xmin` with `IsRowVersion()` on PostgreSQL, `rowversion` on SQL Server),
+  or make the foreign key a concurrency token, to keep eviction exact; EF then refuses a save on
+  a row that changed since it was loaded. A type split across tables (table-per-type, entity
+  splitting) always falls back. Sluice logs once per type and cache at `Information` (events 3
+  and 4) when it falls back. Inserts, and foreign keys in the primary key (such as a join
+  row's), stay exact.
+- **Fixed: deleting a derived row through a base-type stub** (`Remove(new Vehicle { Id = id })`
+  for a truck) now evicts the `Children` lists under the derived type's own foreign keys.
 - **Behaviour change: a compute runs outside the caller's ambient transaction.** Inside a
   `TransactionScope`, connections a compute opens don't join it, so computes read what's
   committed. That applies to Dapper and other non-EF computes too: one called inside a
@@ -74,22 +86,15 @@ one reads, instead of refusing everything but its helpers.
   configuration, which used to make a save publish before its commit.
 - **Breaking: calling `AddSluice` twice on one service collection throws**
   `InvalidOperationException`, saying to call it once.
-- **Clearer errors:** `UseSluice` without `AddSluice`, `read.Db` without a factory or without
+- **Clearer errors:** `UseSluice` without `AddSluice`, `read.Db` with no context registered (or
+  one the scope can't make, such as scoped dependencies from a singleton factory) or without
   `UseSluice`, and a compute that recorded nothing all say what to do. For a value with nothing
   to depend on, the last now says how to get an `IFusionCache`: register one of your own with
   `services.AddFusionCache()`, since Sluice's is a named cache.
-- **Dependencies belong to entity types, not tables.** The docs said a query records the tables
-  it reads; it records the classes, by full name. So a second class mapped to the same table,
-  such as a read model in another context, isn't linked to the first, and moving or renaming an
-  entity class changes its dependencies, so old and new servers don't evict each other's reads
-  of it during a rolling deploy. Both are now in Limitations.
-- **Docs:** the "Strict Reads" page is now "What a compute can't read", at the same address. It
-  and the EF Core page show how to read a view, a keyless type or Dapper in a fused fetch
-  declared with the sets' `AllDependencies()`, so EF writes evict it with no invalidation by
-  hand. The helpers' auto-include warning now says what you `Include` loses its auto-included
-  navigations too, with the fix. `read.Children` takes a nullable foreign key property but never
-  a null key, which throws `ArgumentNullException`. The README lists Dapper on `read.Db`'s
-  connection as untracked, and the Redis sample has its `using` lines.
+- **Docs:** the "Strict Reads" page is now "What a compute can't read", at the same address.
+  Limitations gains: two classes mapped to one table aren't linked; moving or renaming an entity
+  class changes its dependencies during a rolling deploy; and a FusionCache 2.9 race can lose
+  an invalidation on one server. The Redis sample has its `using` lines.
 
 ## 0.2.0 — breaking
 
