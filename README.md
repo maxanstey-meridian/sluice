@@ -7,24 +7,24 @@
   </p>
 </p>
 
-**Your reads are your invalidation rules.** Sluice caches computed values and records, while
-each one is computed, exactly what it read. When something it read changes, that value is
-evicted. Values that didn't read it stay cached. You never write a list of cache keys to
-evict.
+**Your reads are your invalidation rules.** Sluice is a cache for .NET that knows what each
+cached value was built from. Cache a user's dashboard, and Sluice notes that it read the user's
+row and the dark-mode flag. Toggle the flag and every dashboard that read it is thrown away.
+Change one user's greeting and only that user's dashboard goes. You never keep a list of cache
+keys to clear.
 
-[FusionCache](https://github.com/ZiggyCreatures/FusionCache) does the caching: memory and
-distributed levels, the backplane, stampede protection and serialisation. Sluice is the thin
-layer on top. You pass a compute, the function that builds a value on a miss; Sluice turns what
-it read into FusionCache tags, and removes by tag once a write has committed. Any data source works. With EF Core, the dependencies come from the
-model, and writes need no Sluice code at all.
+[FusionCache](https://github.com/ZiggyCreatures/FusionCache) does the actual caching: in
+memory, in Redis, and keeping several servers in sync. Sluice adds the "what did this read?"
+part. With EF Core, saving your changes clears the right entries by itself. With any other data
+source, you tell Sluice what changed after you write it.
 
 ## The rules
 
 ```text
-Declare each dependency once.
-Computes record what they read.
-Writes invalidate what they changed.
-Invalidation waits for the commit.
+Name each thing that can change, once.
+A cached value records what it read while it's built.
+A write clears the cached values that read what it changed.
+Clearing waits until the write has committed.
 ```
 
 ## Prerequisites
@@ -43,8 +43,9 @@ dotnet add package Meridian.Sluice.EntityFrameworkCore   # only if you use EF Co
 
 ## Three steps in
 
-The code below is the [playground](examples/playground)'s: a dashboard for Alice, an admin,
-and Bob, a member. Both read their user row and a dark-mode flag. Only Alice reads a greeting,
+The code below is the
+[playground](https://github.com/maxanstey-meridian/sluice/tree/main/examples/playground)'s: a
+dashboard for Alice, an admin, and Bob, a member. Both read their user row and a dark-mode flag. Only Alice reads a greeting,
 which comes from a service that isn't EF.
 
 ### 1. Declare what can change, and what you cache
@@ -70,10 +71,11 @@ public static class Dashboards
 }
 ```
 
-A `Source` is declared once and used on both sides: computes record it, writes invalidate it.
-A `Query` binds a name, a key type and a value type, so the compiler checks every call.
-`UserId` isn't a string, so each declaration says once how to turn it into text. Keys that are
-`string` or `IFormattable` (numbers, `Guid`, enums) need no `format`.
+A `Source` names something that can change. Reads record it and writes clear it, and both use
+this one declaration, so they can't disagree on a name. A `Query` names something cached, with
+its key and value types, so the compiler checks every call. Sluice needs each key as text, and
+`UserId` isn't a string, so each declaration says how to turn it into one (`id => id.Value`).
+Strings, numbers, `Guid`s and enums need nothing.
 
 ### 2. Cache a read
 
@@ -107,11 +109,13 @@ public ValueTask<Dashboard> GetDashboard(UserId userId, CancellationToken ct) =>
     );
 ```
 
-On a miss, Sluice runs the compute and records every dependency it touches through `read`.
-`read.From(dependency, fetch)` works for any data source: it records the dependency, then runs
-the fetch, so the two can't drift apart. `read.Entity` is the EF Core form, covered below.
-Alice's dashboard now depends on her user row, the flag and her greeting; Bob's on his row and
-the flag.
+The lambda builds the dashboard when it isn't cached; Sluice calls it the compute. Each `read`
+call in it records what it read. `read.From(dependency, fetch)` works with any data source: it
+records the dependency and runs the fetch in one call, so you can't record one thing and fetch
+another. `read.Entity` is the EF Core version, covered below.
+
+After both dashboards are cached, Alice's depends on her user row, the flag and her greeting.
+Bob's depends on his row and the flag: he isn't an admin, so his compute never read a greeting.
 
 ### 3. Invalidate once the write has committed
 
@@ -125,9 +129,9 @@ public async Task SetGreeting(UserId userId, string text)
 }
 ```
 
-Only Alice's dashboard read Alice's greeting, so only hers is evicted. Bob's stays cached.
-Invalidate after the write commits, never before: in between, another request could cache the
-old value again.
+Only Alice's dashboard read Alice's greeting, so only hers is thrown away. Bob's stays cached.
+Invalidate after the write commits, never before. Otherwise another request could rebuild the
+dashboard from the old data in between and cache it again.
 
 ## With EF Core
 
@@ -137,10 +141,14 @@ builder.Services.AddDbContext<AppDb>(
 );
 ```
 
-`UseSluice` connects the context to Sluice. Inside a compute, `read.Entity`, `read.Children`
-and `read.All` record dependencies taken from the EF model and return no-tracking queries you
-can filter and project. Keys are the model's own types: the playground maps `UserId` with a
-value converter, so `read.Entity(db.Users, userId)` takes a `UserId`. EF writes need nothing:
+`UseSluice` connects the context to Sluice. Inside a compute, three helpers read EF data:
+`read.Entity` (one row by its key), `read.Children` (the rows under one parent) and `read.All`
+(every row). Each records what it reads and returns a query you can filter and project. Sluice
+works out the dependency from your EF model, so EF entities need no `Source`. Keys are your
+model's own types: the playground maps `UserId` with a value converter, so
+`read.Entity(db.Users, userId)` takes a `UserId`.
+
+EF writes need no Sluice code:
 
 ```csharp
 var flag = await db.Flags.SingleAsync(flag => flag.Id == FlagId.DarkMode, ct);
@@ -150,21 +158,22 @@ flag.Enabled = !flag.Enabled;
 await db.SaveChangesAsync(ct);
 ```
 
-Tracked saves just work. Inserts, updates and deletes evict exactly the rows they wrote and the
-foreign keys those rows had before and after, once the transaction commits. When a delete lets
-the database remove or null rows EF never loaded (an `ON DELETE CASCADE` or `SET NULL` in your
-model), Sluice can't see which rows those were, so it evicts every cached read of the affected
-types that could include them instead. [Database cascades](https://maxanstey-meridian.github.io/sluice/guides/ef-core#database-cascades)
+Saves through EF's change tracker just work. Once a save commits, Sluice clears the cached
+reads of every row it inserted, updated or deleted, and of the lists those rows were in or
+moved between. One case is broader: when a delete makes the database delete rows EF never
+loaded, or set their foreign key to null (`ON DELETE CASCADE` or `SET NULL`), Sluice can't tell
+which rows those were. It clears every cached read of those types instead.
+[Database cascades](https://maxanstey-meridian.github.io/sluice/guides/ef-core#database-cascades)
 has the details.
 
-Anything that writes without a `UseSluice` context must invalidate by hand: another service, a
-cron job, SQL run by hand, a trigger, a second context without `UseSluice`, `ExecuteUpdate` or
-raw SQL. Otherwise the old value stays cached until it expires, so keep durations short for
-data written outside your app. For an EF set it's one line:
+Sluice can't see writes that don't go through a `UseSluice` context: another service, a cron
+job, SQL run by hand, a trigger, a second context without `UseSluice`, `ExecuteUpdate` or raw
+SQL. After one of those, invalidate by hand, or the old value stays cached until it expires.
+Keep durations short for data written outside your app. For an EF set it's one line:
 `await cache.InvalidateAsync(db.Users.AllDependencies());`.
 
-Reads inside a compute are strict. An EF query that doesn't go through a helper throws,
-rather than caching a value nothing will ever invalidate.
+Inside a compute, an EF query that skips the helpers throws. Sluice wouldn't know what it read,
+so no write would ever clear the value it built.
 
 ## Try it
 
@@ -179,17 +188,20 @@ start.
 ## Also in the box
 
 - [Typed declarations](https://maxanstey-meridian.github.io/sluice/guides/sources-and-queries):
-  key rules, typed ids, multi-part and per-tenant keys, and durations per query
-- [Batched and whole-source invalidation](https://maxanstey-meridian.github.io/sluice/guides/invalidation),
-  fallbacks that are still evicted when a fetch fails, and `ClearAsync`
+  which key types work, typed ids, keys with several parts or a tenant, and how long each query
+  is cached
+- [Invalidating](https://maxanstey-meridian.github.io/sluice/guides/invalidation): several
+  things at once or a whole source, fallback values that still get cleared, and clearing
+  everything
 - [EF Core writes](https://maxanstey-meridian.github.io/sluice/guides/ef-core): foreign keys,
-  database cascades, owned and inherited types, pooled contexts, and bulk-statement bypasses
-- [Strict reads](https://maxanstey-meridian.github.io/sluice/guides/strict-reads): forgotten
-  reads, lazy loads and joins throw inside a compute, with a declared route for views and raw SQL
+  database cascades, owned and inherited types, pooled contexts, and bulk updates
+- [Strict reads](https://maxanstey-meridian.github.io/sluice/guides/strict-reads): queries that
+  would cache data Sluice can't track throw, and how to read views and raw SQL anyway
 - [Transactions](https://maxanstey-meridian.github.io/sluice/guides/transactions): EF
-  transactions, `TransactionScope` and retrying execution strategies all invalidate after commit
-- [Multi-node](https://maxanstey-meridian.github.io/sluice/guides/configuration): FusionCache's
-  distributed cache and backplane, with a startup check that entries can't outlive their tags
+  transactions, `TransactionScope` and retries all clear the cache after the commit, not before
+- [Several servers](https://maxanstey-meridian.github.io/sluice/guides/configuration): sharing
+  the cache through Redis, and a startup check for settings that would let cleared values come
+  back
 
 ## Documentation
 
@@ -202,9 +214,9 @@ start.
 (what Sluice deliberately doesn't do)
 
 Contributors: each package's rules, with the tests that prove them, are in
-[`src/Sluice/INVARIANTS.md`](src/Sluice/INVARIANTS.md) and
-[`src/Sluice.EntityFrameworkCore/INVARIANTS.md`](src/Sluice.EntityFrameworkCore/INVARIANTS.md).
+[`src/Sluice/INVARIANTS.md`](https://github.com/maxanstey-meridian/sluice/blob/main/src/Sluice/INVARIANTS.md) and
+[`src/Sluice.EntityFrameworkCore/INVARIANTS.md`](https://github.com/maxanstey-meridian/sluice/blob/main/src/Sluice.EntityFrameworkCore/INVARIANTS.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/maxanstey-meridian/sluice/blob/main/LICENSE)

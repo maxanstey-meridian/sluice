@@ -54,8 +54,9 @@ compute starts, and not into anything else.
 ## An invalidation
 
 `InvalidateAsync` turns the dependencies into tags, de-duplicates them, and removes each by tag,
-concurrently. With a distributed cache, each removal is a write to it and a backplane message. It takes no cancellation token and passes none, so an aborted request still
-invalidates. `Invalidate` is the same, synchronously, one tag at a time.
+concurrently. With a distributed cache, each removal is a write to it and a backplane message.
+It takes no cancellation token and passes none, so an aborted request still invalidates.
+`Invalidate` is the same, synchronously, one tag at a time.
 
 ## EF Core reads
 

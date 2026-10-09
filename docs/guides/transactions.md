@@ -11,8 +11,9 @@ You call `InvalidateAsync`, so call it after your commit returns. See
 
 ## EF Core
 
-Sluice watches EF's own transaction signals and invalidates each save's writes when the
-transaction it ran in ends. The call that ends it returns only after the invalidation.
+Sluice listens for EF's own transaction events, and invalidates what each save wrote when the
+transaction it ran in ends. The call that ends the transaction returns only after the
+invalidation has run.
 
 | The save ran | Invalidated |
 |---|---|
@@ -23,11 +24,12 @@ transaction it ran in ends. The call that ends it returns only after the invalid
 | in a `DbTransaction` you commit outside EF | **never**: Sluice can't see it. Unsupported |
 
 A rollback invalidates too, as does a save that fails, is cancelled or hits a concurrency
-conflict. Each might have committed something (an earlier batch, a commit whose result is
-unknown), and evicting too much is safe where evicting too little isn't.
+conflict. Each might have committed something (an earlier batch, or a commit whose result never
+came back), and evicting too much is safe where evicting too little isn't.
 
-Inside an EF transaction, all its saves are invalidated together at the commit. Inside an
-ambient transaction, each save is invalidated separately when the transaction completes.
+Inside an EF transaction, all its saves are invalidated together at the commit. Inside a
+`TransactionScope` or an enlisted transaction, each save is invalidated separately when the
+transaction completes.
 
 ### `TransactionScope` with async code
 
@@ -42,19 +44,19 @@ using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled)
 }
 ```
 
-Without it, the ambient transaction doesn't flow across `await`. EF and Sluice then see no
-transaction when an async save completes, so Sluice invalidates at once, before the scope
-completes, which reopens the window above.
+Without it, the transaction is lost after the first `await`. EF and Sluice then see no
+transaction when an async save completes, so Sluice invalidates straight away, before the scope
+commits, and another request can cache the old data in between.
 
-A promoted or distributed transaction can complete after `Dispose` returns, and is invalidated
-then. A connection string with `Enlist=false` doesn't join the scope, so EF autocommits and
-Sluice invalidates in `SaveChanges`, as it should.
+A distributed transaction can complete after `Dispose` returns, and is invalidated then. A
+connection string with `Enlist=false` doesn't join the scope, so each save commits on its own
+and Sluice invalidates in `SaveChanges`, as it should.
 
 ### Retrying execution strategies
 
-With `EnableRetryOnFailure`, wrap your own transaction in the execution strategy and accept the
-changes only once it has committed. This is EF's own pattern; with it, only the attempt that
-commits is invalidated:
+With `EnableRetryOnFailure`, wrap your own transaction in the execution strategy, and only
+accept the changes once it has committed. This is EF's own pattern, and with it only the
+attempt that commits is invalidated:
 
 ```csharp
 var strategy = db.Database.CreateExecutionStrategy();
@@ -76,16 +78,17 @@ Several contexts can share one transaction. Every context that saves must use `U
 the same `SluiceCache`, so its saves are captured. Then:
 
 - **`UseTransaction`**: the context that calls `Commit` or `Rollback` must use `UseSluice` with
-  that cache too. It publishes what all of them saved.
-- **One `TransactionScope`**: no context commits. Each saving context publishes its own saves
+  that cache too. It invalidates what all of them saved.
+- **One `TransactionScope`**: no context commits. Each saving context invalidates its own saves
   when the scope completes.
 
 ## Computes and transactions
 
-A compute must read committed data from the primary. Inside a transaction it would cache rows
-other callers can't see yet, and that may roll back, or an old snapshot under `RepeatableRead`
-or `Serializable`, then serve them to everyone. From a lagging replica, an invalidation could
-arrive before the replica catches up, and the old value would be cached as new.
+A compute must read committed data from the primary database. Inside a transaction it could
+cache rows other callers can't see yet, which may roll back, or an old snapshot under
+`RepeatableRead` or `Serializable`, and then serve them to everyone. From a replica that lags
+behind, the invalidation could arrive before the replica catches up, and the old value would be
+cached as new.
 
 Inside a compute, an EF read helper's query that runs inside a transaction (the context's EF
 transaction, an enlisted one or an ambient one) throws `InvalidOperationException`, and so does
@@ -97,7 +100,7 @@ transaction. Nothing checks for replicas: point computes at the primary.
 
 ## What's not covered
 
-- A crash between the commit and the invalidation loses the invalidation. The entry's duration
-  bounds how long the old value lives. There's no outbox.
+- A crash between the commit and the invalidation loses the invalidation, and the old value
+  lives until its entry expires. Nothing stores pending invalidations to replay after a restart.
 - A `DbTransaction` committed outside EF isn't seen, and neither is a save or a `UseTransaction`
   commit on a context without `UseSluice`.

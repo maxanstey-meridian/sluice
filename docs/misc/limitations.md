@@ -1,8 +1,8 @@
 # Limitations
 
-These are the deliberate limits of Sluice, so you don't discover them in production. Each links
-to the page that explains it. Where a limit can leave a stale value, the entry's duration
-bounds it.
+These are Sluice's deliberate limits, listed here so you don't discover them in production.
+Each links to the page that explains it. Where a limit can leave an old value cached, it lives
+no longer than the entry's duration.
 
 ## Writes Sluice can't see
 
@@ -17,10 +17,12 @@ bounds it.
 
 ## Everywhere
 
-- **A crash between commit and invalidation loses the invalidation.** There's no outbox. See
+- **A crash between commit and invalidation loses the invalidation.** Nothing replays it after
+  a restart. See
   [Transactions](/guides/transactions#what-s-not-covered).
-- **Computes read committed data from the primary**, not inside your own open transaction or
-  from a lagging replica. See [Computes and transactions](/guides/transactions#computes-and-transactions).
+- **Computes must read committed data from the primary database**, not inside your own open
+  transaction or from a replica that may lag behind. See
+  [Computes and transactions](/guides/transactions#computes-and-transactions).
 - **Whatever changes what a compute reads belongs in the query key**: a tenant, a locale, a
   soft-delete switch. See [Tenants](/guides/strict-reads#tenants-and-other-context-state).
 - **Cached values are shared instances**, entities included, unless you turn on auto-clone. See
@@ -31,40 +33,45 @@ bounds it.
   keys.** Sluice can't check that. See [Key text](/guides/sources-and-queries#key-text).
 - **Source names aren't checked for duplicates**, and query names only within one process. See
   [Names](/guides/sources-and-queries#names) and [Queries](/guides/sources-and-queries#queries).
-- **Key text and names are wire format.** See
-  [Key text is wire format](/guides/sources-and-queries#key-text-is-wire-format).
+- **Renaming a source or query, or changing a `format`, changes its cache keys.** During a
+  rolling deploy, old and new servers don't evict each other's entries. See
+  [Renaming changes the cache keys](/guides/sources-and-queries#renaming-changes-the-cache-keys).
 - **A caller waiting on another caller's compute can't cancel the wait.** See
   [Cancellation](/guides/invalidation#cancellation).
 - **FusionCache's factory timeouts and its per-key `DefaultEntryOptionsProvider` don't apply**
   to Sluice calls. See [What Sluice sets](/guides/configuration#what-sluice-sets).
 - **Work started under `ExecutionContext.SuppressFlow`** can't see the compute, so the nesting
-  and strict-read guards are off there. See [What isn't checked](/guides/strict-reads#what-isn-t-checked).
+  and strict-read guards are off there. See
+  [What isn't checked](/guides/strict-reads#what-isn-t-checked).
 
 ## Multi-node
 
-- **Clock skew** between nodes opens a window about as wide as the skew: FusionCache compares an
-  entry's stamp from one node with an invalidation time from another.
-- **A missed backplane message** leaves that node stale until its in-memory tag data expires (an
-  hour by default). Without a distributed cache, only the entries' own expiry ends it.
-- **A distributed-cache blip during a cold tag lookup** can make a node treat a tag as never
+- **Clocks that disagree between servers** open a window about as wide as the difference:
+  FusionCache compares when one server stored an entry with when another invalidated it.
+- **A missed backplane message** leaves that server serving old values until its in-memory tag
+  data expires (an hour by default). Without a distributed cache, only the entries' own expiry
+  ends it.
+- **A Redis blip while a server first looks a tag up** can make it treat the tag as never
   invalidated until that lookup expires, even if it missed no message.
 - **A slow Redis delays every invalidation, and every EF save**, until the Redis client times
   out. See [When Redis is slow or down](/guides/configuration#when-redis-is-slow-or-down).
 
 ## EF Core
 
-- **A database cascade evicts whole types.** A delete the database cascades or sets to null
-  evicts every `Entity` and `All` read of the types it reaches, whichever rows it hit. See
+- **A database cascade evicts whole types.** When a delete makes the database delete rows of
+  other types, or set their foreign key to null, every `Entity` and `All` read of those types is
+  evicted, whichever rows it hit. See
   [Database cascades](/guides/ef-core#database-cascades).
-- **Cascades the model doesn't know about** (triggers, a drifted schema) aren't seen at all.
+- **Cascades the model doesn't know about** (triggers, a database that differs from the model)
+  aren't seen at all.
   See [Database cascades](/guides/ef-core#database-cascades).
 - **A row saved from an object you built yourself** misses its real old parent when its foreign
   key differs from the stored one. See
   [Rows saved without loading them](/guides/ef-core#rows-saved-without-loading-them).
 - **Two entity types splitting one table and sharing a column**: saving one doesn't evict the
   other's readers. See [Model shapes](/guides/ef-core#model-shapes).
-- **Coarse eviction, by design**: `Children` readers by any change to any member, `All` readers
-  by any write to the type. See [Writing](/guides/ef-core#writing).
+- **Broad eviction, by design**: a `Children` list is evicted by a change to any row in it, and
+  an `All` read by any write to the type. See [Writing](/guides/ef-core#writing).
 - **Commits Sluice doesn't see**: a raw `DbTransaction` committed outside EF, and some
   `TransactionScope` setups. See [Transactions](/guides/transactions#ef-core).
 - **Interceptors that change entities in `SavingChanges`** must come before `UseSluice`. See

@@ -38,9 +38,9 @@ The compute gets `read`, which records what it reads, and the caller's cancellat
 ### `read.From(dependency, fetch)`
 
 The form to reach for. It records the dependency, then runs `fetch` with the compute's token and
-returns its result. The dependency and the fetch it covers sit in one call, so a compute can't
-record one source and read another. Sluice calls this a fused read, and `fetch` its fused
-fetch.
+returns its result. What you record and what you fetch sit in one call, so a compute can't
+record one thing and read another. The rest of these docs call this a *fused read*, and `fetch`
+its *fused fetch*.
 
 - `read.From([a, b], fetch)` records several dependencies for one fetch. The list can't be
   empty: the fetch has to declare what it reads.
@@ -79,36 +79,38 @@ read.From(invoiceIds.Select(Billing.Invoice.For));
   `InvalidOperationException`, and nothing is cached: nothing could ever invalidate it. For a
   value with no dependencies, use FusionCache directly.
 - **No nesting.** Calling `GetOrSetAsync` from inside a compute, or inside a fused fetch, throws.
-  On a hit, the outer compute couldn't learn the inner value's dependencies. Read the
-  underlying data in the outer compute instead.
-- **Await every read.** `read.From` is safe from concurrent tasks inside one compute (fan out
-  with `Task.WhenAll` freely), but it throws once the compute has returned.
-- **Read committed data from the primary**: not inside your own open transaction, and not from
-  a lagging replica. See [Computes and transactions](/guides/transactions#computes-and-transactions).
-- **Rule violations survive fail-safe.** If fail-safe is on, a violating compute still throws
-  rather than letting FusionCache serve a stale fallback, and still stores nothing.
+  If the inner value were already cached, the outer compute couldn't learn what it read. Read
+  the underlying data in the outer compute instead.
+- **Await every read.** `read.From` is safe to call from several tasks at once inside one
+  compute (use `Task.WhenAll` freely), but it throws once the compute has returned.
+- **Read committed data from the primary database**: not inside your own open transaction, and
+  not from a replica that may lag behind. See
+  [Computes and transactions](/guides/transactions#computes-and-transactions).
+- **Breaking a rule always throws.** FusionCache's fail-safe, if you turn it on, serves the last
+  good value when a compute throws. It doesn't for these rules: the call still throws, and
+  nothing is stored.
 
 ### Cancellation
 
 The token you pass to `GetOrSetAsync` goes to the compute, and from there to each fused
-fetch. A cancelled caller resumes only once its compute has ended, so the compute is never
-left running against a `DbContext` or connection the caller has moved on from. A token that's
-already cancelled throws before the cache is read.
+fetch. A cancelled call returns only once its compute has ended, so the compute is never left
+running on a `DbContext` or connection the caller has moved on from. A token that's already
+cancelled throws before the cache is read.
 
-A caller waiting on another caller's compute for the same key can't cancel the wait; it ends
-when that compute does, or at FusionCache's `LockTimeout` if you set one.
+When two callers ask for the same uncached key, only one compute runs and the other caller
+waits for it. That wait can't be cancelled; it ends when the compute does, or at FusionCache's
+`LockTimeout` if you set one.
 
 ### Caching a value Sluice didn't compute
 
-There's no `Set`. Every cached value comes from a compute, so every value has the dependencies
-it read.
+There's no `Set`. Every cached value comes from a compute, so Sluice always knows what it read.
 
 ## Invalidating
 
 Reads go through Sluice, because it has to see them to record them. Writes don't: you write as
 usual, then tell Sluice what changed. Only your code knows when its write has committed, so
-there's no write wrapper on the generic path. EF Core has a commit signal Sluice can hook, so
-EF writes need nothing; see [EF Core](/guides/ef-core#writing).
+Sluice doesn't wrap writes here. EF Core tells Sluice when a save commits, so EF writes need
+nothing; see [EF Core](/guides/ef-core#writing).
 
 Once a write has committed, invalidate what it changed:
 
@@ -158,15 +160,15 @@ EF writes do this for you. See [Transactions](/guides/transactions).
 ### No cancellation token
 
 `InvalidateAsync` takes no token on purpose. A request aborted just after its write committed
-must still invalidate, or the old value stays cached until it expires. With a distributed
-cache, a failed write doesn't make it throw, but a slow Redis holds it up until the Redis
-client times out; see [When Redis is slow or down](/guides/configuration#when-redis-is-slow-or-down).
+must still invalidate, or the old value stays cached until it expires. With Redis, a failed
+Redis write doesn't make it throw, but a slow Redis holds it up until the Redis client times
+out; see [When Redis is slow or down](/guides/configuration#when-redis-is-slow-or-down).
 
 ### An invalidation during a compute
 
-If an invalidation that overlaps a compute's dependencies lands while that compute runs, the
-caller still gets the value it computed, but the entry is dead: the next call recomputes. An
-invalidation that doesn't overlap leaves the new entry alone.
+If something a compute has read is invalidated while the compute is still running, the caller
+still gets the value it computed, but it isn't kept: the next call computes again. An
+invalidation of something the compute didn't read leaves the new entry alone.
 
 ### Mixing with EF Core
 
@@ -178,10 +180,10 @@ await cache.InvalidateAsync([db.Users.Dependency(userId), Billing.Invoice.For(in
 
 ### Clearing
 
-`ClearAsync` evicts everything Sluice cached, without fail-safe: a cleared value is never
-served as a fallback. Other FusionCaches, even on the same Redis, are untouched.
+`ClearAsync` evicts everything Sluice cached, and fail-safe never serves a cleared value. Other
+FusionCaches, even on the same Redis, are untouched.
 
 ## Cached values are shared
 
-FusionCache hands every caller the same instance from memory. Don't change a cached value;
-see [Shared instances and auto-clone](/guides/configuration#shared-instances-and-auto-clone).
+FusionCache hands every caller the same object from memory. Don't modify a cached value; see
+[Shared instances and auto-clone](/guides/configuration#shared-instances-and-auto-clone).

@@ -51,51 +51,52 @@ A compute records them with `read.From`, and a write invalidates them with
 
 Invalidating `Invoice.For(a)` leaves readers of `Invoice.For(b)` cached.
 
-`Dependency`, the value `For` and `All` return, has no public constructor or members. It can
-only come from a source, so there are no hand-built strings for readers and writers to spell
-differently.
+`For` and `All` return a `Dependency`, which you can't build any other way. So there are no
+hand-built strings for a reader and a writer to spell differently.
 
 ### Names
 
-A source's name can't be blank. It isn't checked for duplicates: two sources with the same name
-share evictions, which over-invalidates but never serves a wrong value. Declare each source
-once and use that one declaration everywhere.
+A source's name can't be blank. Duplicates aren't checked: invalidating one of two sources with
+the same name also evicts the other's readers. That clears more than it needs to, but never
+serves a wrong value. Declare each source once and use that one declaration everywhere.
 
 ## Queries
 
-A query binds a name, a key type and a value type:
+A query has a name, a key type and a value type:
 
 - The compiler checks that each compute returns the query's value type.
-- Every call site builds the entry key the same way, and with the same duration.
-- The cache entry key is `<name>:<key text>`. To version a query, rename it.
+- Every caller gets the same cache key for the same key value, and the same duration.
+- The cache key is `<name>:<key text>`. To change what a query caches and drop its old entries,
+  rename it.
 
 Query names can't be blank, contain `:` or start with `__fc` (FusionCache keeps its own data
-there). Declaring the same name with a different key or value type throws
-`ArgumentException`, because the two would share entries: on a multi-node setup one would read
-the other's value from the distributed cache as the wrong type, with no error. Declaring the
-same name with the same types again is allowed. Copies in other processes, and same-typed
-copies with a different `format`, can't be caught.
+there). Declaring the same name twice with different key or value types throws
+`ArgumentException`, because the two would share cache entries: with Redis, one could read the
+other's value as the wrong type, with no error. Declaring the same name with the same types
+again is allowed. Sluice can't catch a clash between processes, or between same-typed copies
+with a different `format`.
 
 There's no keyless query. A value that seems global is usually per tenant or per locale, so key
 it by that.
 
 ### Duration
 
-`Duration` is how long an entry lives unless something evicts it first. Leave it unset to use
+`Duration` is how long an entry lives unless a write evicts it first. Leave it unset to use
 the cache's default, which is FusionCache's 30 seconds unless you
-[configure another](/guides/configuration#durations). The duration is the backstop for any
-invalidation that's missed, so keep it as short as the data allows.
+[configure another](/guides/configuration#durations). If an invalidation is ever missed, the
+duration is how long the old value can live, so keep it as short as the data allows.
 
-A cache-wide `MemoryCacheDuration` or `DistributedCacheDuration`, if you set one, still wins at
-its level, as it does in FusionCache. A query's duration is checked against the lifetime of
-Sluice's tag data each time the query is used, and throws `InvalidOperationException` if it's
-too long. See [the lifetime rule](/guides/configuration#the-lifetime-rule).
+A cache-wide `MemoryCacheDuration` or `DistributedCacheDuration`, if you set one, still wins for
+memory or Redis respectively, as it does in FusionCache. Each time a query is used, Sluice checks
+its duration isn't so long that an evicted entry could come back, and throws
+`InvalidOperationException` if it is. See
+[the lifetime rule](/guides/configuration#the-lifetime-rule).
 
 ### The compute returns exactly `TValue`
 
-`Task<T>` is invariant, so a compute for a `Query<CustomerId, IReadOnlyList<Invoice>>` that
-returns a `List<Invoice>` doesn't compile. C# reports CS0411, "the type arguments cannot be
-inferred". Give the lambda its return type:
+A compute for a `Query<CustomerId, IReadOnlyList<Invoice>>` that returns a `List<Invoice>`
+doesn't compile, because a `Task<List<T>>` isn't a `Task<IReadOnlyList<T>>`. C# reports CS0411,
+"the type arguments cannot be inferred". Give the lambda its return type:
 
 ```csharp
 public static readonly Query<CustomerId, IReadOnlyList<Invoice>> Invoices = new(
@@ -118,8 +119,8 @@ public ValueTask<IReadOnlyList<Invoice>> GetInvoices(CustomerId customerId, Canc
 
 ## Key text
 
-Sources and queries turn each key into text. For a query that text is part of the entry key, so
-two different keys must never give the same text, or one key's caller is served the other's
+Sources and queries turn each key into text. For a query, that text is part of the cache key,
+so two different keys must never give the same text, or one key's caller gets the other's
 value.
 
 Without a `format`, the key type decides:
@@ -180,16 +181,16 @@ await cache.InvalidateAsync([
 ]);
 ```
 
-### Key text is wire format
+### Renaming changes the cache keys
 
-Tags and entry keys are built from names and key text. Renaming a source or query, or changing
-a `format`, changes them. During a rolling deploy, old and new nodes then don't evict each
-other's entries until those entries expire.
+Cache keys, and the tags Sluice evicts by, are built from names and key text. Renaming a source
+or query, or changing a `format`, changes them. During a rolling deploy, old and new servers
+then stop evicting each other's entries until those entries expire.
 
 ## When declarations are checked
 
 The constructors check names and key types, and throw `ArgumentException`. Declarations are
-`static readonly` fields, so that happens the first time the class is touched, wrapped in a
+`static readonly` fields, so that happens the first time the class is used, wrapped in a
 `TypeInitializationException`. One test per declaring class finds it first:
 
 ```csharp

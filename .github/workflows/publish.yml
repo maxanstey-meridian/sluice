@@ -1,0 +1,51 @@
+name: Publish to NuGet
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - run: dotnet restore Sluice.sln
+
+      # The EF tests start PostgreSQL through Testcontainers, on the runner's Docker.
+      - run: dotnet test Sluice.sln -c Release --no-restore
+
+      - name: Validate tag matches package version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          project_version="$(dotnet msbuild src/Sluice/Sluice.csproj -getProperty:Version -nologo)"
+
+          if [[ "$tag_version" != "$project_version" ]]; then
+            echo "Tag version '$tag_version' does not match Directory.Build.props Version '$project_version'." >&2
+            exit 1
+          fi
+
+      - name: Pack
+        run: |
+          dotnet pack src/Sluice/Sluice.csproj -c Release --no-build --no-restore -o ./nupkgs
+          dotnet pack src/Sluice.EntityFrameworkCore/Sluice.EntityFrameworkCore.csproj -c Release --no-build --no-restore -o ./nupkgs
+
+      - name: Restore the packed packages into a clean consumer
+        shell: bash
+        run: |
+          consumer="$(mktemp -d)"
+          dotnet new classlib -n Consumer -f net10.0 -o "$consumer"
+          dotnet new nugetconfig -o "$consumer"
+          dotnet nuget add source "$GITHUB_WORKSPACE/nupkgs" -n local --configfile "$consumer/nuget.config"
+          dotnet add "$consumer/Consumer.csproj" package Meridian.Sluice.EntityFrameworkCore --version "${GITHUB_REF_NAME#v}"
+          dotnet build "$consumer/Consumer.csproj" -c Release
+
+      - name: Push to NuGet
+        run: dotnet nuget push ./nupkgs/*.nupkg --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.NUGET_API_KEY }} --skip-duplicate

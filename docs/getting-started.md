@@ -1,8 +1,9 @@
 # Getting Started
 
 This page builds the [playground](https://github.com/maxanstey-meridian/sluice/tree/main/examples/playground)
-from nothing: a cached dashboard for two users, read partly through EF Core and partly from a
-service that isn't EF, with each write evicting only the dashboards that read what it changed.
+from nothing: a cached dashboard for two users, built partly from EF Core and partly from a
+service that isn't EF. Each write throws away (evicts) only the dashboards that read what it
+changed.
 
 ## Install
 
@@ -123,17 +124,17 @@ builder.Services.AddDbContext<AppDb>(
 );
 ```
 
-`AddSluice` registers `SluiceCache` over a FusionCache of its own. Pass FusionCache's builder
-to it for durations, a distributed cache or a backplane: see
-[Configuration](/guides/configuration).
+`AddSluice` registers `SluiceCache`, which you inject wherever you cache or invalidate. It
+creates a FusionCache of its own. To configure it (durations, Redis, several servers), pass a
+callback to `AddSluice`; see [Configuration](/guides/configuration).
 
-`UseSluice` does two things. It invalidates what each `SaveChanges` wrote once the write has
-committed, and it makes EF reads inside a compute [strict](/guides/strict-reads). It needs
-`AddSluice` and logging registered; ASP.NET Core and the Generic Host register logging for
-you.
+`UseSluice` does two things. Each time `SaveChanges` commits, it evicts what the save changed.
+And while a cached value is being built, it makes EF queries that skip Sluice's helpers throw
+([strict reads](/guides/strict-reads)). It needs `AddSluice` and logging registered; ASP.NET
+Core and the Generic Host register logging for you.
 
-Cached values are shared: every caller gets the same instance, entities from the EF helpers
-included. Don't change one in place, or turn on FusionCache's auto-clone; see
+Every caller gets the same cached object, EF entities included. Don't modify one, or turn on
+FusionCache's auto-clone to give each caller a copy; see
 [Shared instances](/guides/configuration#shared-instances-and-auto-clone).
 
 ## Declare
@@ -154,13 +155,14 @@ public static class Dashboards
 }
 ```
 
-- `Source<UserId>` is a family of dependencies keyed by a user id. `Greeting.For(aliceId)` is
-  the dependency on Alice's greeting; `Greeting.All` is the dependency on every greeting.
-- `Query<UserId, Dashboard>` is a cached value: a user id in, a `Dashboard` out. Its entries
-  live for five minutes unless something evicts them first.
-- `id => id.Value` turns a `UserId` into text, for tags and entry keys. A record needs one; a
-  `string` or `IFormattable` key (numbers, `Guid`, enums) doesn't.
-- EF entities need no declaration. Their dependencies come from the EF model.
+- `Source<UserId>` is something that can change, one per user. `Greeting.For(aliceId)` is
+  Alice's greeting, and `Greeting.All` is every user's greeting. Each of these is a
+  *dependency*: something a cached value can read, and a write can change.
+- `Query<UserId, Dashboard>` is something cached: a user id in, a `Dashboard` out. Its entries
+  live for five minutes unless a write evicts them first.
+- `id => id.Value` turns a `UserId` into text, which Sluice builds its cache keys from. A record
+  needs one; a `string` or `IFormattable` key (numbers, `Guid`, enums) doesn't.
+- EF entities need no declaration. Sluice works out their dependencies from the EF model.
 
 Both are declared once, as `static readonly` fields, and shared by every reader and writer.
 [Sources and Queries](/guides/sources-and-queries) covers key types, names and durations.
@@ -200,9 +202,9 @@ public ValueTask<Dashboard> GetDashboard(UserId userId, CancellationToken ct) =>
 `cache` is the `SluiceCache`, `db` the `AppDb`, and `greetings` the `GreetingApi`, all injected
 into the class that holds this method.
 
-The lambda is the compute: the function that builds the value on a miss. On a hit, the cached
-`Dashboard` comes back and the compute doesn't run. On a miss, the compute runs, and each
-`read.*` call records a dependency:
+The lambda is the *compute*: the function that builds the value when it isn't cached. If the
+dashboard is cached, it comes back and the compute doesn't run. If it isn't, the compute runs,
+and each `read.*` call records a dependency:
 
 | Read | Records |
 |---|---|
@@ -234,8 +236,7 @@ public async Task<bool> ToggleDarkMode(CancellationToken ct)
 
 Both dashboards read the flag, so both are evicted, and the next read of each recomputes.
 
-A write Sluice can't see, like the greeting service's, says what it changed once it has
-committed:
+Sluice can't see the greeting service's writes, so after one, tell it what changed:
 
 ```csharp
 public async Task SetGreeting(UserId userId, string text)
@@ -250,14 +251,14 @@ public async Task SetGreeting(UserId userId, string text)
 Only Alice's dashboard read Alice's greeting, so Bob's stays cached.
 
 The same goes for anything that writes without a `UseSluice` context: another service, a cron
-job, SQL run by hand, a trigger, `ExecuteUpdate` or raw SQL. It must invalidate by hand, or the
-old value stays cached until it expires, so keep durations short for data written outside your
-app. See [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see).
+job, SQL run by hand, a trigger, `ExecuteUpdate` or raw SQL. After one of those, invalidate by
+hand, or the old value stays cached until it expires. Keep durations short for data written
+outside your app. See [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see).
 
 ## Check the declarations in a test
 
-A declaration that breaks a rule (a blank name, a key type with no text form) throws when its
-class is first touched. One test per declaring class, here `Dashboards`, catches that before
+A broken declaration (a blank name, a key type Sluice can't turn into text) throws the first
+time its class is used. One test per declaring class, here `Dashboards`, finds that before
 production does; see
 [When declarations are checked](/guides/sources-and-queries#when-declarations-are-checked).
 
