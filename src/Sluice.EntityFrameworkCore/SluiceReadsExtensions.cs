@@ -10,32 +10,12 @@ namespace Sluice;
 /// EF Core reads that record their dependency from the EF model and return a no-tracking query to compose.
 /// </summary>
 /// <remarks>
-/// <para>
-/// The queries never track, so the cache never stores the context's live instances or its unsaved edits.
-/// Cache projections or detached entities.
-/// </para>
-/// <para>
-/// Reads are strict, so a compute can't read a row its dependencies don't cover. Inside a compute, every EF command
-/// must come from a read helper: a plain query, lazy or explicit loading, <c>FromSql</c>, a compiled query or a write
-/// throws <see cref="InvalidOperationException"/> when it runs, and so does a helper's query that runs inside a
-/// transaction. To run any other EF query, run it in the fetch of <c>read.From(dependency, fetch)</c> with a declared
-/// <see cref="Source{TKey}"/>: the fetch is a declared read, so its other queries, and those of tasks it starts, may
-/// run while the compute does, though not inside a transaction; a helper's query in it is still checked, and a write
-/// in it still throws. Reads that run no SQL aren't checked either: <c>Find</c> of an entity the context already
-/// tracks, <c>Local</c>, and navigations already loaded hand back what the context holds, edits included, so don't use
-/// them inside a compute.
-/// </para>
-/// <para>
-/// A helper's query may be filtered, ordered, paged and projected. One that reads anything beyond its own rows throws
-/// when EF compiles it, which happens when it runs, inside a compute or not: a join, a subquery or set operation over
-/// another set or a <c>SqlQuery</c>, a navigation (<c>Include</c>, <c>o.Customer.Name</c>, <c>c.Orders.Count</c>,
-/// many-to-many navigations, through a cast or an interface too), a database function you mapped, or a query filter
-/// that does any of those or reads the context's state (a tenant filter); <c>IgnoreQueryFilters()</c> leaves the
-/// filters out. So does one that calls <c>AsTracking()</c>, or that returns entities that load lazily or hold their
-/// context (or own a value that does). Owned types and JSON columns are part of their owner's row, so they're fine,
-/// and auto-included navigations aren't loaded. Read related rows with their own helper call. The call that ran the
-/// compute throws the violation, and caches nothing, even if the compute catches it.
-/// </para>
+/// The queries never track, so cache projections or detached entities. Inside a compute, reads are strict: an EF
+/// command that isn't a helper's query throws, unless it's a read in the fetch of <c>read.From(dependency, fetch)</c>,
+/// and so does a helper's query run inside a transaction. A helper's query that reads beyond its own rows throws
+/// when EF compiles it, inside a compute or not. A violation inside a compute also makes the call that ran it throw
+/// and cache nothing, even if the compute catches it. The rules in full:
+/// <see href="https://maxanstey-meridian.github.io/sluice/guides/strict-reads">Strict Reads</see>.
 /// </remarks>
 public static class SluiceReadsExtensions
 {
@@ -84,7 +64,7 @@ public static class SluiceReadsExtensions
     /// <param name="set">The set to read.</param>
     /// <param name="foreignKey">
     /// The FK property (<c>o =&gt; o.CustomerId</c>), a shadow FK named by a constant
-    /// (<c>o =&gt; EF.Property&lt;int&gt;(o, "CustomerId")</c>) or a reference navigation to the principal
+    /// (<c>o =&gt; EF.Property&lt;CustomerId&gt;(o, "CustomerId")</c>) or a reference navigation to the principal
     /// (<c>o =&gt; o.Customer</c>).
     /// </param>
     /// <param name="principalKey">The foreign key value, of the FK property's CLR type (not nullable).</param>

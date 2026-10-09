@@ -102,7 +102,6 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
         (await CachedRead.IsEvictedBy(Orders, db.Orders.AllDependencies())).Should().BeTrue();
         (await CachedRead.IsEvictedBy(Notes, db.Notes.AllDependencies())).Should().BeTrue();
         (await CachedRead.IsEvictedBy(Orders, db.Customers.Dependency(ada))).Should().BeFalse();
-        (await CachedRead.IsEvictedBy(Orders, db.Customers.AllDependencies())).Should().BeFalse();
         (await CachedRead.IsEvictedBy(Orders, db.Notes.AllDependencies())).Should().BeFalse();
     }
 }

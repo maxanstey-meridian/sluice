@@ -9,6 +9,16 @@
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
     </PropertyGroup>
 
+    <!-- One version for both packages: the EF package depends on the core at >= this version. -->
+    <PropertyGroup>
+        <Version>0.2.0</Version>
+        <Authors>Max Anstey</Authors>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageProjectUrl>https://maxanstey-meridian.github.io/sluice/</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/maxanstey-meridian/sluice</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+    </PropertyGroup>
+
     <!-- Test projects aren't documented API; IsTestProject isn't set yet when this file is read. -->
     <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Tests'))">
         <NoWarn>$(NoWarn);CS1591</NoWarn>

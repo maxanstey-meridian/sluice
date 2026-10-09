@@ -1,4 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <PackageId>Meridian.Sluice</PackageId>
+        <Description>Dependency-tracking invalidation for FusionCache. A cached value records what it read while it was computed, and a write evicts only the values that read what it changed.</Description>
+        <PackageTags>cache;caching;fusioncache;invalidation;dependency-tracking</PackageTags>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    </ItemGroup>
+
     <ItemGroup>
         <PackageReference Include="ZiggyCreatures.FusionCache" Version="2.9.0" />
         <PackageReference

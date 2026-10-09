@@ -1,99 +1,95 @@
 # Invariants
 
-Rules a reasonable-looking change could break. Each names the one place that enforces it and the test that fails if it stops. Test names are in `tests/Sluice.Tests`. The EF package's rules (`SLUICE-EF-`) are in `src/Sluice.EntityFrameworkCore/INVARIANTS.md`.
+Rules a reasonable-looking change could break. Each names the one place that enforces it and the tests that fail if it stops. Test names are in `tests/Sluice.Tests`. The EF package's rules (`SLUICE-EF-`) are in `src/Sluice.EntityFrameworkCore/INVARIANTS.md`. User-facing docs: `docs/`.
 
 ## SLUICE-CORE-001 The core references no EF or data-access library
 
-**Rule:** `Sluice` and everything it transitively references contain no `Microsoft.EntityFrameworkCore*`, `Microsoft.Data*`, `System.Data*`, `Npgsql*` or `Dapper` assembly or package. EF support lives only in `Sluice.EntityFrameworkCore`.
-**Why:** the core is source-agnostic: Dapper, HTTP and file users must not pull in EF.
+**Rule:** `Sluice` and everything it transitively references contain no `Microsoft.EntityFrameworkCore*`, `Microsoft.Data*`, `System.Data*`, `Npgsql*` or `Dapper` assembly or package.
+**Why:** the core is source-agnostic; Dapper, HTTP and file users must not pull in EF.
 **Owner:** `src/Sluice/Sluice.csproj` (its package references).
-**Proof:** `CoreReferenceTests.The_core_assembly_references_no_EF_or_data_access_library`, `The_core_package_graph_contains_no_EF_or_data_access_package` (the compiler drops unused references from assembly metadata, so only the package graph sees a referenced but unused package).
+**Proof:** `CoreReferenceTests.The_core_assembly_references_no_EF_or_data_access_library`, `The_core_package_graph_contains_no_EF_or_data_access_package` (the compiler drops unused references from metadata, so only the package graph sees an unused one).
 
 ## SLUICE-CORE-002 Invalidation removes entries; it never leaves them as fail-safe fallbacks
 
 **Rule:** the Sluice FusionCache runs with `DisableTagging = false` and `RemoveByTagBehavior.Remove`, both applied after the user's configuration, and `ClearAsync` calls `ClearAsync(allowFailSafe: false)`.
-**Why:** under FusionCache's default `Expire`, fail-safe and soft timeouts serve a value that was just invalidated whenever the compute fails or is slow. With tagging disabled, FusionCache throws on every invalidation.
-**Accepts:** an invalidated entry is gone even when the data source is down, so the caller gets the error instead of stale data.
-**Owner:** `SluiceServiceCollectionExtensions.AddSluice` (behaviour) and `SluiceCache.ClearAsync`.
-**Proof:** `FusionCacheConfigurationTests.With_fail_safe_on_a_failing_compute_after_invalidation_throws_instead_of_serving_the_invalidated_value` (its configuration sets `RemoveByTagBehavior.Expire`, so Sluice's override must win), `With_fail_safe_on_a_failing_compute_after_ClearAsync_throws_instead_of_serving_the_cleared_value`, `A_user_who_disables_tagging_still_gets_invalidation`.
+**Why:** under `Expire`, fail-safe and soft timeouts serve a just-invalidated value when the compute fails or is slow; with tagging disabled, every invalidation throws.
+**Accepts:** an invalidated entry is gone even when the data source is down, so the caller gets the error, not stale data.
+**Owner:** `SluiceServiceCollectionExtensions.AddSluice` and `SluiceCache.ClearAsync`.
+**Proof:** `FusionCacheConfigurationTests.With_fail_safe_on_a_failing_compute_after_invalidation_throws_instead_of_serving_the_invalidated_value` (its configuration sets `Expire`, so Sluice's override must win), `With_fail_safe_on_a_failing_compute_after_ClearAsync_throws_instead_of_serving_the_cleared_value`, `A_user_who_disables_tagging_still_gets_invalidation`.
 
 ## SLUICE-CORE-003 A compute finishes before its caller resumes, and its entry is stamped when it started
 
-**Rule:** every `GetOrSetAsync` call passes entry options with `FactorySoftTimeout` and `FactoryHardTimeout` infinite, `AllowTimedOutFactoryBackgroundCompletion = false` and `EagerRefreshThreshold = null`, whatever the user configured. It passes FusionCache no cancellation token: the caller's token goes to the compute, and fused reads hand it to their fetches. A token that is already cancelled throws before the cache is read, so that caller gets neither a hit nor a compute.
-**Why:** a timed-out factory keeps using the caller's scoped resources (a `DbContext`, a connection) after the caller moved on, and background completion and eager refresh stamp the entry when the compute *finishes*, which lets an invalidation that landed mid-compute be ignored. On a cancelled token FusionCache throws without awaiting its factory, so a token passed to it would let a cancelled caller resume while its compute still runs.
-**Accepts:** a slow data source makes the caller wait; FusionCache timeouts don't apply to Sluice computes. Cancelling doesn't interrupt a wait on another caller's compute (FusionCache's memory lock) or a slow L2 read; `LockTimeout` and the L2 timeouts bound those.
+**Rule:** every `GetOrSetAsync` passes entry options with infinite `FactorySoftTimeout` and `FactoryHardTimeout`, `AllowTimedOutFactoryBackgroundCompletion = false` and `EagerRefreshThreshold = null`, whatever the user configured, and passes FusionCache no cancellation token: the caller's token goes to the compute and its fused fetches. An already-cancelled token throws before the cache is read.
+**Why:** a timed-out factory keeps using the caller's scoped resources after the caller moved on; background completion and eager refresh stamp the entry at completion, so a mid-compute invalidation is ignored; and FusionCache throws on a cancelled token without awaiting its factory.
+**Accepts:** a slow data source makes the caller wait. Cancelling doesn't interrupt a wait on another caller's compute or a slow L2 read; `LockTimeout` and the L2 timeouts bound those.
 **Owner:** the `SluiceCache` constructor (`_entryOptions`) and `SluiceCache.GetOrSetAsync` (the token).
-**Proof:** `FusionCacheConfigurationTests.A_compute_outliving_the_factory_timeout_completes_before_the_caller_resumes` (hard and soft), `A_cancelled_caller_resumes_only_after_its_compute_ends`, `An_already_cancelled_caller_gets_neither_a_hit_nor_a_compute`; end to end through EF, the EF tests' `EntityReadTests.A_factory_timeout_does_not_let_the_caller_reuse_its_context_while_the_compute_s_query_runs` (hard and soft). Background completion can't happen while both timeouts are infinite, so `AllowTimedOutFactoryBackgroundCompletion = false` is a backstop with no test of its own. The eager-refresh pin has no behavioural test: it needs wall-clock time to pass.
+**Proof:** `FusionCacheConfigurationTests.A_compute_outliving_the_factory_timeout_completes_before_the_caller_resumes` (hard and soft), `A_cancelled_caller_resumes_only_after_its_compute_ends`, `An_already_cancelled_caller_gets_neither_a_hit_nor_a_compute`; through EF, `EntityReadTests.A_factory_timeout_does_not_let_the_caller_reuse_its_context_while_the_compute_s_query_runs`. The background-completion pin can't take effect while both timeouts are infinite, and the eager-refresh pin needs wall-clock time, so neither has a test of its own.
 
 ## SLUICE-CORE-004 An entry never outlives the tag data that can invalidate it
 
-**Rule:** at each level, the entry's physical lifetime, computed with FusionCache's own formula, is at most the same figure for `TagsDefaultEntryOptions`:
-- memory: `MemoryCacheDuration ?? Duration`, or `FailSafeMaxDuration` when fail-safe is on and that is longer, plus the entry's `JitterMaxDuration` (FusionCache jitters memory expiry only; jitter on tag data only lengthens it, so it isn't counted);
-- L2: `DistributedCacheDuration ?? Duration`, or `DistributedCacheFailSafeMaxDuration ?? FailSafeMaxDuration` when fail-safe is on and that is longer.
-
-The cache defaults are checked when `SluiceCache` is first resolved, and a `Query` with its own `Duration` is checked on every use.
-**Why:** if tag data expires first, the tag reads as "never invalidated": a fresh node serves an invalidated L2 entry, and in memory-only setups the same node serves an invalidated memory entry.
-**Accepts:** entry lifetimes count from when the entry is stored and tag data's from the invalidation, so equal lifetimes leave a gap of up to one compute's duration. This is moot under the defaults, where tag data lives far longer than entries and renews when read.
+**Rule:** at each level the entry's physical lifetime, by FusionCache's own formula, is at most the same figure for `TagsDefaultEntryOptions`: in memory `MemoryCacheDuration ?? Duration`, or `FailSafeMaxDuration` when fail-safe is on and longer, plus the entry's `JitterMaxDuration`; in L2 `DistributedCacheDuration ?? Duration`, or `DistributedCacheFailSafeMaxDuration ?? FailSafeMaxDuration` likewise. The cache defaults are checked when `SluiceCache` is first resolved, and a `Query` with its own `Duration` on every use.
+**Why:** once tag data expires the tag reads as never invalidated, so a fresh node serves an invalidated L2 entry, or a memory-only node its own invalidated entry.
+**Accepts:** entry lifetimes count from the store and tag data's from the invalidation, so equal lifetimes leave a gap of up to one compute; moot under the defaults.
 **Owner:** `EntryLifetime.EnsureWithin`, called from the `SluiceCache` constructor and `SluiceCache.OptionsFor`.
-**Proof:** `FusionCacheConfigurationTests.Resolving_SluiceCache_fails_when_an_entry_can_outlive_the_tag_data` (the default, distributed and memory durations, the fail-safe and distributed fail-safe lifetimes, and memory jitter), `A_query_whose_duration_outlives_the_tag_data_fails_on_first_use`.
+**Proof:** `FusionCacheConfigurationTests.Resolving_SluiceCache_fails_when_an_entry_can_outlive_the_tag_data` (default, distributed and memory durations, both fail-safe lifetimes, memory jitter), `A_query_whose_duration_outlives_the_tag_data_fails_on_first_use`.
 
 ## SLUICE-CORE-005 Sluice's keys, tags and clears are isolated from other FusionCaches
 
 **Rule:** the Sluice FusionCache is named `sluice` and uses `WithCacheKeyPrefixByCacheName()`, applied after the user's configuration.
-**Why:** a cache name alone doesn't prefix keys, so Sluice's tags and clear sentinel would hit any other FusionCache sharing the same L2.
+**Why:** a cache name alone doesn't prefix keys, so Sluice's tags and clear would hit any other FusionCache on the same L2.
 **Owner:** `SluiceServiceCollectionExtensions.AddSluice`.
-**Proof:** `FusionCacheConfigurationTests.Another_FusionCache_on_the_same_L2_is_unaffected_by_Sluice_tags_and_clear` (also when the user's configuration turns the key prefix off, so Sluice's must win).
+**Proof:** `FusionCacheConfigurationTests.Another_FusionCache_on_the_same_L2_is_unaffected_by_Sluice_tags_and_clear` (also when the user turns the prefix off).
 
 ## SLUICE-CORE-006 Every tag contains ':'
 
-**Rule:** the tags read and published for a dependency are `n:k`, `n:` and `n:*`; none is ever a bare source name.
-**Why:** FusionCache's clear sentinels (`*` and `!`, or `-rem` and `-exp` after `SetToSafeStrings()`) are ordinary tags. Publishing one clears every *other* node.
-**Accepts:** a key whose text is `""` gives the tag `n:`, the same as the whole-source tag every reader of the source carries, so invalidating key `""` evicts every reader of that source. That only over-invalidates.
+**Rule:** the tags read and published for a dependency are `n:k`, `n:` and `n:*`; none is a bare source name.
+**Why:** FusionCache's clear sentinels (`*`, `!`, or `-rem` and `-exp` after `SetToSafeStrings()`) are ordinary tags, and publishing one clears every other node.
+**Accepts:** key text `""` gives the tag `n:`, so invalidating it evicts every reader of the source; that only over-invalidates.
 **Owner:** `Dependency.ReadTags` and `Dependency.InvalidationTags`.
 **Proof:** `MultiNodeTests.A_source_named_like_a_clear_sentinel_clears_nothing_on_other_nodes`.
 
 ## SLUICE-CORE-007 A value is cached only with the dependencies its compute recorded
 
-**Rule:** a compute that records no dependency, or that calls `GetOrSetAsync` itself (from a fused fetch too), makes the call throw `InvalidOperationException` and stores nothing. The guard returns from the FusionCache factory with memory, L2 and backplane writes skipped, and rethrows after `GetOrSetAsync` returns. A nested call marks the outer compute, so swallowing the exception doesn't help. The EF package's strict-read checks mark the compute the same way, through `ActiveCompute.Violate`, a public member hidden from IntelliSense in the `Sluice.Infrastructure` namespace, so the compiler and the public API files hold that contract like any other.
-**Why:** a value with no dependencies is never invalidated, and a nested hit hides the inner value's dependencies from the outer entry. Throwing from the factory instead would let fail-safe serve a stale value and hide the bug.
-**Accepts:** work a compute starts under `ExecutionContext.SuppressFlow` doesn't see the compute, so every guard is off there: a `GetOrSetAsync` it calls isn't nested, and the EF package's checks don't run.
+**Rule:** a compute that records no dependency, or calls `GetOrSetAsync` itself (a fused fetch included), makes the call throw `InvalidOperationException` and stores nothing. The guard returns from the factory with memory, L2 and backplane writes skipped and rethrows after `GetOrSetAsync` returns; swallowing it in the compute doesn't help. The EF package marks the compute the same way through the hidden public `Sluice.Infrastructure.ActiveCompute.Violate`, held by the public API files like any other member.
+**Why:** a value with no dependencies is never invalidated, and a nested hit hides the inner value's dependencies. Throwing from the factory would let fail-safe serve a stale value and hide the bug.
+**Accepts:** work started under `ExecutionContext.SuppressFlow` doesn't see the compute, so every guard is off there.
 **Owner:** `SluiceCache.GetOrSetAsync` and `SluiceCache.ComputeAsync`.
-**Proof:** `ComputeGuardTests.A_compute_that_records_no_reads_throws_and_caches_nothing`, `A_compute_that_records_no_reads_stores_nothing_another_node_can_read` (L2), `A_compute_that_records_no_reads_evicts_nothing_on_another_node` (backplane), `Calling_GetOrSetAsync_inside_a_compute_throws`, `Calling_GetOrSetAsync_inside_a_fused_fetch_throws`, `The_zero_reads_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`, `The_nesting_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`; for a strict-read violation the compute catches, the EF tests' `StrictReadTests.A_compute_that_catches_a_strict_read_violation_caches_nothing_and_its_caller_still_gets_it` (in a fused fetch too).
+**Proof:** `ComputeGuardTests.A_compute_that_records_no_reads_throws_and_caches_nothing`, `A_compute_that_records_no_reads_stores_nothing_another_node_can_read`, `A_compute_that_records_no_reads_evicts_nothing_on_another_node`, `Calling_GetOrSetAsync_inside_a_compute_throws`, `Calling_GetOrSetAsync_inside_a_fused_fetch_throws`, `The_zero_reads_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`, `The_nesting_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`; for a caught strict-read violation, the EF tests' `StrictReadTests.A_compute_that_catches_a_strict_read_violation_caches_nothing_and_its_caller_still_gets_it`.
 
 ## SLUICE-CORE-008 No recorded read is lost
 
 **Rule:** every `SluiceReads.From` overload records every dependency passed from any task while the compute runs, and throws once the compute has returned (a fused one before its fetch runs).
-**Why:** a read that silently isn't recorded leaves an entry that its data's writes can't evict.
+**Why:** a read that isn't recorded leaves an entry its data's writes can't evict.
 **Owner:** `SluiceReads.From`.
 **Proof:** `DependencyTrackingTests.Reads_from_concurrent_tasks_inside_one_compute_are_all_recorded`, `Recording_a_read_after_the_compute_returned_throws`.
 
 ## SLUICE-CORE-009 Different query keys never share an entry
 
-**Rule:** the default key rule (the single-argument constructors) is `string` as is and `IFormattable` through `ToString(null, CultureInfo.InvariantCulture)`. Every other key type, every interface or abstract key type, and `DateTime`, `DateTimeOffset` and `TimeOnly`, is rejected at declaration with a message naming `format`. A `format` is used as given, and one that returns null throws. Query names can't contain `:` or start with `__fc`.
-**Why:** a collision serves one key's value to another key's caller. Culture-dependent text would split or merge entries across nodes, and the three date types' invariant text drops sub-second (`TimeOnly`: sub-minute) precision. With an interface or abstract key type the runtime type decides the text, so `int 1` and `long 1` would share an entry and a `DateTime` would skip the date check. FusionCache keeps tag data in the entries' key space under `__fc:t:<tag>` (`__fc-t-<tag>` after `SetToSafeStrings()`), and treats any key under that prefix as tag data: a query named `__fc` with a key starting `t:` would never be invalidated, and key `t:*` would overwrite the clear sentinel's data.
-**Accepts:** a user `IFormattable` type and every `format` are the user's contract ("different keys, different text"). Equal values that print differently (`1.5m`, `1.50m`) only split the cache. Key text is wire format: changing a `format` changes every entry key and tag. A `TagCacheKeyPrefix` that doesn't start with `__fc` (set directly, or through `SetToSafeStrings()` with a special character other than `_`) isn't caught.
+**Rule:** without a `format`, `string` keys are used as they are and `IFormattable` keys through `ToString(null, CultureInfo.InvariantCulture)`; any other key type, an interface or abstract key type, and `DateTime`, `DateTimeOffset` and `TimeOnly` are rejected at declaration with a message naming `format`. A `format` is used as given; one that returns null throws. Query names can't contain `:` or start with `__fc`.
+**Why:** a collision serves one key's value to another key's caller. Culture-dependent text splits or merges entries across nodes; the three date types' invariant text drops precision; with an interface key type the runtime type picks the text (`int 1` and `long 1` collide); and FusionCache treats any key under `__fc:t:` as tag data.
+**Accepts:** a user `IFormattable` type and every `format` are the user's contract. Equal values that print differently (`1.5m`, `1.50m`) only split the cache. Key text is wire format: changing a `format` changes every entry key and tag. A `TagCacheKeyPrefix` that doesn't start with `__fc` (set directly, or through `SetToSafeStrings()` with a special character other than `_`) isn't caught.
 **Owner:** `KeyText.Default` and `KeyText.Of`, plus the name checks in the `Query` constructor.
 **Proof:** `KeyTextTests.*`, `DeclarationTests.Without_a_format_a_key_type_that_is_neither_string_nor_IFormattable_is_rejected`, `Without_a_format_interface_and_abstract_key_types_are_rejected`, `Without_a_format_DateTime_DateTimeOffset_and_TimeOnly_keys_are_rejected`, `A_format_that_returns_null_throws`, `Query_names_containing_a_colon_are_rejected`, `Query_names_starting_with_FusionCache_s_internal_prefix_are_rejected`.
 
 ## SLUICE-CORE-010 A query name is declared with one set of types
 
-**Rule:** declaring a `Query` name with a second key or value type throws `ArgumentException`. A same-typed repeat is allowed. `Source` names aren't checked.
-**Why:** two `Query`s with one name but different value types share entries, so on a multi-node setup one reads the other's value from L2 as the wrong shape without an error; with different key types, `42` and `"42"` share an entry. A `Source` name clash only over-invalidates.
+**Rule:** declaring a `Query` name with a second key or value type throws `ArgumentException`; a same-typed repeat is allowed. `Source` names aren't checked.
+**Why:** two same-named queries share entries, so on a multi-node setup one reads the other's value from L2 as the wrong shape without an error, or `42` and `"42"` share an entry. A `Source` clash only over-invalidates.
 **Accepts:** copies in other processes, and same-typed copies with a different `format`, aren't caught.
 **Owner:** `QueryNames.Claim`, called from the `Query` constructor.
 **Proof:** `DeclarationTests.Redeclaring_a_query_name_with_a_different_key_or_value_type_throws`, `A_redeclaration_names_types_by_namespace_so_same_named_types_are_told_apart`.
 
 ## SLUICE-CORE-011 A fused read records its dependencies before its fetch runs
 
-**Rule:** `read.From(dependency, fetch)` and `read.From(dependencies, fetch)` record first, then run the fetch with the compute's token. A fetch that throws leaves the dependencies recorded and propagates unchanged. An empty list throws `ArgumentException` before the fetch runs; `read.From(dependencies)` alone, which only records, accepts one and records nothing.
-**Why:** a compute that catches the fetch's failure and returns a fallback caches that fallback; recording only on success would leave it with no dependency to evict it but the TTL. A fused fetch is a declared read (SLUICE-CORE-013), so one that declares nothing would read with the EF package's origin check off and nothing recorded.
+**Rule:** `read.From(dependency, fetch)` and `read.From(dependencies, fetch)` record first, then run the fetch with the compute's token. A fetch that throws leaves the dependencies recorded and propagates unchanged. An empty list throws `ArgumentException` before the fetch runs; the record-only `read.From(dependencies)` accepts one and records nothing.
+**Why:** a compute that catches the failure and returns a fallback caches it, and recording only on success would leave the fallback evictable by nothing but the TTL. A fetch that declares nothing would read with the EF origin check off (SLUICE-CORE-013).
 **Owner:** `SluiceReads.From<T>(IEnumerable<Dependency>, Func<CancellationToken, Task<T>>)`.
 **Proof:** `DependencyTrackingTests.A_fallback_for_a_failed_fused_fetch_is_evicted_by_its_dependency`, `A_failed_fused_fetch_that_escapes_reaches_the_caller_unchanged_and_caches_nothing`, `A_fused_read_returns_the_fetch_result_with_the_compute_token_and_records_the_dependency`, `A_fused_read_of_no_dependencies_throws_before_the_fetch_runs`, `A_record_only_read_of_no_dependencies_counts_as_no_read`.
 
 ## SLUICE-CORE-013 A fused fetch is reported as a declared read, to checks of the running compute only
 
-**Rule:** in the flow of a fused `read.From(dependency, fetch)` or `read.From(dependencies, fetch)` fetch, and the tasks that flow starts, `ActiveCompute.Violate` tells the check it's given that the flow is inside a fetch of the running compute. The rest of the compute, a fetch running beside it, and a compute started from its flow are outside it. `read.From(dependencies)` alone, which only records, is no fetch. What each check does inside a fetch is its own rule: SLUICE-CORE-007 (nesting), SLUICE-EF-002 (transactions), SLUICE-EF-015 (origin) and SLUICE-EF-016 (shape).
-**Why:** the dependencies the compute recorded for the fetch cover whatever it reads, by declaration. It's the route for data the strict reads can't follow: a view or keyless type, raw SQL, a compiled query.
-**Accepts:** a plain EF query in a fetch of rows its dependencies don't cover goes through; caching a wrong declaration is the app's bug. A fetch's plain query may track and return the context's live entities: the fetch's declaration is the caller's responsibility. A task the fetch starts and doesn't await is still inside the fetch after the fetch returns, until the compute ends; what it reads is the fetch's declaration too. Work started under `ExecutionContext.SuppressFlow` sees no fetch and no compute (SLUICE-CORE-007).
+**Rule:** in the flow of a fused fetch, and tasks it starts, `ActiveCompute.Violate` tells its check that the flow is inside a fetch of the running compute. The rest of the compute, a fetch running beside it, and a compute started from its flow are outside it; a record-only `read.From` is no fetch. What each check does there is its own rule: SLUICE-CORE-007, SLUICE-EF-002, SLUICE-EF-015 and SLUICE-EF-016.
+**Why:** the fetch's recorded dependencies cover what it reads, by declaration; it's the route for views, keyless types, raw SQL and compiled queries.
+**Accepts:** a fetch's plain query may read rows its declaration doesn't cover, or track; that's the app's declaration. A task the fetch leaves running stays inside it until the compute ends.
 **Owner:** `ActiveCompute` (`Fetch` and `Violate`).
-**Proof:** `ComputeGuardTests.Calling_GetOrSetAsync_inside_a_fused_fetch_throws`; the EF tests' `StrictReadTests.A_query_run_in_a_fused_fetch_is_cached_and_evicted_by_its_declared_dependency`, `A_plain_query_after_a_read_From_that_only_records_still_throws`, `While_fused_fetches_run_side_by_side_each_runs_plain_queries_and_the_compute_s_own_flow_does_not`, `A_compute_started_from_a_fused_fetch_that_outlived_its_own_compute_is_checked`, `A_compute_that_catches_a_strict_read_violation_caches_nothing_and_its_caller_still_gets_it` (the fused-fetch cases).
+**Proof:** `ComputeGuardTests.Calling_GetOrSetAsync_inside_a_fused_fetch_throws`; the EF tests' `StrictReadTests.A_query_run_in_a_fused_fetch_is_cached_and_evicted_by_its_declared_dependency`, `A_plain_query_after_a_read_From_that_only_records_still_throws`, `While_fused_fetches_run_side_by_side_each_runs_plain_queries_and_the_compute_s_own_flow_does_not`, `A_compute_started_from_a_fused_fetch_that_outlived_its_own_compute_is_checked`, `A_compute_that_catches_a_strict_read_violation_caches_nothing_and_its_caller_still_gets_it`.

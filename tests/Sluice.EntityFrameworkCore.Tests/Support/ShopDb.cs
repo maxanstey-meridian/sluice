@@ -19,19 +19,25 @@ public interface IHasCustomer
     public Customer? Customer { get; }
 }
 
+/// <summary>Deleted with its customer, and has a nullable FK to a coupon, set to null when the coupon is deleted.</summary>
 public sealed class Order : IHasCustomer
 {
     public int Id { get; set; }
     public int CustomerId { get; set; }
     public Customer? Customer { get; set; }
     public string Item { get; set; } = "";
+    public int? CouponId { get; set; }
 }
 
-/// <summary>Points at its customer through a shadow FK, <c>CustomerId</c>.</summary>
+/// <summary>
+/// Points at its customer through a shadow FK, <c>CustomerId</c>, and may reply to another note, which deletes it
+/// with that note.
+/// </summary>
 public sealed class Note
 {
     public int Id { get; set; }
     public string Text { get; set; } = "";
+    public int? ReplyToId { get; set; }
 }
 
 /// <summary>An order line has a composite key and a nullable FK to a coupon, set to null when the coupon is deleted.</summary>
@@ -101,8 +107,11 @@ public sealed class Dog : Animal
     public Customer? Owner { get; set; }
 }
 
-/// <summary>Mapped table-per-type: a truck's own columns live in a table of their own.</summary>
-public abstract class Vehicle
+/// <summary>
+/// Mapped table-per-type: a truck's own columns live in a table of their own. Not abstract, so a truck's row can be
+/// deleted through a plain vehicle.
+/// </summary>
+public class Vehicle
 {
     public int Id { get; set; }
     public string Plate { get; set; } = "";
@@ -111,6 +120,13 @@ public abstract class Vehicle
 public sealed class Truck : Vehicle
 {
     public int Axles { get; set; }
+}
+
+/// <summary>Points at trucks only, and the database deletes it with its truck.</summary>
+public sealed class Trailer
+{
+    public int Id { get; set; }
+    public int TruckId { get; set; }
 }
 
 /// <summary>Mapped table-per-concrete-type: the abstract shape has no table; each concrete shape has its own.</summary>
@@ -345,6 +361,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Animal> Animals => Set<Animal>();
     public DbSet<Dog> Dogs => Set<Dog>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
+    public DbSet<Trailer> Trailers => Set<Trailer>();
     public DbSet<Parcel> Parcels => Set<Parcel>();
     public DbSet<Warehouse> Warehouses => Set<Warehouse>();
     public DbSet<Bin> Bins => Set<Bin>();
@@ -425,6 +442,18 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.HasPostgresExtension("citext");
 
         model.Entity<Note>().HasOne<Customer>().WithMany().HasForeignKey("CustomerId");
+        model
+            .Entity<Note>()
+            .HasOne<Note>()
+            .WithMany()
+            .HasForeignKey(note => note.ReplyToId)
+            .OnDelete(DeleteBehavior.Cascade);
+        model
+            .Entity<Order>()
+            .HasOne<Coupon>()
+            .WithMany()
+            .HasForeignKey(order => order.CouponId)
+            .OnDelete(DeleteBehavior.SetNull);
         model.Entity<OrderLine>().HasKey(line => new { line.OrderId, line.LineNumber });
         model.Entity<OrderLine>().HasOne<Order>().WithMany().HasForeignKey(line => line.OrderId);
         model
@@ -457,6 +486,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
 
         model.Entity<Vehicle>().UseTptMappingStrategy();
         model.Entity<Truck>();
+        model.Entity<Trailer>().HasOne<Truck>().WithMany().HasForeignKey(t => t.TruckId);
         model.Entity<Shape>().UseTpcMappingStrategy();
         model.Entity<Parcel>().HasOne<Customer>().WithMany().HasForeignKey(p => p.CustomerId);
         model.Entity<Parcel>().OwnsOne(p => p.Address, address => address.OwnsOne(a => a.Contact));

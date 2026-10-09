@@ -56,7 +56,7 @@ public sealed class CoreReferenceTests
             StringComparer.OrdinalIgnoreCase
         );
         var closure = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var pending = new Queue<string>(["Sluice"]);
+        var pending = new Queue<string>(["Meridian.Sluice"]);
         while (pending.TryDequeue(out var name))
         {
             if (!closure.Add(name) || !libraries.TryGetValue(name, out var library))

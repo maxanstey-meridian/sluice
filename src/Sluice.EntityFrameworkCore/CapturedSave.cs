@@ -73,7 +73,9 @@ internal sealed class CapturedSave
 
     /// <summary>
     /// Everything the save may have changed: each row's key, and its foreign keys before and after. A deleted row
-    /// also invalidates every foreign key that points at it, so database cascades evict <c>Children</c> readers.
+    /// also invalidates every foreign key that points at it, and the whole of every type the model lets the
+    /// database delete or set to null with it (<see cref="ModelSources.Cascades"/>), since EF may not have loaded
+    /// those rows.
     /// </summary>
     internal List<Dependency> Dependencies()
     {
@@ -113,6 +115,16 @@ internal sealed class CapturedSave
                         dependencies.Add(ModelSources.ForeignKey(foreignKey).For(principal));
                     }
                 }
+
+                // A row deleted through its base type may be a derived one, whose own foreign keys it can't key.
+                dependencies.AddRange(
+                    entityType
+                        .GetDerivedTypes()
+                        .SelectMany(derived => derived.GetDeclaredReferencingForeignKeys())
+                        .Select(foreignKey => ModelSources.ForeignKey(foreignKey).All)
+                );
+
+                dependencies.AddRange(ModelSources.Cascades(entityType));
             }
         }
 

@@ -13,6 +13,7 @@ namespace Sluice.EntityFrameworkCore;
 internal static class ModelSources
 {
     private const string SourceAnnotation = "Sluice:Source";
+    private const string CascadeAnnotation = "Sluice:Cascades";
 
     /// <summary>The source of <paramref name="entityType"/>'s rows, keyed by primary key.</summary>
     /// <exception cref="NotSupportedException">The type isn't mapped to a table.</exception>
@@ -46,6 +47,39 @@ internal static class ModelSources
                     foreignKey.Properties
                 ),
             foreignKey
+        );
+
+    /// <summary>
+    /// The foreign keys pointing at <paramref name="entityType"/>, its base types or its derived types whose
+    /// delete behaviour lets the database act on their rows when a principal is deleted: <c>Cascade</c> deletes them,
+    /// <c>SetNull</c> sets their key to null. Ownerships are left out: an owned row goes with its owner's key. So are
+    /// the keys table-per-type mapping links a derived type's table to its base type's with: that's the same row.
+    /// </summary>
+    internal static IEnumerable<IForeignKey> CascadingForeignKeys(IEntityType entityType) =>
+        entityType
+            .GetReferencingForeignKeys()
+            .Concat(
+                entityType
+                    .GetDerivedTypes()
+                    .SelectMany(derived => derived.GetDeclaredReferencingForeignKeys())
+            )
+            .Where(foreignKey =>
+                !foreignKey.IsOwnership
+                && !foreignKey.IsBaseLinking()
+                && foreignKey.DeleteBehavior is DeleteBehavior.Cascade or DeleteBehavior.SetNull
+            );
+
+    /// <summary>
+    /// What the database changes when rows of <paramref name="entityType"/> are deleted, as the model's delete
+    /// behaviours say, beyond the <see cref="CascadingForeignKeys"/> pointing at those rows: the whole type of every
+    /// row it deletes or sets to null, transitively through cascades; every other foreign key of a row it deletes;
+    /// and every cascading foreign key past the first, whose principals' keys nobody knows. Built once per type.
+    /// </summary>
+    internal static Dependency[] Cascades(IEntityType entityType) =>
+        entityType.GetOrAddRuntimeAnnotationValue(
+            CascadeAnnotation,
+            static entityType => BuildCascades(entityType!),
+            entityType
         );
 
     /// <summary>
@@ -104,7 +138,7 @@ internal static class ModelSources
                 ? constant
                 : throw new ArgumentException(
                     $"'{selector}' names its property with '{property}'. The property name passed to EF.Property "
-                        + "must be a constant string (o => EF.Property<int>(o, \"CustomerId\")), so the foreign key "
+                        + "must be a constant string (o => EF.Property<CustomerId>(o, \"CustomerId\")), so the foreign key "
                         + "can be found from the expression without running it.",
                     parameterName
                 ),
@@ -125,7 +159,7 @@ internal static class ModelSources
             ? foreignKey
             : throw new ArgumentException(
                 $"'{selector}' doesn't name a single-column foreign key of {entityType.DisplayName()}. Pass the FK "
-                    + "property (o => o.CustomerId), a shadow FK (o => EF.Property<int>(o, \"CustomerId\")) or a "
+                    + "property (o => o.CustomerId), a shadow FK (o => EF.Property<CustomerId>(o, \"CustomerId\")) or a "
                     + "reference navigation to the principal (o => o.Customer).",
                 parameterName
             );
@@ -180,6 +214,53 @@ internal static class ModelSources
                     : null
             )
             .FirstOrDefault(reason => reason is not null);
+
+    // A walk of the model from the deleted type, through each cascade once, so a self-reference or a loop ends. A row
+    // the database deletes leaves every parent it had and takes its own dependents with it; one it sets to null keeps
+    // them. A dependent that's owned is stored in its owner's rows, and a keyless one has no reader.
+    private static Dependency[] BuildCascades(IEntityType deleted)
+    {
+        var dependencies = new List<Dependency>();
+        var reached = new HashSet<IEntityType>();
+        var pending = new Queue<(IEntityType Type, bool First)>([(deleted, true)]);
+        while (pending.TryDequeue(out var principal))
+        {
+            foreach (var foreignKey in CascadingForeignKeys(principal.Type))
+            {
+                var dependent = Unowned(foreignKey.DeclaringEntityType);
+                if (dependent.FindPrimaryKey() is null)
+                {
+                    continue;
+                }
+
+                dependencies.Add(WrittenEntity(dependent).All);
+                if (!principal.First)
+                {
+                    dependencies.Add(ForeignKey(foreignKey).All);
+                }
+
+                // A deleted or nulled row changes in every list it's in, whichever parent the list is under.
+                dependencies.AddRange(
+                    dependent
+                        .GetForeignKeys()
+                        .Concat(dependent.GetDerivedForeignKeys())
+                        .Where(other => other != foreignKey)
+                        .Select(other => ForeignKey(other).All)
+                );
+                if (foreignKey.DeleteBehavior is DeleteBehavior.Cascade && reached.Add(dependent))
+                {
+                    pending.Enqueue((dependent, false));
+                }
+            }
+        }
+
+        return [.. dependencies];
+    }
+
+    private static IEntityType Unowned(IEntityType entityType) =>
+        entityType.FindOwnership() is { } ownership
+            ? Unowned(ownership.PrincipalEntityType)
+            : entityType;
 
     // A composite key, which only writes produce, arrives as an array of its values in key order.
     private static Source<object> Build(string name, IReadOnlyList<IProperty> properties) =>

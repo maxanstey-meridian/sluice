@@ -97,8 +97,10 @@ public sealed class SluiceCache
     /// <summary>Evicts every cached value that read <paramref name="dependency"/>. Call it after your write commits.</summary>
     /// <param name="dependency">What was written.</param>
     /// <remarks>
-    /// Takes no cancellation token: a request aborted after its write committed must still invalidate. Bound a slow
-    /// distributed cache with FusionCache's <c>DistributedCacheHardTimeout</c> or circuit breaker instead.
+    /// Takes no cancellation token: a request aborted after its write committed must still invalidate. A distributed
+    /// cache write that fails doesn't make this throw: FusionCache writes the tag again once the cache is back
+    /// (auto-recovery). A slow one makes this wait, since FusionCache puts no timeout on writes, so bound it with the
+    /// Redis client's own timeout and FusionCache's circuit breakers.
     /// </remarks>
     public ValueTask InvalidateAsync(Dependency dependency)
     {
@@ -109,8 +111,10 @@ public sealed class SluiceCache
     /// <summary>Evicts every cached value that read any of <paramref name="dependencies"/>. Call it after your write commits.</summary>
     /// <param name="dependencies">What was written.</param>
     /// <remarks>
-    /// Takes no cancellation token: a request aborted after its write committed must still invalidate. Bound a slow
-    /// distributed cache with FusionCache's <c>DistributedCacheHardTimeout</c> or circuit breaker instead.
+    /// Takes no cancellation token: a request aborted after its write committed must still invalidate. A distributed
+    /// cache write that fails doesn't make this throw: FusionCache writes the tag again once the cache is back
+    /// (auto-recovery). A slow one makes this wait, since FusionCache puts no timeout on writes, so bound it with the
+    /// Redis client's own timeout and FusionCache's circuit breakers.
     /// </remarks>
     public async ValueTask InvalidateAsync(IEnumerable<Dependency> dependencies)
     {

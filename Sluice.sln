@@ -15,6 +15,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sluice.Tests", "tests\Sluic
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sluice.EntityFrameworkCore.Tests", "tests\Sluice.EntityFrameworkCore.Tests\Sluice.EntityFrameworkCore.Tests.csproj", "{37A424CF-691E-41FA-80E2-98520A3A4908}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "examples", "examples", "{B36A84DF-456D-A817-6EDD-3EC3E7F6E11F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Playground", "examples\playground\Playground.csproj", "{67603059-8EEA-4345-92DD-074229CA1268}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -73,6 +77,18 @@ Global
 		{37A424CF-691E-41FA-80E2-98520A3A4908}.Release|x64.Build.0 = Release|Any CPU
 		{37A424CF-691E-41FA-80E2-98520A3A4908}.Release|x86.ActiveCfg = Release|Any CPU
 		{37A424CF-691E-41FA-80E2-98520A3A4908}.Release|x86.Build.0 = Release|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Debug|x64.Build.0 = Debug|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Debug|x86.Build.0 = Debug|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Release|Any CPU.Build.0 = Release|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Release|x64.ActiveCfg = Release|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Release|x64.Build.0 = Release|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Release|x86.ActiveCfg = Release|Any CPU
+		{67603059-8EEA-4345-92DD-074229CA1268}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -82,5 +98,6 @@ Global
 		{D1A6E94C-BB6E-4236-9DF1-D283BAEF1133} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{0BA41140-62EF-4C72-B373-87B808F1C2D4} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{37A424CF-691E-41FA-80E2-98520A3A4908} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{67603059-8EEA-4345-92DD-074229CA1268} = {B36A84DF-456D-A817-6EDD-3EC3E7F6E11F}
 	EndGlobalSection
 EndGlobal

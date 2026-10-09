@@ -37,7 +37,9 @@ public static class DbSetDependencyExtensions
     /// <summary>
     /// Every dependency on <typeparamref name="T"/>: the whole set, and every foreign key it (or a derived type)
     /// declares, so <see cref="SluiceReadsExtensions.Entity"/>, <see cref="SluiceReadsExtensions.All"/> and
-    /// <see cref="SluiceReadsExtensions.Children"/> readers of <typeparamref name="T"/> are all evicted.
+    /// <see cref="SluiceReadsExtensions.Children"/> readers of <typeparamref name="T"/> are all evicted. Also the
+    /// same for every type the model lets the database delete or set to null when <typeparamref name="T"/> rows are
+    /// deleted (<c>Cascade</c> or <c>SetNull</c>, transitively), so it covers an <c>ExecuteDelete</c>.
     /// </summary>
     /// <param name="set">The set that changed.</param>
     /// <exception cref="NotSupportedException"><typeparamref name="T"/> isn't mapped to a table.</exception>
@@ -53,7 +55,9 @@ public static class DbSetDependencyExtensions
             .. entityType
                 .GetForeignKeys()
                 .Concat(entityType.GetDerivedForeignKeys())
+                .Concat(ModelSources.CascadingForeignKeys(entityType))
                 .Select(foreignKey => ModelSources.ForeignKey(foreignKey).All),
+            .. ModelSources.Cascades(entityType),
         ];
     }
 }

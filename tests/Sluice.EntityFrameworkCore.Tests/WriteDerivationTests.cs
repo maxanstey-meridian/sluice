@@ -37,9 +37,14 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         return customer;
     }
 
-    private async Task<Order> AddOrder(Customer customer, string item)
+    private async Task<Order> AddOrder(Customer customer, string item, int? couponId = null)
     {
-        var order = new Order { CustomerId = customer.Id, Item = item };
+        var order = new Order
+        {
+            CustomerId = customer.Id,
+            Item = item,
+            CouponId = couponId,
+        };
         _db.Orders.Add(order);
         await _db.SaveChangesAsync();
         return order;
@@ -608,6 +613,270 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         await _db.SaveChangesAsync();
         (await adaOrders.WasEvicted()).Should().BeTrue("the database deleted Ada's orders");
         (await _reader.Orders.AnyAsync(o => o.Id == tea.Id)).Should().BeFalse();
+    }
+
+    private async Task<Coupon> AddCoupon()
+    {
+        var coupon = new Coupon();
+        _db.Coupons.Add(coupon);
+        await _db.SaveChangesAsync();
+        return coupon;
+    }
+
+    private async Task<Note> AddNote(Customer customer, Note? replyTo = null)
+    {
+        var note = new Note { ReplyToId = replyTo?.Id };
+        _db.Notes.Add(note);
+        _db.Entry(note).Property("CustomerId").CurrentValue = customer.Id;
+        await _db.SaveChangesAsync();
+        return note;
+    }
+
+    private Task<CachedRead> Read<T>(Func<SluiceReads, CancellationToken, Task<T>> read) =>
+        CachedRead.Of(_node.Cache, read);
+
+    [Fact]
+    public async Task Deleting_a_principal_evicts_every_reader_of_the_rows_the_database_cascades_into_at_any_depth()
+    {
+        var ada = await AddCustomer("Ada");
+        var coupon = await AddCoupon();
+        var tea = await AddOrder(ada, "Tea", coupon.Id);
+        _db.OrderLines.Add(new OrderLine { OrderId = tea.Id, LineNumber = 1 });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        (string Reader, CachedRead Read)[] readers =
+        [
+            (
+                "the order",
+                await Read(
+                    (read, ct) => read.Entity(_reader.Orders, tea.Id).SingleOrDefaultAsync(ct)
+                )
+            ),
+            ("every order", await Read((read, ct) => read.All(_reader.Orders).ToListAsync(ct))),
+            (
+                "the coupon's orders",
+                await Read(
+                    (read, ct) =>
+                        read.Children(_reader.Orders, o => o.CouponId, coupon.Id).ToListAsync(ct)
+                )
+            ),
+            (
+                "every order line",
+                await Read((read, ct) => read.All(_reader.OrderLines).ToListAsync(ct))
+            ),
+            (
+                "the order's lines",
+                await Read(
+                    (read, ct) =>
+                        read.Children(_reader.OrderLines, l => l.OrderId, tea.Id).ToListAsync(ct)
+                )
+            ),
+        ];
+
+        // Only the customer is tracked, so the database deletes the order, and the order's line in turn.
+        _db.Customers.Remove(await _db.Customers.SingleAsync(c => c.Id == ada.Id));
+        await _db.SaveChangesAsync();
+
+        (await _reader.OrderLines.AnyAsync(l => l.OrderId == tea.Id)).Should().BeFalse();
+        foreach (var (reader, read) in readers)
+        {
+            (await read.WasEvicted()).Should().BeTrue("the database deleted rows {0} read", reader);
+        }
+    }
+
+    [Fact]
+    public async Task Deleting_a_principal_evicts_every_reader_of_the_rows_the_database_sets_to_null()
+    {
+        var ada = await AddCustomer("Ada");
+        var coupon = await AddCoupon();
+        var tea = await AddOrder(ada, "Tea", coupon.Id);
+        _db.ChangeTracker.Clear();
+        var teaRead = await Read((read, ct) => read.Entity(_reader.Orders, tea.Id).SingleAsync(ct));
+        var orders = await Read((read, ct) => read.All(_reader.Orders).ToListAsync(ct));
+        var adasOrders = await ReadOrdersOf(ada.Id);
+        var adaRead = await ReadCustomer(ada.Id);
+
+        _db.Coupons.Remove(await _db.Coupons.SingleAsync(c => c.Id == coupon.Id));
+        await _db.SaveChangesAsync();
+
+        (await _reader.Orders.SingleAsync(o => o.Id == tea.Id)).CouponId.Should().BeNull();
+        (await teaRead.WasEvicted()).Should().BeTrue("the database set the order's coupon to null");
+        (await orders.WasEvicted()).Should().BeTrue("the database set the order's coupon to null");
+        (await adasOrders.WasEvicted())
+            .Should()
+            .BeTrue("the order changed in its customer's list too");
+        (await adaRead.WasEvicted()).Should().BeFalse("no customer changed");
+    }
+
+    [Fact]
+    public async Task Deleting_a_principal_evicts_nothing_more_for_dependents_the_database_leaves_alone()
+    {
+        _db.Model.FindEntityType(typeof(Dog))!
+            .FindNavigation(nameof(Dog.Owner))!
+            .ForeignKey.DeleteBehavior.Should()
+            .Be(DeleteBehavior.ClientSetNull, "the database takes no action on a dog's owner");
+        var ada = await AddCustomer("Ada");
+        var bob = await AddCustomer("Bob");
+        var rex = new Dog { Name = "Rex", OwnerId = bob.Id };
+        _db.Animals.Add(rex);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        var rexRead = await Read(
+            (read, ct) => read.Entity(_reader.Animals, rex.Id).SingleAsync(ct)
+        );
+        var animals = await Read((read, ct) => read.All(_reader.Animals).ToListAsync(ct));
+
+        _db.Customers.Remove(await _db.Customers.SingleAsync(c => c.Id == ada.Id));
+        await _db.SaveChangesAsync();
+
+        (await rexRead.WasEvicted()).Should().BeFalse("no dog changed");
+        (await animals.WasEvicted()).Should().BeFalse("no dog changed");
+    }
+
+    [Fact]
+    public async Task A_cascade_from_a_type_to_itself_evicts_readers_at_every_depth_and_ends()
+    {
+        var ada = await AddCustomer("Ada");
+        var question = await AddNote(ada);
+        var answer = await AddNote(ada, replyTo: question);
+        var thanks = await AddNote(ada, replyTo: answer);
+        _db.ChangeTracker.Clear();
+        (string Reader, CachedRead Read)[] readers =
+        [
+            (
+                "the answer",
+                await Read(
+                    (read, ct) => read.Entity(_reader.Notes, answer.Id).SingleOrDefaultAsync(ct)
+                )
+            ),
+            (
+                "the thanks",
+                await Read(
+                    (read, ct) => read.Entity(_reader.Notes, thanks.Id).SingleOrDefaultAsync(ct)
+                )
+            ),
+            ("every note", await Read((read, ct) => read.All(_reader.Notes).ToListAsync(ct))),
+            (
+                "the replies to the answer",
+                await Read(
+                    (read, ct) =>
+                        read.Children(_reader.Notes, n => n.ReplyToId, answer.Id).ToListAsync(ct)
+                )
+            ),
+        ];
+
+        // Only the question is tracked, so the database deletes the answer, and the thanks in turn.
+        _db.Notes.Remove(await _db.Notes.SingleAsync(n => n.Id == question.Id));
+        await _db.SaveChangesAsync();
+
+        (await _reader.Notes.AnyAsync(n => n.Id == thanks.Id)).Should().BeFalse();
+        foreach (var (reader, read) in readers)
+        {
+            (await read.WasEvicted()).Should().BeTrue("the database deleted rows {0} read", reader);
+        }
+    }
+
+    [Fact]
+    public async Task AllDependencies_of_a_principal_set_evicts_readers_of_the_rows_an_ExecuteDelete_cascades_into()
+    {
+        var ada = await AddCustomer("Ada");
+        var tea = await AddOrder(ada, "Tea");
+        _db.OrderLines.Add(new OrderLine { OrderId = tea.Id, LineNumber = 1 });
+        await _db.SaveChangesAsync();
+        (string Reader, CachedRead Read)[] readers =
+        [
+            (
+                "the order",
+                await Read(
+                    (read, ct) => read.Entity(_reader.Orders, tea.Id).SingleOrDefaultAsync(ct)
+                )
+            ),
+            ("every order", await Read((read, ct) => read.All(_reader.Orders).ToListAsync(ct))),
+            ("the customer's orders", await ReadOrdersOf(ada.Id)),
+            (
+                "every order line",
+                await Read((read, ct) => read.All(_reader.OrderLines).ToListAsync(ct))
+            ),
+            (
+                "the order's lines",
+                await Read(
+                    (read, ct) =>
+                        read.Children(_reader.OrderLines, l => l.OrderId, tea.Id).ToListAsync(ct)
+                )
+            ),
+        ];
+
+        await _db.Customers.Where(c => c.Id == ada.Id).ExecuteDeleteAsync();
+        await _node.Cache.InvalidateAsync(_db.Customers.AllDependencies());
+
+        (await _reader.OrderLines.AnyAsync(l => l.OrderId == tea.Id)).Should().BeFalse();
+        foreach (var (reader, read) in readers)
+        {
+            (await read.WasEvicted()).Should().BeTrue("the database deleted rows {0} read", reader);
+        }
+    }
+
+    [Fact]
+    public async Task Deleting_a_row_evicts_no_reader_of_another_row_of_its_type()
+    {
+        var north = new Warehouse { Code = $"N-{Guid.NewGuid():N}" };
+        var bin = new Bin { WarehouseCode = north.Code };
+        var otherBin = new Bin { WarehouseCode = north.Code };
+        var ada = await AddCustomer("Ada");
+        var tea = await AddOrder(ada, "Tea");
+        var coffee = await AddOrder(ada, "Coffee");
+        _db.AddRange(north, bin, otherBin);
+        await _db.SaveChangesAsync();
+        var otherBinRead = await Read(
+            (read, ct) => read.Entity(_reader.Bins, otherBin.Id).SingleAsync(ct)
+        );
+        var coffeeRead = await Read(
+            (read, ct) => read.Entity(_reader.Orders, coffee.Id).SingleAsync(ct)
+        );
+        var adaRead = await ReadCustomer(ada.Id);
+
+        _db.Bins.Remove(bin);
+        await _db.SaveChangesAsync();
+        (await otherBinRead.WasEvicted()).Should().BeFalse("nothing cascades from a bin");
+
+        // Table-per-type links a truck's row to its vehicle row, which is the same row, not a cascade.
+        var truck = new Truck { Plate = "T-2", Axles = 2 };
+        var otherTruck = new Truck { Plate = "T-3", Axles = 2 };
+        _db.Vehicles.AddRange(truck, otherTruck);
+        await _db.SaveChangesAsync();
+        var otherTruckRead = await Read(
+            (read, ct) => read.Entity(_reader.Vehicles, otherTruck.Id).SingleAsync(ct)
+        );
+        _db.Vehicles.Remove(truck);
+        await _db.SaveChangesAsync();
+        (await otherTruckRead.WasEvicted()).Should().BeFalse("nothing cascades from a truck");
+
+        // The database deletes the order's lines, but no other order.
+        _db.Orders.Remove(tea);
+        await _db.SaveChangesAsync();
+        (await coffeeRead.WasEvicted()).Should().BeFalse("only the deleted order's lines cascade");
+        (await adaRead.WasEvicted()).Should().BeFalse("only the deleted order's lines cascade");
+    }
+
+    [Fact]
+    public async Task Deleting_a_derived_row_through_a_base_type_stub_evicts_lists_through_foreign_keys_into_the_derived_type()
+    {
+        var truck = new Truck { Plate = "T-1", Axles = 3 };
+        _db.Vehicles.Add(truck);
+        await _db.SaveChangesAsync();
+        _db.Trailers.Add(new Trailer { TruckId = truck.Id });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        var trailers = await Read(
+            (read, ct) => read.Children(_reader.Trailers, t => t.TruckId, truck.Id).ToListAsync(ct)
+        );
+
+        // The context only knows the row as a vehicle; the database deletes the truck's trailer with it.
+        _db.Vehicles.Remove(new Vehicle { Id = truck.Id });
+        await _db.SaveChangesAsync();
+
+        (await _reader.Trailers.AnyAsync(t => t.TruckId == truck.Id)).Should().BeFalse();
+        (await trailers.WasEvicted()).Should().BeTrue();
     }
 
     [Fact]

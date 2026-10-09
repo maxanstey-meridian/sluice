@@ -48,6 +48,35 @@ public sealed class MultiNodeTests
         _runs.Should().Be(2);
     }
 
+    [Fact]
+    public async Task A_distributed_cache_that_fails_writes_does_not_make_InvalidateAsync_throw_and_the_tag_is_written_once_it_recovers()
+    {
+        var l2 = new FailingWrites();
+        void Recovery(IFusionCacheBuilder cache) =>
+            // FusionCache retries failed L2 writes from a background loop on this delay (5 s by default). It
+            // offers no trigger and no event, so the test shortens the delay to 10 ms, FusionCache's internal
+            // floor (zero turns auto-recovery off), and waits a bounded time for the rewrite below.
+            cache.WithOptions(options => options.AutoRecoveryDelay = TimeSpan.FromMilliseconds(10));
+
+        await using (var a = SluiceNode.Clustered(l2, _bus, Recovery))
+        {
+            await View(a.Cache);
+
+            l2.Failing = true;
+            await a.Cache.InvalidateAsync(_rows.For(1));
+            l2.Failed.Should().NotBeEmpty("the invalidation's tag writes reached the failing L2");
+
+            l2.Failing = false;
+            await l2.Recovered.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+
+        // A fresh node knows nothing but what the L2 holds: only the rewritten tag evicts the old entry.
+        _data[1] = "new";
+        await using var b = SluiceNode.Clustered(l2, _bus);
+        (await View(b.Cache)).Should().Be("new");
+        _runs.Should().Be(2);
+    }
+
     [Theory]
     [InlineData("*", false)]
     [InlineData("!", false)]
@@ -75,5 +104,85 @@ public sealed class MultiNodeTests
         await View(b.Cache);
 
         _runs.Should().Be(1);
+    }
+
+    /// <summary>
+    /// An L2 whose writes throw while <see cref="Failing"/>, as Redis does once its client times out. It completes
+    /// <see cref="Recovered"/> when every key whose write failed has since been written.
+    /// </summary>
+    private sealed class FailingWrites : IDistributedCache
+    {
+        private readonly MemoryDistributedCache _inner = new(
+            Options.Create(new MemoryDistributedCacheOptions())
+        );
+        private readonly HashSet<string> _unwritten = [];
+
+        public volatile bool Failing;
+
+        public HashSet<string> Failed { get; } = [];
+
+        private readonly TaskCompletionSource _recovered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+
+        public Task Recovered => _recovered.Task;
+
+        public byte[]? Get(string key) => _inner.Get(key);
+
+        public Task<byte[]?> GetAsync(string key, CancellationToken token = default) =>
+            _inner.GetAsync(key, token);
+
+        public void Refresh(string key) => _inner.Refresh(key);
+
+        public Task RefreshAsync(string key, CancellationToken token = default) =>
+            _inner.RefreshAsync(key, token);
+
+        public void Remove(string key) => _inner.Remove(key);
+
+        public Task RemoveAsync(string key, CancellationToken token = default) =>
+            _inner.RemoveAsync(key, token);
+
+        public void Set(string key, byte[] value, DistributedCacheEntryOptions options)
+        {
+            Write(key);
+            _inner.Set(key, value, options);
+            Written(key);
+        }
+
+        public async Task SetAsync(
+            string key,
+            byte[] value,
+            DistributedCacheEntryOptions options,
+            CancellationToken token = default
+        )
+        {
+            Write(key);
+            await _inner.SetAsync(key, value, options, token);
+            Written(key);
+        }
+
+        private void Write(string key)
+        {
+            lock (_unwritten)
+            {
+                if (Failing)
+                {
+                    Failed.Add(key);
+                    _unwritten.Add(key);
+                    throw new TimeoutException("Simulated Redis client timeout.");
+                }
+            }
+        }
+
+        private void Written(string key)
+        {
+            lock (_unwritten)
+            {
+                if (_unwritten.Remove(key) && _unwritten.Count == 0)
+                {
+                    _recovered.TrySetResult();
+                }
+            }
+        }
     }
 }

@@ -37,10 +37,8 @@ public sealed class SluiceReads
     /// Safe to call from concurrent tasks inside one compute.
     /// </summary>
     /// <remarks>
-    /// The fetch is a declared read: the dependencies cover whatever it reads, so the EF package's strict reads let it,
-    /// and the tasks it starts, run plain EF queries while the compute runs. Sluice's other guards still apply inside
-    /// it: calling <see cref="SluiceCache.GetOrSetAsync"/> from it throws, and the EF package still checks its read
-    /// helpers' queries.
+    /// The fetch is a declared read: the dependencies cover whatever it reads, so the EF package's strict reads let it
+    /// run plain EF queries. Calling <see cref="SluiceCache.GetOrSetAsync"/> from it still throws.
     /// </remarks>
     /// <exception cref="ArgumentException">
     /// <paramref name="dependencies"/> is empty, or holds a null; the fetch doesn't run.
