@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
@@ -18,6 +19,15 @@ internal static class ModelSources
     internal static Source<object> Entity(IEntityType entityType)
     {
         EnsureTable(entityType);
+        return WrittenEntity(entityType);
+    }
+
+    /// <summary>
+    /// The same source without the mapping check, for writes: a type no read accepts has no reader to evict, and a
+    /// throw would lose the rest of the save's invalidations. A composite key is passed as an array of its values.
+    /// </summary>
+    internal static Source<object> WrittenEntity(IEntityType entityType)
+    {
         var root = entityType.GetRootType();
         return root.GetOrAddRuntimeAnnotationValue(
             SourceAnnotation,
@@ -132,14 +142,17 @@ internal static class ModelSources
         }
     }
 
+    // A composite key, which only writes produce, arrives as an array of its values in key order.
     private static Source<object> Build(string name, IReadOnlyList<IProperty> properties) =>
         properties is [var property]
             ? new(name, key => KeyFolding.Fold(ToProvider(property, key)))
             : new(
                 name,
-                _ =>
-                    throw new NotSupportedException(
-                        $"'{name}' has a composite key, which can only be invalidated as a whole."
+                key =>
+                    JsonSerializer.Serialize(
+                        ((object[])key)
+                            .Select((value, i) => KeyFolding.Fold(ToProvider(properties[i], value)))
+                            .ToArray()
                     )
             );
 

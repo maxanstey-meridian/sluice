@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Sluice.EntityFrameworkCore.Tests.Support;
+using ZiggyCreatures.Caching.Fusion;
 
 namespace Sluice.EntityFrameworkCore.Tests;
 
@@ -289,5 +290,70 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await call.Invoking(c => c.WaitAsync(TimeSpan.FromSeconds(30)))
             .Should()
             .ThrowAsync<OperationCanceledException>();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_factory_timeout_does_not_let_the_caller_reuse_its_context_while_the_compute_s_query_runs(
+        bool soft
+    )
+    {
+        // FusionCache times a zero timeout out at once: a hard one always, a soft one when fail-safe has a stale
+        // value to serve instead.
+        await using var node = new SluiceNode(cache =>
+            cache.WithDefaultEntryOptions(options =>
+            {
+                if (soft)
+                {
+                    options.IsFailSafeEnabled = true;
+                    options.FactorySoftTimeout = TimeSpan.Zero;
+                }
+                else
+                {
+                    options.FactoryHardTimeout = TimeSpan.Zero;
+                }
+            })
+        );
+        await using var db = postgres.CreateDb();
+        var ada = await AddCustomer(db, "Ada");
+        Task<Customer?> ReadAda(SluiceReads read, CancellationToken ct) =>
+            read.Entity(db.Customers, ada).SingleOrDefaultAsync(ct);
+        if (soft)
+        {
+            await node.Cache.GetOrSetAsync(_customer, ada, ReadAda);
+            await node.Fusion.ExpireAsync($"ef-reads-customer:{ada}");
+        }
+
+        // Another connection holds the table, so the compute's query blocks until it lets go.
+        await using var holder = postgres.CreateDb();
+        await using var hold = await holder.Database.BeginTransactionAsync();
+        await holder.Database.ExecuteSqlRawAsync(
+            "LOCK TABLE \"Customers\" IN ACCESS EXCLUSIVE MODE"
+        );
+        var querying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var call = node
+            .Cache.GetOrSetAsync(
+                _customer,
+                ada,
+                (read, ct) =>
+                {
+                    var query = ReadAda(read, ct);
+                    querying.SetResult();
+                    return query;
+                }
+            )
+            .AsTask();
+
+        // Without Sluice's pin FusionCache gives up on the compute at once, maybe before it starts, so wait for either.
+        await Task.WhenAny(querying.Task, call);
+        call.IsCompleted.Should()
+            .BeFalse("the caller must not resume while its compute's query runs");
+
+        await hold.RollbackAsync();
+        (await call)!.Name.Should().Be("Ada");
+        (await db.Customers.CountAsync(c => c.Id == ada))
+            .Should()
+            .Be(1, "the context is free again");
     }
 }

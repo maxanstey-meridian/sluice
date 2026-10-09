@@ -6,6 +6,9 @@ public sealed class Customer
 {
     public int Id { get; set; }
     public string Name { get; set; } = "";
+
+    /// <summary>Many-to-many, through the shared-type join entity <c>CustomerCoupons</c>.</summary>
+    public List<Coupon> Coupons { get; set; } = [];
 }
 
 public sealed class Order
@@ -23,7 +26,7 @@ public sealed class Note
     public string Text { get; set; } = "";
 }
 
-/// <summary>An order line has a nullable FK to a coupon.</summary>
+/// <summary>An order line has a composite key and a nullable FK to a coupon, set to null when the coupon is deleted.</summary>
 public sealed class OrderLine
 {
     public int OrderId { get; set; }
@@ -87,6 +90,63 @@ public sealed class Dog : Animal
     public bool Fetches { get; set; }
 }
 
+/// <summary>Mapped table-per-type: a truck's own columns live in a table of their own.</summary>
+public abstract class Vehicle
+{
+    public int Id { get; set; }
+    public string Plate { get; set; } = "";
+}
+
+public sealed class Truck : Vehicle
+{
+    public int Axles { get; set; }
+}
+
+/// <summary>Owns its address in its own row (the address owns its contact in turn) and its stops in another table.</summary>
+public sealed class Parcel
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+    public Address Address { get; set; } = new();
+    public List<Stop> Stops { get; set; } = [];
+}
+
+public sealed class Address
+{
+    public string Street { get; set; } = "";
+    public Contact Contact { get; set; } = new();
+}
+
+public sealed class Contact
+{
+    public string Phone { get; set; } = "";
+}
+
+public sealed class Stop
+{
+    public string Place { get; set; } = "";
+}
+
+/// <summary>Known to its bins by its code, an alternate key.</summary>
+public sealed class Warehouse
+{
+    public int Id { get; set; }
+    public string Code { get; set; } = "";
+}
+
+public sealed class Bin
+{
+    public int Id { get; set; }
+    public string WarehouseCode { get; set; } = "";
+}
+
+/// <summary>Written to a table, read through a view, so the read helpers refuse it.</summary>
+public sealed class Supplier
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+}
+
 public sealed class CustomerTotal
 {
     public int CustomerId { get; set; }
@@ -122,10 +182,28 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Product> Products => Set<Product>();
     public DbSet<Animal> Animals => Set<Animal>();
     public DbSet<Dog> Dogs => Set<Dog>();
+    public DbSet<Vehicle> Vehicles => Set<Vehicle>();
+    public DbSet<Truck> Trucks => Set<Truck>();
+    public DbSet<Parcel> Parcels => Set<Parcel>();
+    public DbSet<Warehouse> Warehouses => Set<Warehouse>();
+    public DbSet<Bin> Bins => Set<Bin>();
+    public DbSet<Dictionary<string, object>> CustomerCoupons =>
+        Set<Dictionary<string, object>>("CustomerCoupons");
+    public DbSet<Supplier> Suppliers => Set<Supplier>();
     public DbSet<CustomerTotal> CustomerTotals => Set<CustomerTotal>();
     public DbSet<ActiveCustomer> ActiveCustomers => Set<ActiveCustomer>();
     public DbSet<TopCustomer> TopCustomers => Set<TopCustomer>();
     public DbSet<RecentOrder> RecentOrders => Set<RecentOrder>();
+
+    /// <summary>The key the next inserted customer gets, as long as nothing else inserts one first.</summary>
+    public Task<int> NextCustomerId() =>
+        Database
+            .SqlQueryRaw<int>(
+                """
+                select (coalesce(pg_sequence_last_value(pg_get_serial_sequence('"Customers"', 'Id')), 0) + 1)::int as "Value"
+                """
+            )
+            .SingleAsync();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -134,7 +212,12 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Note>().HasOne<Customer>().WithMany().HasForeignKey("CustomerId");
         model.Entity<OrderLine>().HasKey(line => new { line.OrderId, line.LineNumber });
         model.Entity<OrderLine>().HasOne<Order>().WithMany().HasForeignKey(line => line.OrderId);
-        model.Entity<OrderLine>().HasOne<Coupon>().WithMany().HasForeignKey(line => line.CouponId);
+        model
+            .Entity<OrderLine>()
+            .HasOne<Coupon>()
+            .WithMany()
+            .HasForeignKey(line => line.CouponId)
+            .OnDelete(DeleteBehavior.SetNull);
         model
             .Entity<User>()
             .Property(user => user.Id)
@@ -157,6 +240,28 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .HasConversion(sku => sku.Value, value => new Sku(value))
             .HasColumnType("citext");
 
+        model.Entity<Vehicle>().UseTptMappingStrategy();
+        model.Entity<Truck>();
+        model.Entity<Parcel>().HasOne<Customer>().WithMany().HasForeignKey(p => p.CustomerId);
+        model.Entity<Parcel>().OwnsOne(p => p.Address, address => address.OwnsOne(a => a.Contact));
+        model.Entity<Parcel>().OwnsMany(p => p.Stops);
+        model
+            .Entity<Bin>()
+            .HasOne<Warehouse>()
+            .WithMany()
+            .HasForeignKey(bin => bin.WarehouseCode)
+            .HasPrincipalKey(warehouse => warehouse.Code);
+        model
+            .Entity<Customer>()
+            .HasMany(c => c.Coupons)
+            .WithMany()
+            .UsingEntity(
+                "CustomerCoupons",
+                coupon => coupon.HasOne(typeof(Coupon)).WithMany().HasForeignKey("CouponId"),
+                customer => customer.HasOne(typeof(Customer)).WithMany().HasForeignKey("CustomerId")
+            );
+
+        model.Entity<Supplier>().ToTable("Suppliers").ToView("supplier_names");
         model.Entity<CustomerTotal>().HasNoKey().ToView("customer_totals");
         model.Entity<ActiveCustomer>().ToView("active_customers");
         model.Entity<TopCustomer>().ToSqlQuery("select 1 as \"Id\"");

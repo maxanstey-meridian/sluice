@@ -6,3 +6,6 @@ static Sluice.DbSetDependencyExtensions.Dependency<T>(this Microsoft.EntityFrame
 static Sluice.SluiceReadsExtensions.All<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set) -> System.Linq.IQueryable<T!>!
 static Sluice.SluiceReadsExtensions.Children<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, System.Linq.Expressions.Expression<System.Func<T!, object?>!>! foreignKey, object! principalKey) -> System.Linq.IQueryable<T!>!
 static Sluice.SluiceReadsExtensions.Entity<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, object! key) -> System.Linq.IQueryable<T!>!
+Sluice.SluiceDbContextOptionsBuilderExtensions
+static Sluice.SluiceDbContextOptionsBuilderExtensions.UseSluice(this Microsoft.EntityFrameworkCore.DbContextOptionsBuilder! builder, System.IServiceProvider! services) -> Microsoft.EntityFrameworkCore.DbContextOptionsBuilder!
+static Sluice.SluiceDbContextOptionsBuilderExtensions.UseSluice<TContext>(this Microsoft.EntityFrameworkCore.DbContextOptionsBuilder<TContext!>! builder, System.IServiceProvider! services) -> Microsoft.EntityFrameworkCore.DbContextOptionsBuilder<TContext!>!

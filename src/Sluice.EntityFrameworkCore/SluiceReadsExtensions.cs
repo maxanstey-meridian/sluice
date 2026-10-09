@@ -1,9 +1,7 @@
 using System.Linq.Expressions;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
-using Microsoft.EntityFrameworkCore.Storage;
 using Sluice.EntityFrameworkCore;
 
 namespace Sluice;
@@ -118,17 +116,11 @@ public static class SluiceReadsExtensions
     }
 
     // Inside a transaction a compute would cache uncommitted rows for every caller, or an old snapshot under
-    // RepeatableRead or Serializable. These are the inputs EF's own batch executor checks before it saves.
+    // RepeatableRead or Serializable.
     private static void EnsureNoTransaction<T>(DbSet<T> set)
         where T : class
     {
-        var connection = set.GetService<IRelationalConnection>();
-        var enlistment = connection as ITransactionEnlistmentManager;
-        if (
-            connection.CurrentTransaction is not null
-            || enlistment?.EnlistedTransaction is not null
-            || enlistment?.CurrentAmbientTransaction is not null
-        )
+        if (!ContextTransaction.Of(set).IsNone)
         {
             throw new InvalidOperationException(
                 "Sluice's EF reads can't run inside a transaction: the compute would cache rows other callers "

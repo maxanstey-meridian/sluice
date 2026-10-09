@@ -7,7 +7,7 @@ namespace Sluice.EntityFrameworkCore.Tests;
 public sealed class ChildrenReadTests(PostgresFixture postgres)
 {
     // The sources the model implies for these foreign keys: "<root entity type>[<FK properties>]", keyed by the
-    // FK value. Tracked writes publish to them; declaring them here stands in for those writes.
+    // FK value. Declaring them by hand pins those names, which are wire format.
     private static readonly Source<int> _ordersByCustomer = new(
         $"{typeof(Order).FullName}[CustomerId]"
     );

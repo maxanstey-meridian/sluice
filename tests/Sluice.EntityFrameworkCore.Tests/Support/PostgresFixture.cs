@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Infrastructure;
 using Testcontainers.PostgreSql;
 
 namespace Sluice.EntityFrameworkCore.Tests.Support;
@@ -10,14 +12,46 @@ public sealed class PostgresFixture : IAsyncLifetime
         "postgres:17-alpine"
     ).Build();
 
+    public string ConnectionString => _server.GetConnectionString();
+
     public ShopDb CreateDb() =>
-        new(new DbContextOptionsBuilder<ShopDb>().UseNpgsql(_server.GetConnectionString()).Options);
+        new(new DbContextOptionsBuilder<ShopDb>().UseNpgsql(ConnectionString).Options);
+
+    /// <summary>
+    /// A context whose tracked writes invalidate <paramref name="node"/>'s cache. <paramref name="interceptors"/>
+    /// run before Sluice's.
+    /// </summary>
+    public ShopDb CreateDb(
+        SluiceNode node,
+        Action<NpgsqlDbContextOptionsBuilder>? npgsql = null,
+        params IInterceptor[] interceptors
+    )
+    {
+        var options = new DbContextOptionsBuilder<ShopDb>();
+        options
+            .UseNpgsql(ConnectionString, npgsql)
+            .AddInterceptors(interceptors)
+            .UseSluice(node.Services);
+        return new(options.Options);
+    }
+
+    /// <summary>
+    /// A context whose tracked writes invalidate <paramref name="node"/>'s cache, and whose connection string sets
+    /// <paramref name="enlist"/>.
+    /// </summary>
+    public ShopDb CreateDb(SluiceNode node, bool enlist) =>
+        new(
+            new DbContextOptionsBuilder<ShopDb>()
+                .UseNpgsql($"{ConnectionString};Enlist={enlist}")
+                .UseSluice(node.Services)
+                .Options
+        );
 
     /// <summary>A context whose connection string sets <paramref name="enlist"/>.</summary>
     public ShopDb CreateDb(bool enlist) =>
         new(
             new DbContextOptionsBuilder<ShopDb>()
-                .UseNpgsql($"{_server.GetConnectionString()};Enlist={enlist}")
+                .UseNpgsql($"{ConnectionString};Enlist={enlist}")
                 .Options
         );
 
