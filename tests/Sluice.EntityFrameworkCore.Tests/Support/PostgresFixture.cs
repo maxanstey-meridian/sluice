@@ -18,67 +18,41 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     public string ConnectionString => _server.GetConnectionString();
 
-    public ShopDb CreateDb() =>
-        new(new DbContextOptionsBuilder<ShopDb>().UseNpgsql(ConnectionString).Options);
-
     /// <summary>
-    /// A context whose tracked writes invalidate <paramref name="node"/>'s cache, with <paramref name="before"/> added
-    /// before Sluice and <paramref name="after"/> after it, so they run in that order.
+    /// A context on <paramref name="connection"/>, or on a connection string that sets <paramref name="enlist"/>. With
+    /// a <paramref name="node"/>, its tracked writes invalidate the node's cache, and <paramref name="before"/> is
+    /// added before Sluice and <paramref name="after"/> after it, so they run in that order.
     /// </summary>
     public ShopDb CreateDb(
-        SluiceNode node,
+        SluiceNode? node = null,
         Action<NpgsqlDbContextOptionsBuilder>? npgsql = null,
         IInterceptor[]? before = null,
-        IInterceptor[]? after = null
-    ) => CreateDb(node.Services, npgsql, before, after);
+        IInterceptor[]? after = null,
+        DbConnection? connection = null,
+        bool enlist = true
+    )
+    {
+        var options = new DbContextOptionsBuilder<ShopDb>();
+        if (connection is null)
+        {
+            options.UseNpgsql(
+                enlist ? ConnectionString : $"{ConnectionString};Enlist=false",
+                npgsql
+            );
+        }
+        else
+        {
+            options.UseNpgsql(connection, npgsql);
+        }
 
-    /// <summary>
-    /// A context whose tracked writes invalidate the cache <paramref name="services"/> holds, with
-    /// <paramref name="before"/> added before Sluice and <paramref name="after"/> after it, so they run in that order.
-    /// </summary>
-    public ShopDb CreateDb(
-        IServiceProvider services,
-        Action<NpgsqlDbContextOptionsBuilder>? npgsql = null,
-        IInterceptor[]? before = null,
-        IInterceptor[]? after = null
-    ) =>
-        new(
-            new DbContextOptionsBuilder<ShopDb>()
-                .UseNpgsql(ConnectionString, npgsql)
-                .AddInterceptors(before ?? [])
-                .UseSluice(services)
-                .AddInterceptors(after ?? [])
-                .Options
-        );
+        options.AddInterceptors(before ?? []);
+        if (node is not null)
+        {
+            options.UseSluice(node.Services);
+        }
 
-    /// <summary>A context on <paramref name="connection"/> whose tracked writes invalidate <paramref name="node"/>'s cache.</summary>
-    public ShopDb CreateDb(SluiceNode node, DbConnection connection) =>
-        new(
-            new DbContextOptionsBuilder<ShopDb>()
-                .UseNpgsql(connection)
-                .UseSluice(node.Services)
-                .Options
-        );
-
-    /// <summary>
-    /// A context whose tracked writes invalidate <paramref name="node"/>'s cache, and whose connection string sets
-    /// <paramref name="enlist"/>.
-    /// </summary>
-    public ShopDb CreateDb(SluiceNode node, bool enlist) =>
-        new(
-            new DbContextOptionsBuilder<ShopDb>()
-                .UseNpgsql($"{ConnectionString};Enlist={enlist}")
-                .UseSluice(node.Services)
-                .Options
-        );
-
-    /// <summary>A context whose connection string sets <paramref name="enlist"/>.</summary>
-    public ShopDb CreateDb(bool enlist) =>
-        new(
-            new DbContextOptionsBuilder<ShopDb>()
-                .UseNpgsql($"{ConnectionString};Enlist={enlist}")
-                .Options
-        );
+        return new(options.AddInterceptors(after ?? []).Options);
+    }
 
     public async Task InitializeAsync()
     {

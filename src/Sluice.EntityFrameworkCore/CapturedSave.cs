@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -146,9 +145,10 @@ internal sealed class CapturedSave
     // no original values from the database, so the parent it had is unknown. Two signs point to one, and both can
     // also match a loaded row, which only over-invalidates. Update(), or setting the state to Modified, marks every
     // property modified with its original value equal to its current one. A stub's foreign key holds what the object
-    // was created with: null, which a required key can't hold, or the default of a non-nullable type, such as 0,
-    // which a real parent rarely has. A stub created with any other value, or with a nullable key left null, looks
-    // like a loaded row, and can't be told apart.
+    // was created with: null, which a required key can't hold, or the property's sentinel, EF's "not set" value (the
+    // default of a non-nullable type, such as 0, unless HasSentinel says otherwise; null for a nullable one), which a
+    // real parent rarely has. A stub created with any other value, or with a nullable key left null, looks like a
+    // loaded row, and can't be told apart.
     private static bool OriginalIsUnknown(EntityEntry entry, IForeignKey foreignKey) =>
         foreignKey.Properties.Any(property =>
         {
@@ -159,11 +159,7 @@ internal sealed class CapturedSave
                 )
                 || (
                     value.OriginalValue is { } original
-                        ? property.ClrType.IsValueType
-                            && Nullable.GetUnderlyingType(property.ClrType) is null
-                            && original.Equals(
-                                RuntimeHelpers.GetUninitializedObject(property.ClrType)
-                            )
+                        ? original.Equals(property.Sentinel)
                         : foreignKey.IsRequired
                 );
         });

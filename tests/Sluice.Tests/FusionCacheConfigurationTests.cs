@@ -12,6 +12,68 @@ public sealed class FusionCacheConfigurationTests
     private static readonly Source<int> _rows = new("config-rows");
     private static readonly Query<string, string> _view = new("config-view");
 
+    // Cache configurations whose entries outlive the tag data that can invalidate them, each with the message
+    // resolving SluiceCache must fail with.
+    private static readonly Dictionary<
+        string,
+        (Action<IFusionCacheBuilder> Configure, string Message)
+    > _outlivingTagData = new()
+    {
+        ["default duration"] = (
+            cache => cache.WithDefaultEntryOptions(o => o.Duration = TimeSpan.FromDays(30)),
+            "*DefaultEntryOptions*in memory*tag data*"
+        ),
+        ["distributed duration"] = (
+            cache =>
+                cache.WithDefaultEntryOptions(o =>
+                    o.DistributedCacheDuration = TimeSpan.FromDays(30)
+                ),
+            "*in the distributed cache*tag data*"
+        ),
+        // Memory keeps entries for FailSafeMaxDuration (one day by default), well within the tag data.
+        ["distributed fail-safe lifetime"] = (
+            cache =>
+                cache.WithDefaultEntryOptions(o =>
+                {
+                    o.IsFailSafeEnabled = true;
+                    o.DistributedCacheFailSafeMaxDuration = TimeSpan.FromDays(30);
+                }),
+            "*in the distributed cache*tag data*"
+        ),
+        ["fail-safe lifetime"] = (
+            cache =>
+                cache.WithDefaultEntryOptions(o =>
+                {
+                    o.IsFailSafeEnabled = true;
+                    o.FailSafeMaxDuration = TimeSpan.FromDays(30);
+                }),
+            "*in memory*tag data*"
+        ),
+        ["memory duration"] = (
+            cache =>
+                cache.WithDefaultEntryOptions(o => o.MemoryCacheDuration = TimeSpan.FromDays(30)),
+            "*in memory*tag data*"
+        ),
+        // Entry and tag data both last an hour; FusionCache adds up to a second of jitter to the entry in memory.
+        ["memory jitter"] = (
+            cache =>
+                cache
+                    .WithDefaultEntryOptions(o =>
+                    {
+                        o.Duration = TimeSpan.FromHours(1);
+                        o.JitterMaxDuration = TimeSpan.FromSeconds(1);
+                    })
+                    .WithOptions(o =>
+                    {
+                        o.TagsDefaultEntryOptions.Duration = TimeSpan.FromHours(1);
+                        o.TagsDefaultEntryOptions.IsFailSafeEnabled = false;
+                    }),
+            "*in memory*tag data*JitterMaxDuration*"
+        ),
+    };
+
+    public static TheoryData<string> OutlivingTagData => new(_outlivingTagData.Keys);
+
     private static Task<string> Read(SluiceReads read, CancellationToken ct)
     {
         read.From(_rows.For(1));
@@ -68,104 +130,15 @@ public sealed class FusionCacheConfigurationTests
         reader.Runs("k").Should().Be(2);
     }
 
-    [Fact]
-    public void Resolving_SluiceCache_fails_when_the_default_duration_outlives_the_tag_data()
+    [Theory]
+    [MemberData(nameof(OutlivingTagData))]
+    public void Resolving_SluiceCache_fails_when_an_entry_can_outlive_the_tag_data(string lifetime)
     {
-        var resolve = () =>
-            new SluiceNode(cache =>
-                cache.WithDefaultEntryOptions(o => o.Duration = TimeSpan.FromDays(30))
-            );
+        var (configure, message) = _outlivingTagData[lifetime];
 
-        resolve
-            .Should()
-            .Throw<InvalidOperationException>()
-            .WithMessage("*DefaultEntryOptions*in memory*tag data*");
-    }
+        var resolve = () => new SluiceNode(configure);
 
-    [Fact]
-    public void Resolving_SluiceCache_fails_when_the_distributed_duration_outlives_the_tag_data()
-    {
-        var resolve = () =>
-            new SluiceNode(cache =>
-                cache.WithDefaultEntryOptions(o =>
-                    o.DistributedCacheDuration = TimeSpan.FromDays(30)
-                )
-            );
-
-        resolve
-            .Should()
-            .Throw<InvalidOperationException>()
-            .WithMessage("*in the distributed cache*tag data*");
-    }
-
-    [Fact]
-    public void Resolving_SluiceCache_fails_when_the_distributed_fail_safe_lifetime_outlives_the_tag_data()
-    {
-        // Memory keeps entries for FailSafeMaxDuration (one day by default), well within the tag data.
-        var resolve = () =>
-            new SluiceNode(cache =>
-                cache.WithDefaultEntryOptions(o =>
-                {
-                    o.IsFailSafeEnabled = true;
-                    o.DistributedCacheFailSafeMaxDuration = TimeSpan.FromDays(30);
-                })
-            );
-
-        resolve
-            .Should()
-            .Throw<InvalidOperationException>()
-            .WithMessage("*in the distributed cache*tag data*");
-    }
-
-    [Fact]
-    public void Resolving_SluiceCache_fails_when_the_fail_safe_lifetime_outlives_the_tag_data()
-    {
-        var resolve = () =>
-            new SluiceNode(cache =>
-                cache.WithDefaultEntryOptions(o =>
-                {
-                    o.IsFailSafeEnabled = true;
-                    o.FailSafeMaxDuration = TimeSpan.FromDays(30);
-                })
-            );
-
-        resolve.Should().Throw<InvalidOperationException>().WithMessage("*in memory*tag data*");
-    }
-
-    [Fact]
-    public void Resolving_SluiceCache_fails_when_the_memory_duration_outlives_the_tag_data()
-    {
-        var resolve = () =>
-            new SluiceNode(cache =>
-                cache.WithDefaultEntryOptions(o => o.MemoryCacheDuration = TimeSpan.FromDays(30))
-            );
-
-        resolve.Should().Throw<InvalidOperationException>().WithMessage("*in memory*tag data*");
-    }
-
-    [Fact]
-    public void Resolving_SluiceCache_fails_when_memory_jitter_can_push_an_entry_past_the_tag_data()
-    {
-        // Entry and tag data both last an hour; FusionCache adds up to a second of jitter to the entry in memory.
-        var resolve = () =>
-            new SluiceNode(cache =>
-                cache
-                    .WithDefaultEntryOptions(o =>
-                    {
-                        o.Duration = TimeSpan.FromHours(1);
-                        o.JitterMaxDuration = TimeSpan.FromSeconds(1);
-                    })
-                    .WithOptions(o =>
-                    {
-                        o.TagsDefaultEntryOptions.Duration = TimeSpan.FromHours(1);
-                        o.TagsDefaultEntryOptions.IsFailSafeEnabled = false;
-                    })
-            );
-
-        resolve
-            .Should()
-            .Throw<InvalidOperationException>()
-            .WithMessage("*in memory*tag data*JitterMaxDuration*");
+        resolve.Should().Throw<InvalidOperationException>().WithMessage(message);
     }
 
     [Fact]
@@ -318,13 +291,35 @@ public sealed class FusionCacheConfigurationTests
         await call.Invoking(c => c).Should().ThrowAsync<OperationCanceledException>();
     }
 
-    [Fact]
-    public async Task A_compute_outliving_the_factory_hard_timeout_completes_before_the_caller_resumes()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_compute_outliving_the_factory_timeout_completes_before_the_caller_resumes(
+        bool soft
+    )
     {
-        // FusionCache times a zero hard timeout out at once, before the factory has finished (or even run).
+        // FusionCache times a zero timeout out at once, before the factory has finished (or even run): a hard one
+        // always, a soft one when fail-safe has a stale value to fall back to.
         await using var node = new SluiceNode(cache =>
-            cache.WithDefaultEntryOptions(o => o.FactoryHardTimeout = TimeSpan.Zero)
+            cache.WithDefaultEntryOptions(o =>
+            {
+                if (soft)
+                {
+                    o.IsFailSafeEnabled = true;
+                    o.FactorySoftTimeout = TimeSpan.Zero;
+                }
+                else
+                {
+                    o.FactoryHardTimeout = TimeSpan.Zero;
+                }
+            })
         );
+        if (soft)
+        {
+            await node.Cache.GetOrSetAsync(_view, "k", Read);
+            await node.Fusion.ExpireAsync("config-view:k");
+        }
+
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var finished = false;
@@ -339,63 +334,39 @@ public sealed class FusionCacheConfigurationTests
                     started.SetResult();
                     await gate.Task;
                     finished = true;
-                    return "value";
-                }
-            )
-            .AsTask();
-
-        // Without the pin FusionCache times the call out before the compute starts, so wait for either.
-        await Task.WhenAny(started.Task, call);
-        call.IsCompleted.Should().BeFalse("the caller must wait for its compute");
-        gate.SetResult();
-        (await call).Should().Be("value");
-        finished.Should().BeTrue();
-    }
-
-    [Fact]
-    public async Task A_compute_outliving_the_factory_soft_timeout_completes_before_the_caller_resumes()
-    {
-        // A soft timeout applies when fail-safe has a stale value to fall back to; zero times out at once.
-        await using var node = new SluiceNode(cache =>
-            cache.WithDefaultEntryOptions(o =>
-            {
-                o.IsFailSafeEnabled = true;
-                o.FactorySoftTimeout = TimeSpan.Zero;
-            })
-        );
-        await node.Cache.GetOrSetAsync(_view, "k", Read);
-        await node.Fusion.ExpireAsync("config-view:k");
-        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        var call = node
-            .Cache.GetOrSetAsync(
-                _view,
-                "k",
-                async (read, _) =>
-                {
-                    read.From(_rows.For(1));
-                    started.SetResult();
-                    await gate.Task;
                     return "new value";
                 }
             )
             .AsTask();
 
-        // Without the pin FusionCache serves the stale value at once, so wait for either.
+        // Without the pin FusionCache times the call out (hard) or serves the stale value (soft) before the compute
+        // finishes, maybe before it starts, so wait for either.
         await Task.WhenAny(started.Task, call);
         call.IsCompleted.Should().BeFalse("the caller must wait for its compute");
         gate.SetResult();
         (await call).Should().Be("new value");
+        finished.Should().BeTrue();
     }
 
-    [Fact]
-    public async Task Another_FusionCache_on_the_same_L2_is_unaffected_by_Sluice_tags_and_clear()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Another_FusionCache_on_the_same_L2_is_unaffected_by_Sluice_tags_and_clear(
+        bool userTurnsThePrefixOff
+    )
     {
         var l2 = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
         await using var node = new SluiceNode(cache =>
-            cache.WithSerializer(new FusionCacheSystemTextJsonSerializer()).WithDistributedCache(l2)
-        );
+        {
+            cache
+                .WithSerializer(new FusionCacheSystemTextJsonSerializer())
+                .WithDistributedCache(l2);
+            if (userTurnsThePrefixOff)
+            {
+                // Sluice's prefix must win, or its tags and clear would hit the other cache's unprefixed keys.
+                cache.WithoutCacheKeyPrefix();
+            }
+        });
         using var other = new FusionCache(new FusionCacheOptions { CacheName = "other" });
         other.SetupDistributedCache(l2, new FusionCacheSystemTextJsonSerializer());
 

@@ -1,3 +1,4 @@
+using Sluice.Infrastructure;
 using ZiggyCreatures.Caching.Fusion;
 
 namespace Sluice;

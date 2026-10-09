@@ -5,14 +5,15 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Query;
+using Sluice.Infrastructure;
 
 namespace Sluice.EntityFrameworkCore;
 
 /// <summary>
 /// Makes a compute's EF reads go through the read helpers, so every row it reads is covered by a recorded
-/// dependency. The helpers mark their queries with <see cref="Marker"/>. Inside a compute, a command without the
-/// marker throws (the origin check: forgotten reads, lazy and explicit loading, <c>FromSql</c>, compiled queries,
-/// writes), and so does a marked one, or a read a fused fetch runs, inside a transaction. A marked query that reads
+/// dependency. The helpers mark their queries with <see cref="Marker"/>. Inside a compute, a write throws, and so does
+/// a command without the marker (the origin check: forgotten reads, lazy and explicit loading, <c>FromSql</c>,
+/// compiled queries), and a marked one, or a read a fused fetch runs, inside a transaction. A marked query that reads
 /// anything beyond its own rows (another set, a navigation, <c>Include</c>, a query filter that does either), tracks,
 /// or returns entities that load lazily throws when EF compiles it, inside a compute or not (the shape check).
 /// </summary>
@@ -22,7 +23,8 @@ namespace Sluice.EntityFrameworkCore;
 /// its own model and compiled-query cache) per distinct set of them, throwing after twenty. Nothing here depends on
 /// the cache. Each violation is also recorded on the running compute, so a compute that catches it still caches
 /// nothing and its caller still gets it. A fused <c>read.From(dependency, fetch)</c> fetch is a declared read, so the
-/// origin check lets its reads through while it runs, though not its writes; the other checks still apply there.
+/// origin check lets its reads, and those of tasks it starts, through, though not its writes; the other checks still
+/// apply there.
 /// </remarks>
 internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInterceptor
 {
@@ -62,67 +64,12 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
         return set.TagWith(Marker).AsNoTracking().IgnoreAutoIncludes();
     }
 
-    public InterceptionResult<DbDataReader> ReaderExecuting(
-        DbCommand command,
-        CommandEventData eventData,
-        InterceptionResult<DbDataReader> result
-    )
+    // EF creates a fresh command for every execution on every path (reader, scalar and non-query; sync and async),
+    // so this one hook sees each before it runs, and before the connection opens.
+    public DbCommand CommandInitialized(CommandEndEventData eventData, DbCommand result)
     {
-        Check(command, eventData);
+        Check(result, eventData);
         return result;
-    }
-
-    public ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
-        DbCommand command,
-        CommandEventData eventData,
-        InterceptionResult<DbDataReader> result,
-        CancellationToken cancellationToken = default
-    )
-    {
-        Check(command, eventData);
-        return new(result);
-    }
-
-    public InterceptionResult<object> ScalarExecuting(
-        DbCommand command,
-        CommandEventData eventData,
-        InterceptionResult<object> result
-    )
-    {
-        Check(command, eventData);
-        return result;
-    }
-
-    public ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
-        DbCommand command,
-        CommandEventData eventData,
-        InterceptionResult<object> result,
-        CancellationToken cancellationToken = default
-    )
-    {
-        Check(command, eventData);
-        return new(result);
-    }
-
-    public InterceptionResult<int> NonQueryExecuting(
-        DbCommand command,
-        CommandEventData eventData,
-        InterceptionResult<int> result
-    )
-    {
-        Check(command, eventData);
-        return result;
-    }
-
-    public ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
-        DbCommand command,
-        CommandEventData eventData,
-        InterceptionResult<int> result,
-        CancellationToken cancellationToken = default
-    )
-    {
-        Check(command, eventData);
-        return new(result);
     }
 
     // Runs only when EF compiles a query, not on every execution: a tree it has compiled before comes from its
@@ -156,9 +103,9 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
         }
     }
 
-    // A write a read helper didn't build, anywhere in a compute. A read a helper didn't build, unless it runs in a fused
-    // fetch, whose declared dependencies cover it. Or any read the compute may make (a helper's, or one in a fetch)
-    // inside a transaction, where a compute would cache rows other callers can't see yet, or an old snapshot under
+    // A write, anywhere in a compute, whoever built it. A read a helper didn't build, unless it runs in a fused fetch,
+    // whose declared dependencies cover it. Or any read the compute may make (a helper's, or one in a fetch) inside a
+    // transaction, where a compute would cache rows other callers can't see yet, or an old snapshot under
     // RepeatableRead or Serializable. The transaction is read as the write side reads it, from EF's own inputs: the
     // command's own transaction would miss an enlisted or ambient one, which the connection carries instead.
     private static InvalidOperationException? ViolationOf(
@@ -167,20 +114,17 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
     )
     {
         var (command, eventData) = execution;
-        if (!command.CommandText.Contains(MarkerComment, StringComparison.Ordinal))
+        if (IsWrite(eventData.CommandSource))
         {
-            if (IsWrite(eventData.CommandSource))
-            {
-                return new(
-                    $"An EF write ran inside a compute ({Statement(command)}). Writes can't run inside a compute, "
-                        + "which is a read: run them before or after GetOrSetAsync."
-                );
-            }
+            return new(
+                $"An EF write ran inside a compute ({Statement(command)}). Writes can't run inside a compute, "
+                    + "which is a read: run them before or after GetOrSetAsync."
+            );
+        }
 
-            if (!inFetch)
-            {
-                return NotFromHelper(command);
-            }
+        if (!inFetch && !command.CommandText.Contains(MarkerComment, StringComparison.Ordinal))
+        {
+            return NotFromHelper(command);
         }
 
         if (eventData.Context is { } context && !ContextTransaction.Of(context).IsNone)
@@ -194,12 +138,13 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
         return null;
     }
 
-    // EF reports ExecuteDelete's command as ExecuteUpdate too.
+    // EF 10 reports ExecuteDelete's command as ExecuteUpdate; ExecuteDelete is listed for when it reports its own.
     private static bool IsWrite(CommandSource source) =>
         source
             is CommandSource.SaveChanges
                 or CommandSource.ExecuteSqlRaw
-                or CommandSource.ExecuteUpdate;
+                or CommandSource.ExecuteUpdate
+                or CommandSource.ExecuteDelete;
 
     private static InvalidOperationException NotFromHelper(DbCommand command) =>
         new(
@@ -338,21 +283,11 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
                 VisitQueryOperator(node);
             }
             else if (
-                method.DeclaringType == typeof(EF)
-                && method.Name == nameof(EF.Property)
-                && node.Arguments is [var instance, ConstantExpression { Value: string name }]
+                node.TryGetEFPropertyArguments(out var instance, out var name)
+                || node.TryGetIndexerArguments(model, out instance, out name)
             )
             {
                 CheckNavigation(instance.Type, name);
-            }
-            else if (
-                node
-                    is { Object: { } bag, Arguments: [ConstantExpression { Value: string member }] }
-                && method.IsSpecialName
-                && method.Name == "get_Item"
-            )
-            {
-                CheckNavigation(bag.Type, member);
             }
             else if (model.FindDbFunction(method) is { IsBuiltIn: false } function)
             {
@@ -396,13 +331,6 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
                         "A Sluice read helper's query was made tracking, so the cache could store the context's "
                             + "live instances and their unsaved edits. Keep helper queries no-tracking, and load an "
                             + "entity on your own context to change it."
-                    );
-                    break;
-                case nameof(EntityFrameworkQueryableExtensions.ExecuteUpdate)
-                or nameof(EntityFrameworkQueryableExtensions.ExecuteDelete):
-                    Reject(
-                        $"A Sluice read helper's query was used for {node.Method.Name}, a write. Run bulk writes on a "
-                            + "plain set, outside any compute, then invalidate what they wrote."
                     );
                     break;
                 // As EF reads it, for the whole query: without names, every filter; with them, those named.
@@ -501,15 +429,12 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
                 {
                     if (Holds(part) is { } holds)
                     {
-                        var subject =
-                            part == entityType
-                                ? $"{entityType.ShortName()} entities, which"
-                                : $"{entityType.ShortName()} entities, whose owned {part.ShortName()} values";
                         refused.Add(
                             (
                                 entityType.ClrType,
-                                $"A Sluice read helper's query returns {subject} {holds}. Select the values you need "
-                                    + "instead."
+                                $"A Sluice read helper's query returns {entityType.ShortName()} entities (including "
+                                    + $"what they own), and {part.ShortName()} entities {holds}. Select the values you "
+                                    + "need instead."
                             )
                         );
                         break;

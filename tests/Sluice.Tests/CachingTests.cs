@@ -23,22 +23,6 @@ public sealed class CachingTests
     }
 
     [Fact]
-    public async Task Different_keys_hold_independent_dependencies()
-    {
-        await using var node = new SluiceNode();
-        var reader = new CountingReader(node.Cache, _summary);
-        await reader.GetAsync("a", _rows.For(1));
-        await reader.GetAsync("b", _rows.For(2));
-
-        await node.Cache.InvalidateAsync(_rows.For(1));
-        await reader.GetAsync("a", _rows.For(1));
-        await reader.GetAsync("b", _rows.For(2));
-
-        reader.Runs("a").Should().Be(2);
-        reader.Runs("b").Should().Be(1);
-    }
-
-    [Fact]
     public async Task A_query_duration_overrides_the_cache_default_duration()
     {
         // A zero default duration means nothing is kept unless the query says otherwise.

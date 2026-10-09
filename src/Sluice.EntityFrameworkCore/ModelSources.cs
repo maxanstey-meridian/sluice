@@ -48,6 +48,23 @@ internal static class ModelSources
             foreignKey
         );
 
+    /// <summary>
+    /// The dependency on the <paramref name="entityType"/> row whose primary key is <paramref name="key"/>, which
+    /// <c>read.Entity</c> records and <c>set.Dependency</c> returns.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="key"/> isn't of the primary key's CLR type.</exception>
+    /// <exception cref="NotSupportedException">The type isn't mapped to a table, or its primary key is composite.</exception>
+    internal static Dependency EntityDependency(
+        IEntityType entityType,
+        object key,
+        string parameterName
+    )
+    {
+        var source = Entity(entityType);
+        EnsureKeyType(KeyProperty(entityType), key, parameterName);
+        return source.For(key);
+    }
+
     /// <summary>The single-column primary key of <paramref name="entityType"/>, which <see cref="Entity"/> has checked.</summary>
     /// <exception cref="NotSupportedException">The primary key is composite.</exception>
     internal static IProperty KeyProperty(IEntityType entityType) =>

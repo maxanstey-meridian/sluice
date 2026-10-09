@@ -184,7 +184,8 @@ public sealed class CustomerTotal
     public int Orders { get; set; }
 }
 
-public sealed class ActiveCustomer
+/// <summary>Mapped to no table, view, function or SQL query, so the read helpers refuse it.</summary>
+public sealed class Unstored
 {
     public int Id { get; set; }
 }
@@ -351,7 +352,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         Set<Dictionary<string, object>>("CustomerCoupons");
     public DbSet<Supplier> Suppliers => Set<Supplier>();
     public DbSet<CustomerTotal> CustomerTotals => Set<CustomerTotal>();
-    public DbSet<ActiveCustomer> ActiveCustomers => Set<ActiveCustomer>();
+    public DbSet<Unstored> Unstored => Set<Unstored>();
     public DbSet<TopCustomer> TopCustomers => Set<TopCustomer>();
     public DbSet<RecentOrder> RecentOrders => Set<RecentOrder>();
     public DbSet<Promotion> Promotions => Set<Promotion>();
@@ -487,7 +488,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
 
         model.Entity<Supplier>().ToTable("Suppliers").ToView("supplier_names");
         model.Entity<CustomerTotal>().HasNoKey().ToView("customer_totals");
-        model.Entity<ActiveCustomer>().ToView("active_customers");
+        model.Entity<Unstored>().ToTable((string?)null);
         model.Entity<TopCustomer>().ToSqlQuery("select 1 as \"Id\"");
         model.Entity<RecentOrder>().ToFunction("recent_orders");
         model.Entity<Promotion>().UseTpcMappingStrategy();

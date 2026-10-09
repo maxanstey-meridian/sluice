@@ -1,15 +1,19 @@
-namespace Sluice;
+using System.ComponentModel;
+
+namespace Sluice.Infrastructure;
 
 /// <summary>
-/// The ambient "a compute is running" flag: the open <see cref="SluiceReads"/> of the current flow, and the scope of
-/// the fused fetch it's running in, if any.
+/// The ambient "a compute is running" flag: the open <see cref="SluiceReads"/> of the current flow, and whether the
+/// flow is in one of its fused fetches. For Sluice's own packages, which check reads against it; it isn't a supported
+/// API, and may change in any release.
 /// </summary>
-internal static class ActiveCompute
+[EditorBrowsable(EditorBrowsableState.Never)]
+public static class ActiveCompute
 {
     private static readonly AsyncLocal<SluiceReads?> _current = new();
 
-    // The fused fetch running in this flow, if any.
-    private static readonly AsyncLocal<FetchScope?> _fetch = new();
+    // The compute whose fused fetch this flow is in, if any.
+    private static readonly AsyncLocal<SluiceReads?> _fetch = new();
 
     // A closed SluiceReads can linger in a fire-and-forget task's flow; that task is no longer inside a compute.
     internal static SluiceReads? Current
@@ -29,23 +33,23 @@ internal static class ActiveCompute
     /// <remarks>
     /// A fused fetch (<see cref="SluiceReads.From{T}(IEnumerable{Dependency}, Func{CancellationToken, Task{T}})"/>)
     /// is a declared read: the dependencies recorded with it cover whatever it reads. So a check of where a read
-    /// comes from may let it through there; every other check ignores it. The fetch lasts from its call until its task
-    /// completes, in its own flow (see <see cref="Fetch{T}"/>): a task it started that runs on after it (unless a fetch
-    /// it's nested in is still running), the rest of the compute, and a compute started from the fetch's flow are
-    /// outside it. The one internal <c>Sluice.EntityFrameworkCore</c> uses (its strict reads record their violations
-    /// here), which is why that package depends on this exact core version.
+    /// comes from may let it through there; every other check ignores it. The fetch's flow, and the tasks it starts,
+    /// are inside it (see <see cref="Fetch{T}"/>); the rest of the compute, and a compute started from the fetch's
+    /// flow, are outside it.
     /// </remarks>
-    internal static Exception? Violate<TState>(
-        TState state,
-        Func<TState, bool, Exception?> violation
-    )
+    /// <typeparam name="TState">The check's input.</typeparam>
+    /// <param name="state">The check's input, passed to <paramref name="violation"/>.</param>
+    /// <param name="violation">The check: given the state and whether the flow is in a fused fetch.</param>
+    /// <returns>The violation recorded, or null.</returns>
+    public static Exception? Violate<TState>(TState state, Func<TState, bool, Exception?> violation)
     {
+        ArgumentNullException.ThrowIfNull(violation);
         if (Current is not { } reads)
         {
             return null;
         }
 
-        var exception = violation(state, _fetch.Value?.IsOpenFor(reads) == true);
+        var exception = violation(state, _fetch.Value == reads);
         if (exception is not null)
         {
             reads.Violate(exception);
@@ -55,12 +59,10 @@ internal static class ActiveCompute
     }
 
     /// <summary>
-    /// Runs <paramref name="reads"/>' fused fetch as a declared read, in a scope that its flow and the tasks it starts
-    /// inherit, and that ends before the returned task completes. The scope is set inside this async method, so it
-    /// doesn't reach the caller, and a scope opened inside it chains to it, so a task an inner fetch leaves running is
-    /// still inside the outer fetch while that runs. Not covered: a continuation registered on the fetch's own task
-    /// before the fetch returns it can run before the scope ends, and work started under
-    /// <see cref="ExecutionContext.SuppressFlow"/> carries no scope (and no compute).
+    /// Runs <paramref name="reads"/>' fused fetch as a declared read. The flag is set inside this async method, so
+    /// its flow and the tasks it starts inherit it and the caller doesn't: .NET restores the caller's values when the
+    /// method returns. Work started under <see cref="ExecutionContext.SuppressFlow"/> carries no flag (and no
+    /// compute).
     /// </summary>
     internal static async Task<T> Fetch<T>(
         SluiceReads reads,
@@ -68,25 +70,7 @@ internal static class ActiveCompute
         CancellationToken ct
     )
     {
-        var scope = new FetchScope(reads, _fetch.Value);
-        _fetch.Value = scope;
-        try
-        {
-            return await fetch(ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            scope.End();
-        }
-    }
-
-    private sealed class FetchScope(SluiceReads reads, FetchScope? outer)
-    {
-        private volatile bool _ended;
-
-        internal bool IsOpenFor(SluiceReads current) =>
-            (!_ended && current == reads) || outer?.IsOpenFor(current) == true;
-
-        internal void End() => _ended = true;
+        _fetch.Value = reads;
+        return await fetch(ct).ConfigureAwait(false);
     }
 }

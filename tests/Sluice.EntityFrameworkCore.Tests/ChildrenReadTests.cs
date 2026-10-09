@@ -18,23 +18,19 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
 
     private async Task<(int Ada, int Bob)> AddCustomersWithOrdersAndNotes(ShopDb db)
     {
-        var ada = new Customer { Name = "Ada" };
-        var bob = new Customer { Name = "Bob" };
-        db.Customers.AddRange(ada, bob);
-        await db.SaveChangesAsync();
-
+        var (ada, bob) = await db.AddCustomers();
         db.Orders.AddRange(
-            new Order { CustomerId = ada.Id, Item = "Tea" },
-            new Order { CustomerId = ada.Id, Item = "Cake" },
-            new Order { CustomerId = bob.Id, Item = "Coffee" }
+            new Order { CustomerId = ada, Item = "Tea" },
+            new Order { CustomerId = ada, Item = "Cake" },
+            new Order { CustomerId = bob, Item = "Coffee" }
         );
         var adaNote = new Note { Text = "Prefers mornings" };
         var bobNote = new Note { Text = "Ring first" };
         db.Notes.AddRange(adaNote, bobNote);
-        db.Entry(adaNote).Property("CustomerId").CurrentValue = ada.Id;
-        db.Entry(bobNote).Property("CustomerId").CurrentValue = bob.Id;
+        db.Entry(adaNote).Property("CustomerId").CurrentValue = ada;
+        db.Entry(bobNote).Property("CustomerId").CurrentValue = bob;
         await db.SaveChangesAsync();
-        return (ada.Id, bob.Id);
+        return (ada, bob);
     }
 
     [Fact]
@@ -83,12 +79,12 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
         Task ByShadowKey(SluiceReads read, CancellationToken ct) =>
             read.Children(db.Notes, n => EF.Property<int>(n, "CustomerId"), ada).ToListAsync(ct);
 
-        (await Eviction.IsEvictedBy(ByProperty, _ordersByCustomer.For(ada))).Should().BeTrue();
-        (await Eviction.IsEvictedBy(ByProperty, _ordersByCustomer.For(bob))).Should().BeFalse();
-        (await Eviction.IsEvictedBy(ByNavigation, _ordersByCustomer.For(ada))).Should().BeTrue();
-        (await Eviction.IsEvictedBy(ByNavigation, _ordersByCustomer.For(bob))).Should().BeFalse();
-        (await Eviction.IsEvictedBy(ByShadowKey, _notesByCustomer.For(ada))).Should().BeTrue();
-        (await Eviction.IsEvictedBy(ByShadowKey, _notesByCustomer.For(bob))).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(ByProperty, _ordersByCustomer.For(ada))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ByProperty, _ordersByCustomer.For(bob))).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(ByNavigation, _ordersByCustomer.For(ada))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ByNavigation, _ordersByCustomer.For(bob))).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(ByShadowKey, _notesByCustomer.For(ada))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ByShadowKey, _notesByCustomer.For(bob))).Should().BeFalse();
     }
 
     [Fact]
@@ -103,10 +99,10 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
         Task Notes(SluiceReads read, CancellationToken ct) =>
             read.Children(db.Notes, n => EF.Property<int>(n, "CustomerId"), ada).ToListAsync(ct);
 
-        (await Eviction.IsEvictedBy(Orders, db.Orders.AllDependencies())).Should().BeTrue();
-        (await Eviction.IsEvictedBy(Notes, db.Notes.AllDependencies())).Should().BeTrue();
-        (await Eviction.IsEvictedBy(Orders, db.Customers.Dependency(ada))).Should().BeFalse();
-        (await Eviction.IsEvictedBy(Orders, db.Customers.AllDependencies())).Should().BeFalse();
-        (await Eviction.IsEvictedBy(Orders, db.Notes.AllDependencies())).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(Orders, db.Orders.AllDependencies())).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(Notes, db.Notes.AllDependencies())).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(Orders, db.Customers.Dependency(ada))).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(Orders, db.Customers.AllDependencies())).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(Orders, db.Notes.AllDependencies())).Should().BeFalse();
     }
 }

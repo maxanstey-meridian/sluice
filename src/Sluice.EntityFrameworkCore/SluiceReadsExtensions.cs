@@ -19,10 +19,11 @@ namespace Sluice;
 /// must come from a read helper: a plain query, lazy or explicit loading, <c>FromSql</c>, a compiled query or a write
 /// throws <see cref="InvalidOperationException"/> when it runs, and so does a helper's query that runs inside a
 /// transaction. To run any other EF query, run it in the fetch of <c>read.From(dependency, fetch)</c> with a declared
-/// <see cref="Source{TKey}"/>: the fetch is a declared read, so its other queries may run until its task completes,
-/// though not inside a transaction; a helper's query in it is still checked, and a write in it still throws. Reads
-/// that run no SQL aren't checked either: <c>Find</c> of an entity the context already tracks, <c>Local</c>, and
-/// navigations already loaded hand back what the context holds, edits included, so don't use them inside a compute.
+/// <see cref="Source{TKey}"/>: the fetch is a declared read, so its other queries, and those of tasks it starts, may
+/// run while the compute does, though not inside a transaction; a helper's query in it is still checked, and a write
+/// in it still throws. Reads that run no SQL aren't checked either: <c>Find</c> of an entity the context already
+/// tracks, <c>Local</c>, and navigations already loaded hand back what the context holds, edits included, so don't use
+/// them inside a compute.
 /// </para>
 /// <para>
 /// A helper's query may be filtered, ordered, paged and projected. One that reads anything beyond its own rows throws
@@ -30,11 +31,10 @@ namespace Sluice;
 /// another set or a <c>SqlQuery</c>, a navigation (<c>Include</c>, <c>o.Customer.Name</c>, <c>c.Orders.Count</c>,
 /// many-to-many navigations, through a cast or an interface too), a database function you mapped, or a query filter
 /// that does any of those or reads the context's state (a tenant filter); <c>IgnoreQueryFilters()</c> leaves the
-/// filters out. So does one that calls <c>AsTracking()</c>, <c>ExecuteUpdate</c> or <c>ExecuteDelete</c>, or that
-/// returns entities that load lazily or hold their context (or own a value that does). Owned types and JSON columns
-/// are part of their owner's row, so they're fine, and auto-included navigations aren't loaded. Read related rows
-/// with their own helper call. The call that ran the compute throws the violation, and caches nothing, even if the
-/// compute catches it.
+/// filters out. So does one that calls <c>AsTracking()</c>, or that returns entities that load lazily or hold their
+/// context (or own a value that does). Owned types and JSON columns are part of their owner's row, so they're fine,
+/// and auto-included navigations aren't loaded. Read related rows with their own helper call. The call that ran the
+/// compute throws the violation, and caches nothing, even if the compute catches it.
 /// </para>
 /// </remarks>
 public static class SluiceReadsExtensions
@@ -68,13 +68,11 @@ public static class SluiceReadsExtensions
         ArgumentNullException.ThrowIfNull(set);
         ArgumentNullException.ThrowIfNull(key);
 
-        var source = ModelSources.Entity(set.EntityType);
-        var property = ModelSources.KeyProperty(set.EntityType);
-        ModelSources.EnsureKeyType(property, key, nameof(key));
+        var dependency = ModelSources.EntityDependency(set.EntityType, key, nameof(key));
         var query = StrictReads.Query(set);
 
-        read.From(source.For(key));
-        return WhereEquals(query, property, key);
+        read.From(dependency);
+        return WhereEquals(query, ModelSources.KeyProperty(set.EntityType), key);
     }
 
     /// <summary>

@@ -83,8 +83,14 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             .Should()
             .ThrowAsync<ArgumentException>()
             .WithMessage("*single-column foreign key*");
-        await primaryKey.Should().ThrowAsync<ArgumentException>();
-        await memberOfNavigation.Should().ThrowAsync<ArgumentException>();
+        await primaryKey
+            .Should()
+            .ThrowAsync<ArgumentException>()
+            .WithMessage("*single-column foreign key*");
+        await memberOfNavigation
+            .Should()
+            .ThrowAsync<ArgumentException>()
+            .WithMessage("*single-column foreign key*");
     }
 
     [Fact]
@@ -233,8 +239,10 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
 
         var keylessView = () =>
             CachedRead.Of(node.Cache, (r, ct) => r.All(db.CustomerTotals).ToListAsync(ct));
-        var view = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.ActiveCustomers, 1).ToListAsync(ct));
+        var tableReadThroughAView = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Suppliers, 1).ToListAsync(ct));
+        var noTable = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Unstored, 1).ToListAsync(ct));
         var sqlQuery = () =>
             CachedRead.Of(node.Cache, (r, ct) => r.All(db.TopCustomers).ToListAsync(ct));
         var function = () =>
@@ -243,9 +251,14 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             CachedRead.Of(node.Cache, (r, ct) => r.All(db.Promotions).ToListAsync(ct));
 
         await keylessView.Should().ThrowAsync<NotSupportedException>().WithMessage("*keyless*");
-        await view.Should()
+        await tableReadThroughAView
+            .Should()
             .ThrowAsync<NotSupportedException>()
-            .WithMessage("*view 'active_customers'*");
+            .WithMessage("*view 'supplier_names'*");
+        await noTable
+            .Should()
+            .ThrowAsync<NotSupportedException>()
+            .WithMessage("Unstored isn't mapped to a table*");
         await sqlQuery.Should().ThrowAsync<NotSupportedException>().WithMessage("*SQL query*");
         await function
             .Should()
@@ -260,10 +273,8 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         db.Invoking(d => d.CustomerTotals.AllDependencies())
             .Should()
             .Throw<NotSupportedException>();
-        db.Invoking(d => d.ActiveCustomers.Dependency(1)).Should().Throw<NotSupportedException>();
-        db.Invoking(d => d.ActiveCustomers.AllDependencies())
-            .Should()
-            .Throw<NotSupportedException>();
+        db.Invoking(d => d.Suppliers.Dependency(1)).Should().Throw<NotSupportedException>();
+        db.Invoking(d => d.Suppliers.AllDependencies()).Should().Throw<NotSupportedException>();
         db.Invoking(d => d.Promotions.AllDependencies()).Should().Throw<NotSupportedException>();
     }
 }

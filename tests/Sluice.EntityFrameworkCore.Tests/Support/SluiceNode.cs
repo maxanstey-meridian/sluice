@@ -11,12 +11,16 @@ public sealed class SluiceNode : IAsyncDisposable
 {
     private readonly ServiceProvider _provider;
 
-    public SluiceNode(Action<IFusionCacheBuilder>? configure = null)
+    /// <param name="configure">The app's FusionCache configuration, passed to <c>AddSluice</c>.</param>
+    /// <param name="services">The app's other registrations, such as a pooled context.</param>
+    public SluiceNode(
+        Action<IFusionCacheBuilder>? configure = null,
+        Action<IServiceCollection>? services = null
+    )
     {
-        _provider = new ServiceCollection()
-            .AddFakeLogging()
-            .AddSluice(configure)
-            .BuildServiceProvider();
+        var collection = new ServiceCollection().AddFakeLogging().AddSluice(configure);
+        services?.Invoke(collection);
+        _provider = collection.BuildServiceProvider();
         Cache = _provider.GetRequiredService<SluiceCache>();
     }
 

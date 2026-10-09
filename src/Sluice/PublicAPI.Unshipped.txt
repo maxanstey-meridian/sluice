@@ -1,5 +1,6 @@
 #nullable enable
 Sluice.Dependency
+Sluice.Infrastructure.ActiveCompute
 Sluice.Query<TKey, TValue>
 Sluice.Query<TKey, TValue>.Duration.get -> System.TimeSpan?
 Sluice.Query<TKey, TValue>.Duration.init -> void
@@ -22,3 +23,4 @@ Sluice.Source<TKey>.For(TKey key) -> Sluice.Dependency!
 Sluice.Source<TKey>.Source(string! name) -> void
 Sluice.Source<TKey>.Source(string! name, System.Func<TKey, string!>! format) -> void
 static Sluice.SluiceServiceCollectionExtensions.AddSluice(this Microsoft.Extensions.DependencyInjection.IServiceCollection! services, System.Action<ZiggyCreatures.Caching.Fusion.IFusionCacheBuilder!>? configure = null) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
+static Sluice.Infrastructure.ActiveCompute.Violate<TState>(TState state, System.Func<TState, bool, System.Exception?>! violation) -> System.Exception?

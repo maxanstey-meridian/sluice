@@ -1,4 +1,5 @@
 using System.Runtime.ExceptionServices;
+using Sluice.Infrastructure;
 
 namespace Sluice;
 
@@ -36,10 +37,10 @@ public sealed class SluiceReads
     /// Safe to call from concurrent tasks inside one compute.
     /// </summary>
     /// <remarks>
-    /// The fetch is a declared read: the dependencies cover whatever it reads, so the EF package's strict reads let it
-    /// run plain EF queries until its task completes; a task it leaves running is outside it after that. Sluice's
-    /// other guards still apply inside it: calling <see cref="SluiceCache.GetOrSetAsync"/> from it throws, and the EF
-    /// package still checks its read helpers' queries.
+    /// The fetch is a declared read: the dependencies cover whatever it reads, so the EF package's strict reads let it,
+    /// and the tasks it starts, run plain EF queries while the compute runs. Sluice's other guards still apply inside
+    /// it: calling <see cref="SluiceCache.GetOrSetAsync"/> from it throws, and the EF package still checks its read
+    /// helpers' queries.
     /// </remarks>
     /// <exception cref="ArgumentException">
     /// <paramref name="dependencies"/> is empty, or holds a null; the fetch doesn't run.

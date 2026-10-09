@@ -31,9 +31,7 @@ public static class DbSetDependencyExtensions
         ArgumentNullException.ThrowIfNull(set);
         ArgumentNullException.ThrowIfNull(key);
 
-        var source = ModelSources.Entity(set.EntityType);
-        ModelSources.EnsureKeyType(ModelSources.KeyProperty(set.EntityType), key, nameof(key));
-        return source.For(key);
+        return ModelSources.EntityDependency(set.EntityType, key, nameof(key));
     }
 
     /// <summary>

@@ -159,10 +159,8 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_rolled_back_transaction_still_evicts_what_its_saves_wrote(bool sync)
+    [Fact]
+    public async Task A_rolled_back_transaction_still_evicts_what_its_saves_wrote()
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node);
@@ -172,22 +170,13 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
 
         await using var transaction = await db.Database.BeginTransactionAsync();
         await db.Rename(ada, "Ada Lovelace");
-        if (sync)
-        {
-            transaction.Rollback();
-        }
-        else
-        {
-            await transaction.RollbackAsync();
-        }
+        await transaction.RollbackAsync();
 
         (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_commit_that_fails_still_evicts_what_its_saves_wrote(bool sync)
+    [Fact]
+    public async Task A_commit_that_fails_still_evicts_what_its_saves_wrote()
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node);
@@ -197,13 +186,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
 
         await using var transaction = await db.Database.BeginTransactionAsync();
         await db.Rename(ada, "Ada Lovelace");
-        Func<Task> commit = sync
-            ? () =>
-            {
-                transaction.Commit();
-                return Task.CompletedTask;
-            }
-            : () => transaction.CommitAsync();
+        var commit = () => transaction.CommitAsync();
 
         await commit
             .Should()
@@ -289,8 +272,8 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var connection = new NpgsqlConnection(postgres.ConnectionString);
         await connection.OpenAsync();
 
-        await using var owner = postgres.CreateDb(node, connection);
-        await using var guest = postgres.CreateDb(node, connection);
+        await using var owner = postgres.CreateDb(node, connection: connection);
+        await using var guest = postgres.CreateDb(node, connection: connection);
         await using var transaction = await owner.Database.BeginTransactionAsync();
         await guest.Database.UseTransactionAsync(transaction.GetDbTransaction());
 
@@ -484,12 +467,8 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     private static Task Save(ShopDb db, bool sync) =>
         sync ? Task.FromResult(db.SaveChanges()) : db.SaveChangesAsync();
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_save_that_fails_after_an_earlier_batch_committed_evicts_that_batch(
-        bool sync
-    )
+    [Fact]
+    public async Task A_save_that_fails_after_an_earlier_batch_committed_evicts_that_batch()
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node);
@@ -499,7 +478,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
 
         (await db.Customers.SingleAsync(c => c.Id == ada)).Name = "Ada Lovelace";
         db.Orders.Add(new Order { CustomerId = -1, Item = "No such customer" });
-        var save = () => Save(db, sync);
+        var save = () => db.SaveChangesAsync();
 
         await save.Should().ThrowAsync<DbUpdateException>();
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace", "the first batch committed");

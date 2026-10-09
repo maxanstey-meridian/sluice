@@ -28,6 +28,22 @@ public sealed class CachedRead
         return cached;
     }
 
+    /// <summary>
+    /// Caches a value whose compute runs <paramref name="read"/>, invalidates <paramref name="invalidation"/>, and
+    /// reports whether the value was evicted. Each probe uses a fresh node, so no earlier invalidation can make the
+    /// answer true by accident.
+    /// </summary>
+    public static async Task<bool> IsEvictedBy(
+        Func<SluiceReads, CancellationToken, Task> read,
+        params IEnumerable<Dependency> invalidation
+    )
+    {
+        await using var node = new SluiceNode();
+        var cached = await Of(node.Cache, read);
+        await node.Cache.InvalidateAsync(invalidation);
+        return await cached.WasEvicted();
+    }
+
     /// <summary>A cached read of customer <paramref name="id"/> through <paramref name="reader"/>.</summary>
     public static Task<CachedRead> Customer(SluiceCache cache, ShopDb reader, int id) =>
         Of(cache, (read, ct) => read.Entity(reader.Customers, id).SingleOrDefaultAsync(ct));

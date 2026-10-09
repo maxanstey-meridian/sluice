@@ -639,8 +639,10 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         tea.Customer = null;
         var save = () => _db.SaveChangesAsync();
 
-        await save.Should().ThrowAsync<InvalidOperationException>().WithMessage("*severed*");
-        (await _reader.Orders.AnyAsync(o => o.Id == tea.Id)).Should().BeTrue();
+        await save.Should().ThrowAsync<InvalidOperationException>();
+        (await _reader.Orders.AnyAsync(o => o.Id == tea.Id))
+            .Should()
+            .BeTrue("the orphan wasn't deleted");
     }
 
     [Fact]

@@ -21,19 +21,4 @@
         <AdditionalFiles Include="PublicAPI.Shipped.txt" />
         <AdditionalFiles Include="PublicAPI.Unshipped.txt" />
     </ItemGroup>
-
-    <!--
-        This package uses an internal of Sluice (InternalsVisibleTo), so it must ship against the exact core version
-        it was built with: a mismatch fails at runtime with MissingMethodException. NuGet packs a ProjectReference as
-        ">= version" and offers no metadata to change that, so wrap the version it reads from the core in [ ].
-    -->
-    <Target Name="PinSluiceCoreVersion" AfterTargets="_GetProjectReferenceVersions">
-        <ItemGroup>
-            <_ProjectReferencesWithVersions
-                Update="@(_ProjectReferencesWithVersions)"
-                Condition="'%(Filename)' == 'Sluice'"
-                ProjectVersion="[%(ProjectVersion)]"
-            />
-        </ItemGroup>
-    </Target>
 </Project>

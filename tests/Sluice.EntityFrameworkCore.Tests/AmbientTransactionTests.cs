@@ -95,8 +95,8 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
         {
             await connection.OpenAsync();
-            await using var first = postgres.CreateDb(node, connection);
-            await using var second = postgres.CreateDb(node, connection);
+            await using var first = postgres.CreateDb(node, connection: connection);
+            await using var second = postgres.CreateDb(node, connection: connection);
             await first.Rename(ada, "Ada Lovelace");
             await second.Rename(bob, "Bob Babbage");
             completed = Completion.Of(Transaction.Current!);

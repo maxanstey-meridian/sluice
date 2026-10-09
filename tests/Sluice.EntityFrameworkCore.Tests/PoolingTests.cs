@@ -26,25 +26,26 @@ public sealed class PoolingTests(PostgresFixture postgres)
         Registration registration
     )
     {
-        var services = new ServiceCollection().AddFakeLogging().AddSluice();
         void Configure(IServiceProvider sp, DbContextOptionsBuilder options) =>
             options.UseNpgsql(postgres.ConnectionString).UseSluice(sp);
-        switch (registration)
+        await using var node = new SluiceNode(services: services =>
         {
-            case Registration.DbContextPool:
-                services.AddDbContextPool<ShopDb>(Configure, poolSize: 1);
-                break;
-            case Registration.PooledDbContextFactory:
-                services.AddPooledDbContextFactory<ShopDb>(Configure, poolSize: 1);
-                break;
-            case Registration.DbContextFactory:
-                services.AddDbContextFactory<ShopDb>(Configure);
-                break;
-        }
-
-        await using var provider = services.BuildServiceProvider();
-        var cache = provider.GetRequiredService<SluiceCache>();
-        await using var reader = postgres.CreateDb(provider);
+            switch (registration)
+            {
+                case Registration.DbContextPool:
+                    services.AddDbContextPool<ShopDb>(Configure, poolSize: 1);
+                    break;
+                case Registration.PooledDbContextFactory:
+                    services.AddPooledDbContextFactory<ShopDb>(Configure, poolSize: 1);
+                    break;
+                case Registration.DbContextFactory:
+                    services.AddDbContextFactory<ShopDb>(Configure);
+                    break;
+            }
+        });
+        var provider = node.Services;
+        var cache = node.Cache;
+        await using var reader = postgres.CreateDb(node);
         var (ada, bob) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(cache, reader, ada);
         var bobRead = await CachedRead.Customer(cache, reader, bob);

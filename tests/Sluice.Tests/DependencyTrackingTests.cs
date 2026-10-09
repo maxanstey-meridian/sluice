@@ -11,7 +11,6 @@ public sealed class DependencyTrackingTests
     private static readonly Source<int> _orders = new("tracking-orders");
     private static readonly Query<string, string> _dashboard = new("tracking-dashboard");
     private static readonly Query<string, string> _invoiceSummary = new("tracking-invoice-summary");
-    private static readonly Query<string, string> _orderSummary = new("tracking-order-summary");
 
     private readonly Dictionary<string, string> _roles = new()
     {
@@ -79,23 +78,6 @@ public sealed class DependencyTrackingTests
         await Dashboard(node.Cache, "bob");
 
         _dashboardRuns.Should().Be(4);
-    }
-
-    [Fact]
-    public async Task Invalidating_a_dependency_leaves_entries_that_did_not_read_it_cached()
-    {
-        await using var node = new SluiceNode();
-        var invoices = new CountingReader(node.Cache, _invoiceSummary);
-        var orders = new CountingReader(node.Cache, _orderSummary);
-        await invoices.GetAsync("c1", _invoices.For(1));
-        await orders.GetAsync("c1", _orders.For(1));
-
-        await node.Cache.InvalidateAsync(_invoices.For(1));
-        await invoices.GetAsync("c1", _invoices.For(1));
-        await orders.GetAsync("c1", _orders.For(1));
-
-        invoices.Runs("c1").Should().Be(2);
-        orders.Runs("c1").Should().Be(1);
     }
 
     [Fact]

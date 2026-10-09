@@ -22,8 +22,8 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             read.Entity(db.Prices, 1m).SingleAsync(ct);
 
         (await node.Cache.GetOrSetAsync(_price, 1m, ReadOne)).Label.Should().Be("one");
-        (await Eviction.IsEvictedBy(ReadOne, db.Prices.Dependency(1.00m))).Should().BeTrue();
-        (await Eviction.IsEvictedBy(ReadOne, db.Prices.Dependency(1.01m))).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(ReadOne, db.Prices.Dependency(1.00m))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ReadOne, db.Prices.Dependency(1.01m))).Should().BeFalse();
     }
 
     [Fact]
@@ -38,8 +38,8 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             read.Entity(db.Tags, "WIDGET").SingleAsync(ct);
 
         (await node.Cache.GetOrSetAsync(_tag, "WIDGET", ReadWidget)).Name.Should().Be("Widget");
-        (await Eviction.IsEvictedBy(ReadWidget, db.Tags.Dependency("widget"))).Should().BeTrue();
-        (await Eviction.IsEvictedBy(ReadWidget, db.Tags.Dependency("gadget"))).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(ReadWidget, db.Tags.Dependency("widget"))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ReadWidget, db.Tags.Dependency("gadget"))).Should().BeFalse();
     }
 
     [Fact]
@@ -54,10 +54,10 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             read.Entity(db.Products, new Sku("TEA-1")).SingleAsync(ct);
 
         (await node.Cache.GetOrSetAsync(_product, "TEA-1", ReadTea)).Name.Should().Be("Tea");
-        (await Eviction.IsEvictedBy(ReadTea, db.Products.Dependency(new Sku("tea-1"))))
+        (await CachedRead.IsEvictedBy(ReadTea, db.Products.Dependency(new Sku("tea-1"))))
             .Should()
             .BeTrue();
-        (await Eviction.IsEvictedBy(ReadTea, db.Products.Dependency(new Sku("tea-2"))))
+        (await CachedRead.IsEvictedBy(ReadTea, db.Products.Dependency(new Sku("tea-2"))))
             .Should()
             .BeFalse();
     }
