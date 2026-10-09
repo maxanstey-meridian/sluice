@@ -90,13 +90,26 @@ cache rows other callers can't see yet, which may roll back, or an old snapshot 
 behind, the invalidation could arrive before the replica catches up, and the old value would be
 cached as new.
 
-Inside a compute, an EF read helper's query that runs inside a transaction (the context's EF
-transaction, an enlisted one or an ambient one) throws `InvalidOperationException`, and so does
-a plain query in a fused fetch. Compute the value outside the transaction, or after it commits.
-Outside a compute the helpers run normally, since nothing is cached.
+So a compute runs outside your ambient transaction. If you call `GetOrSetAsync` inside a
+`TransactionScope`, Sluice suppresses the scope while the compute runs, and you get it back
+when the compute ends. A connection the compute opens, `read.Db`'s or your own for Dapper,
+doesn't join (enlist in) your transaction, so it reads what's committed.
 
-The generic path can't check this: don't call `GetOrSetAsync` inside your own open
-transaction. Nothing checks for replicas: point computes at the primary.
+Every EF query on `read.Db`'s context is checked, and two cases still throw
+`InvalidOperationException` inside a compute:
+
+- **A transaction opened inside the compute that `read.Db`'s context runs in**: its own
+  `BeginTransaction`, or a `TransactionScope` the compute opens itself.
+- **A query in a fused fetch on a context that's already in a transaction**, such as your
+  request's context halfway through one.
+
+Compute the value outside the transaction, or after it commits.
+
+What isn't checked: a connection that was already open, or a `DbTransaction`, captured from
+outside the compute and used through raw ADO.NET or Dapper. Suppressing the scope doesn't take
+an open connection out of its transaction, so the compute would read that transaction's
+uncommitted rows. Open a fresh connection inside the compute instead. Nothing checks for
+replicas either: point computes at the primary.
 
 ## What's not covered
 

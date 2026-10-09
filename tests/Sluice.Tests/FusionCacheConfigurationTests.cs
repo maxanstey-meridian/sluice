@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Sluice.Tests.Support;
 using ZiggyCreatures.Caching.Fusion;
@@ -383,5 +384,18 @@ public sealed class FusionCacheConfigurationTests
 
         (await other.TryGetAsync<string>("tagged")).GetValueOrDefault().Should().Be("kept");
         (await other.TryGetAsync<string>("plain")).GetValueOrDefault().Should().Be("kept");
+    }
+
+    [Fact]
+    public void Registering_Sluice_twice_throws()
+    {
+        var services = new ServiceCollection().AddSluice();
+
+        var again = () => services.AddSluice();
+
+        again
+            .Should()
+            .Throw<InvalidOperationException>()
+            .WithMessage("*AddSluice was called more than once*");
     }
 }

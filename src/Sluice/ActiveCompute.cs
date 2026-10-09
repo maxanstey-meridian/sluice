@@ -15,18 +15,16 @@ public static class ActiveCompute
     // The compute whose fused fetch this flow is in, if any.
     private static readonly AsyncLocal<SluiceReads?> _fetch = new();
 
-    // A closed SluiceReads can linger in a fire-and-forget task's flow; that task is no longer inside a compute.
-    internal static SluiceReads? Current
-    {
-        get => _current.Value is { IsOpen: true } reads ? reads : null;
-        set => _current.Value = value;
-    }
-
     /// <summary>
     /// The reads of the compute running in the current flow, or null outside one. A check on a hot path reads this
     /// first, so it costs one lookup outside a compute.
     /// </summary>
-    public static SluiceReads? Reads => Current;
+    public static SluiceReads? Reads
+    {
+        // A closed SluiceReads can linger in a fire-and-forget task's flow; that task is no longer inside a compute.
+        get => _current.Value is { IsOpen: true } reads ? reads : null;
+        internal set => _current.Value = value;
+    }
 
     /// <summary>
     /// Whether the current flow is in a fused fetch of <paramref name="reads"/>' compute
@@ -37,7 +35,11 @@ public static class ActiveCompute
     /// are outside it.
     /// </summary>
     /// <param name="reads">The compute's reads.</param>
-    public static bool InFetch(SluiceReads reads) => _fetch.Value == reads;
+    public static bool InFetch(SluiceReads reads)
+    {
+        ArgumentNullException.ThrowIfNull(reads);
+        return _fetch.Value == reads;
+    }
 
     /// <summary>The name of the query <paramref name="reads"/>' compute is computing, for messages.</summary>
     /// <param name="reads">The compute's reads.</param>
@@ -78,12 +80,16 @@ public static class ActiveCompute
         return reads.Hold(create);
     }
 
-    /// <summary>Whether <paramref name="reads"/>' compute holds <paramref name="resource"/>.</summary>
+    /// <summary>
+    /// Whether <paramref name="reads"/>' compute holds this very instance of <paramref name="resource"/> (compared by
+    /// reference, so an equal one doesn't count).
+    /// </summary>
     /// <param name="reads">The compute's reads.</param>
     /// <param name="resource">The resource.</param>
-    public static bool Holds(SluiceReads reads, object resource)
+    public static bool Holds(SluiceReads reads, IAsyncDisposable resource)
     {
         ArgumentNullException.ThrowIfNull(reads);
+        ArgumentNullException.ThrowIfNull(resource);
         return reads.Holds(resource);
     }
 

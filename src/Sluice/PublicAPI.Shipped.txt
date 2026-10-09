@@ -1,1 +1,26 @@
 #nullable enable
+Sluice.Dependency
+Sluice.Infrastructure.ActiveCompute
+Sluice.Query<TKey, TValue>
+Sluice.Query<TKey, TValue>.Duration.get -> System.TimeSpan?
+Sluice.Query<TKey, TValue>.Duration.init -> void
+Sluice.Query<TKey, TValue>.Query(string! name) -> void
+Sluice.Query<TKey, TValue>.Query(string! name, System.Func<TKey, string!>! format) -> void
+Sluice.SluiceCache
+Sluice.SluiceCache.ClearAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+Sluice.SluiceCache.GetOrSetAsync<TKey, TValue>(Sluice.Query<TKey, TValue>! query, TKey key, System.Func<Sluice.SluiceReads!, System.Threading.CancellationToken, System.Threading.Tasks.Task<TValue>!>! compute, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TValue>
+Sluice.SluiceCache.Invalidate(params System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> void
+Sluice.SluiceCache.InvalidateAsync(Sluice.Dependency! dependency) -> System.Threading.Tasks.ValueTask
+Sluice.SluiceCache.InvalidateAsync(System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> System.Threading.Tasks.ValueTask
+Sluice.SluiceReads
+Sluice.SluiceReads.From(params System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> void
+Sluice.SluiceReads.From<T>(Sluice.Dependency! dependency, System.Func<System.Threading.CancellationToken, System.Threading.Tasks.Task<T>!>! fetch) -> System.Threading.Tasks.Task<T>!
+Sluice.SluiceReads.From<T>(System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies, System.Func<System.Threading.CancellationToken, System.Threading.Tasks.Task<T>!>! fetch) -> System.Threading.Tasks.Task<T>!
+Sluice.SluiceServiceCollectionExtensions
+Sluice.Source<TKey>
+Sluice.Source<TKey>.All.get -> Sluice.Dependency!
+Sluice.Source<TKey>.For(TKey key) -> Sluice.Dependency!
+Sluice.Source<TKey>.Source(string! name) -> void
+Sluice.Source<TKey>.Source(string! name, System.Func<TKey, string!>! format) -> void
+static Sluice.SluiceServiceCollectionExtensions.AddSluice(this Microsoft.Extensions.DependencyInjection.IServiceCollection! services, System.Action<ZiggyCreatures.Caching.Fusion.IFusionCacheBuilder!>? configure = null) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
+static Sluice.Infrastructure.ActiveCompute.Violate<TState>(TState state, System.Func<TState, bool, System.Exception?>! violation) -> System.Exception?

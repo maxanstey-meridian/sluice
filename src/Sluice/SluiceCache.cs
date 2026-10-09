@@ -207,7 +207,7 @@ public sealed class SluiceCache
     // fused fetch too, so this ignores whether the call is in one.
     private static void ThrowIfNested(string queryName)
     {
-        if (ActiveCompute.Current is { } outer)
+        if (ActiveCompute.Reads is { } outer)
         {
             throw ActiveCompute.Violate(
                 outer,
@@ -226,7 +226,7 @@ public sealed class SluiceCache
         CancellationToken ct
     )
     {
-        ActiveCompute.Current = reads;
+        ActiveCompute.Reads = reads;
 
         TValue value = default!;
         string[] tags;

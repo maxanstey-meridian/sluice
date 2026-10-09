@@ -100,7 +100,7 @@ internal static class ModelSources
             .Where(entityType =>
                 entityType.FindPrimaryKey() is not null
                 && entityType.GetTableName() is { } table
-                && sql.Contains(quote.DelimitIdentifier(table), StringComparison.Ordinal)
+                && Names(sql, quote.DelimitIdentifier(table))
             )
             .Select(Unowned)
             .Select(entityType => entityType.GetRootType())
@@ -108,33 +108,25 @@ internal static class ModelSources
     }
 
     /// <summary>
-    /// What an update of <paramref name="entityType"/> rows may change: the whole type, and every foreign key it (or
-    /// a derived type) declares, since an update may move rows between parents.
+    /// What an update of <paramref name="entityType"/> rows may change: the whole type, and every foreign key a row of
+    /// it may have, since an update may move rows between parents. Unchecked, like <see cref="WrittenEntity"/>.
     /// </summary>
-    /// <exception cref="NotSupportedException">The type isn't mapped to a table.</exception>
     internal static IEnumerable<Dependency> UpdateDependencies(IEntityType entityType) =>
         [
-            Entity(entityType).All,
-            .. entityType
-                .GetForeignKeys()
-                .Concat(entityType.GetDerivedForeignKeys())
-                .Select(foreignKey => ForeignKey(foreignKey).All),
+            WrittenEntity(entityType).All,
+            .. RowForeignKeys(entityType).Select(foreignKey => ForeignKey(foreignKey).All),
         ];
 
     /// <summary>
-    /// Every dependency on <paramref name="entityType"/>: the whole type, and every foreign key it (or a derived type)
-    /// declares or that points at it, so every read of it is evicted. Also the same for every type the model lets the
-    /// database delete or set to null when its rows are deleted.
+    /// Every dependency on <paramref name="entityType"/>: its <see cref="UpdateDependencies"/>, and every foreign key
+    /// that points at it and lets the database act on its rows, so every read of it is evicted. Also the same for
+    /// every type the model lets the database delete or set to null when its rows are deleted. Unchecked, like
+    /// <see cref="WrittenEntity"/>.
     /// </summary>
-    /// <exception cref="NotSupportedException">The type isn't mapped to a table.</exception>
     internal static IEnumerable<Dependency> AllDependencies(IEntityType entityType) =>
         [
-            Entity(entityType).All,
-            .. entityType
-                .GetForeignKeys()
-                .Concat(entityType.GetDerivedForeignKeys())
-                .Concat(CascadingForeignKeys(entityType))
-                .Select(foreignKey => ForeignKey(foreignKey).All),
+            .. UpdateDependencies(entityType),
+            .. CascadingForeignKeys(entityType).Select(foreignKey => ForeignKey(foreignKey).All),
             .. Cascades(entityType),
         ];
 
@@ -254,25 +246,29 @@ internal static class ModelSources
     }
 
     /// <summary>
-    /// Why the type's rows aren't all in tables, if they aren't. An abstract type with no table of its own (the root of
-    /// a TPC hierarchy) has no rows but those of its concrete types, so it's mapped when each of them is.
+    /// Why the type's rows aren't all in tables, if they aren't: its own, or those of a concrete derived type, which a
+    /// query of the type returns too. An abstract type has no rows of its own, so it needs no table of its own (the
+    /// root of a TPC hierarchy).
     /// </summary>
     internal static string? Unmapped(IEntityType entityType) =>
-        entityType.FindPrimaryKey() is null ? "is keyless"
-        : entityType.GetViewName() is { } view ? $"is mapped to the view '{view}'"
-        : entityType.GetFunctionName() is { } function ? $"is mapped to the function '{function}'"
-        : entityType.GetSqlQuery() is not null ? "is mapped to a SQL query"
-        : entityType.GetTableName() is not null ? null
-        : !entityType.IsAbstract() ? "isn't mapped to a table"
-        : entityType
+        UnmappedRows(entityType)
+        ?? entityType
             .GetDerivedTypes()
             .Where(derived => !derived.IsAbstract())
             .Select(derived =>
-                Unmapped(derived) is { } reason
+                UnmappedRows(derived) is { } reason
                     ? $"has the derived type {derived.DisplayName()}, which {reason}"
                     : null
             )
             .FirstOrDefault(reason => reason is not null);
+
+    private static string? UnmappedRows(IEntityType entityType) =>
+        entityType.FindPrimaryKey() is null ? "is keyless"
+        : entityType.GetViewName() is { } view ? $"is mapped to the view '{view}'"
+        : entityType.GetFunctionName() is { } function ? $"is mapped to the function '{function}'"
+        : entityType.GetSqlQuery() is not null ? "is mapped to a SQL query"
+        : entityType.GetTableName() is not null || entityType.IsAbstract() ? null
+        : "isn't mapped to a table";
 
     // A walk of the model from the deleted type, through each cascade once, so a self-reference or a loop ends. A row
     // the database deletes leaves every parent it had and takes its own dependents with it; one it sets to null keeps
@@ -300,9 +296,7 @@ internal static class ModelSources
 
                 // A deleted or nulled row changes in every list it's in, whichever parent the list is under.
                 dependencies.AddRange(
-                    dependent
-                        .GetForeignKeys()
-                        .Concat(dependent.GetDerivedForeignKeys())
+                    RowForeignKeys(dependent)
                         .Where(other => other != foreignKey)
                         .Select(other => ForeignKey(other).All)
                 );
@@ -315,6 +309,44 @@ internal static class ModelSources
 
         return [.. dependencies];
     }
+
+    // Every foreign key a row of the type may have: its own and its base types', and its derived types'.
+    private static IEnumerable<IForeignKey> RowForeignKeys(IEntityType entityType) =>
+        entityType.GetForeignKeys().Concat(entityType.GetDerivedForeignKeys());
+
+    /// <summary>
+    /// Whether <paramref name="sql"/> names <paramref name="identifier"/>, as the provider delimits it. One left unquoted
+    /// (Npgsql leaves a lowercase name bare) must stand alone, not be part of a longer identifier: <c>user</c> in
+    /// <c>users</c> or <c>user_id</c> isn't it. A quoted one carries its own delimiters.
+    /// </summary>
+    internal static bool Names(string sql, string identifier)
+    {
+        if (!IsIdentifierChar(identifier[0]))
+        {
+            return sql.Contains(identifier, StringComparison.Ordinal);
+        }
+
+        for (
+            var at = sql.IndexOf(identifier, StringComparison.Ordinal);
+            at >= 0;
+            at = sql.IndexOf(identifier, at + 1, StringComparison.Ordinal)
+        )
+        {
+            var end = at + identifier.Length;
+            if (
+                (at == 0 || !IsIdentifierChar(sql[at - 1]))
+                && (end == sql.Length || !IsIdentifierChar(sql[end]))
+            )
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A character an unquoted SQL identifier can hold.
+    private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '$';
 
     /// <summary>The entity whose rows <paramref name="entityType"/> is stored with: itself, unless it's owned.</summary>
     internal static IEntityType Unowned(IEntityType entityType) =>

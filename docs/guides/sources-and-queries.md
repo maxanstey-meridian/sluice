@@ -1,8 +1,9 @@
 # Sources and Queries
 
 Sluice has two kinds of declaration. A `Source<TKey>` is something a cached value can depend
-on. A `Query<TKey, TValue>` is something cached. Both are declared once, usually as
-`static readonly` fields next to each other, and shared by every reader and writer.
+on. A `Query<TKey, TValue>` is something cached, or a `Query<TValue>` when it has no key. Both
+are declared once, usually as `static readonly` fields next to each other, and shared by every
+reader and writer.
 
 ```csharp
 public sealed record InvoiceId(string Value);
@@ -70,14 +71,37 @@ A query has a name, a key type and a value type:
   rename it.
 
 Query names can't be blank, contain `:` or start with `__fc` (FusionCache keeps its own data
-there). Declaring the same name twice with different key or value types throws
-`ArgumentException`, because the two would share cache entries: with Redis, one could read the
-other's value as the wrong type, with no error. Declaring the same name with the same types
-again is allowed. Sluice can't catch a clash between processes, or between same-typed copies
-with a different `format`.
+there). Declaring the same name twice with different key or value types, or once with a key and
+once without, throws `ArgumentException`, because the two would share cache entries: with
+Redis, one could read the other's value as the wrong type, with no error. Declaring the same
+name with the same types again is allowed. Sluice can't catch a clash between processes, or
+between same-typed copies with a different `format`.
 
-There's no keyless query. A value that seems global is usually per tenant or per locale, so key
-it by that.
+### Queries with no key
+
+A value with only one entry, such as a list of every plan, is a `Query<TValue>`. Its cache key
+is its name, and its call takes no key:
+
+```csharp
+// Each plan, keyed by its code.
+public static readonly Source<string> Plans = new("plan");
+
+// The list of every plan: one entry, shared by every caller.
+public static readonly Query<IReadOnlyList<Plan>> AllPlans = new("all-plans");
+
+public ValueTask<IReadOnlyList<Plan>> GetPlans(CancellationToken ct) =>
+    cache.GetOrSetAsync(
+        AllPlans,
+        async Task<IReadOnlyList<Plan>> (read, ct) =>
+            await read.From(Plans.All, ct => catalog.ListPlansAsync(ct)),
+        ct
+    );
+```
+
+Use one only when the value really is the same for every caller. A value that seems global is
+often per tenant or per locale: whatever changes what the compute reads belongs in a key, so
+declare a `Query<TKey, TValue>` keyed by it instead. Otherwise one tenant's value is served to
+every other tenant.
 
 ### Duration
 

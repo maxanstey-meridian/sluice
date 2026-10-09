@@ -18,7 +18,7 @@ When EF compiles a query, Sluice works out what it reads and notes it in a comme
 of its SQL (`-- Sluice reads: …`). It can't for these, so they throw when they run inside a
 compute:
 
-- raw SQL: `FromSql`, `SqlQuery` and `ExecuteSql`, and raw commands. SQL can read any table;
+- raw SQL: `FromSql` and `SqlQuery`. SQL can read any table;
 - table-valued functions, and database functions you've mapped yourself, which can read any
   table. Functions mapped with `IsBuiltIn = true`, such as `upper`, are fine;
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
@@ -27,9 +27,19 @@ compute:
   [Tenants](#tenants-and-other-context-state);
 - entities that load lazily or hold their context: lazy-loading proxies, an injected lazy
   loader or `DbContext`, or an owned value that holds one. A cached one would read related rows
-  later, outside the compute, or keep its context alive. Select the values you need instead.
+  later, outside the compute, or keep its context alive. They're refused even when they arrive
+  through `Include` or an auto-include rather than as the query's own result. To be safe, a
+  query that returns entities is refused if it reads such a type anywhere, even only in a
+  filter; select the values you need instead.
 
-The message says which, and names the command by the first line of its SQL.
+The message says which, names the command by the first line of its SQL, and says what to do,
+which depends on the reason:
+
+| Refused because of | Do this instead |
+|---|---|
+| raw SQL, a function, or a type not mapped to a table | read it in a fused fetch: [the declared route](#the-declared-route) |
+| a query filter that reads the context's state | put the tenant (or whatever it reads) in the query key, filter by it yourself and add `IgnoreQueryFilters()`: [Tenants](#tenants-and-other-context-state) |
+| entities that load lazily or hold their context | select the values you need (`Select(o => new { o.Id, o.Total })`), not the entities |
 
 ### A query on another context
 
@@ -37,6 +47,10 @@ Every EF command inside a compute must come from the context `read.Db` gave it. 
 context may hold tracked entities with unsaved edits, or rows it loaded before a write evicted
 the value, or be inside a transaction, and the cached value is served to every caller. The read
 helpers check this when you call them, too.
+
+Call the helpers with the compute's own `read`, the one its lambda was given. A helper records
+its dependency on the `read` you pass it, so one captured from another compute would record it
+there and this value would miss it. So a helper given any other `read` throws.
 
 ### Writes
 

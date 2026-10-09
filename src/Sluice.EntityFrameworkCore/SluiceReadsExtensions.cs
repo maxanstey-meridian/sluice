@@ -15,9 +15,11 @@ namespace Sluice;
 /// Every EF query on <see cref="Db{TContext}"/>'s context records each entity type it reads, so any write to one of
 /// them evicts the value. <see cref="Entity"/> and <see cref="Children"/> narrow that for their own rows: only a
 /// write to that row, or to the rows under that parent, evicts it. Inside a compute, EF commands on any other context
-/// throw, unless they run in the fetch of <c>read.From(dependency, fetch)</c>, and so do writes, reads Sluice can't
-/// track (raw SQL, functions, views and keyless types) and reads inside a transaction. A violation inside a compute
-/// also makes the call that ran it throw and cache nothing, even if the compute catches it. The rules in full:
+/// throw, unless they run in the fetch of <c>read.From(dependency, fetch)</c>, and so do writes, reads inside a
+/// transaction, and reads Sluice can't track: raw SQL, database functions, views and keyless types, query filters
+/// that read the context's state, and results holding entities that load lazily or hold their context. A violation
+/// inside a compute also makes the call that ran it throw and cache nothing, even if the compute catches it. The
+/// rules in full:
 /// <see href="https://maxanstey-meridian.github.io/sluice/guides/ef-core">EF Core</see>.
 /// </remarks>
 public static class SluiceReadsExtensions
@@ -41,6 +43,7 @@ public static class SluiceReadsExtensions
     /// No <see cref="IDbContextFactory{TContext}"/> is registered, the context isn't configured with
     /// <c>UseSluice</c>, or the compute has already returned.
     /// </exception>
+    /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
     public static TContext Db<TContext>(this SluiceReads read)
         where TContext : DbContext
     {
@@ -60,10 +63,14 @@ public static class SluiceReadsExtensions
                     + "for the rest of your code."
             );
         var context = factory.CreateDbContext();
-        if (!TrackedReads.IsOn(context))
+        try
+        {
+            TrackedReads.EnsureOn(context);
+        }
+        catch
         {
             context.Dispose();
-            throw TrackedReads.NotOn();
+            throw;
         }
 
         context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
@@ -75,7 +82,8 @@ public static class SluiceReadsExtensions
     /// a no-tracking query for it. Only a write to that row evicts the reader, where a plain query would be evicted by
     /// a write to any <typeparamref name="T"/>. A read that finds nothing still depends on the key, so creating the
     /// row evicts it. The query may also read other types, through navigations or <c>Include</c>; each of those is
-    /// recorded whole.
+    /// recorded whole. It doesn't load auto-included navigations, and EF applies that to the whole query: a plain
+    /// query joined or combined with it doesn't load its own auto-included navigations either.
     /// </summary>
     /// <param name="read">The compute's reads.</param>
     /// <param name="set">The set to read, on the context <see cref="Db{TContext}"/> returns.</param>
@@ -86,8 +94,8 @@ public static class SluiceReadsExtensions
     /// composite, or the context's provider isn't relational.
     /// </exception>
     /// <exception cref="InvalidOperationException">
-    /// The context isn't configured with <c>UseSluice</c>, or a compute is running and the context isn't the one
-    /// <see cref="Db{TContext}"/> returned.
+    /// The context isn't configured with <c>UseSluice</c>, or a compute is running and <paramref name="read"/> isn't
+    /// the one it was given or the context isn't the one <see cref="Db{TContext}"/> returned.
     /// </exception>
     public static IQueryable<T> Entity<T>(this SluiceReads read, DbSet<T> set, object key)
         where T : class
@@ -97,7 +105,7 @@ public static class SluiceReadsExtensions
         ArgumentNullException.ThrowIfNull(key);
 
         var dependency = ModelSources.EntityDependency(set.EntityType, key, nameof(key));
-        var query = TrackedReads.Query(set);
+        var query = TrackedReads.Query(read, set);
 
         read.From(dependency);
         return WhereEquals(query, ModelSources.KeyProperty(set.EntityType), key);
@@ -107,7 +115,9 @@ public static class SluiceReadsExtensions
     /// Records a dependency on the <typeparamref name="T"/> rows whose foreign key is <paramref name="principalKey"/>,
     /// and returns a no-tracking query for them. Any change to one of those rows evicts the reader, as does a row
     /// joining or leaving the set; a write to other <typeparamref name="T"/> rows doesn't. The query may also read
-    /// other types, through navigations or <c>Include</c>; each of those is recorded whole.
+    /// other types, through navigations or <c>Include</c>; each of those is recorded whole. It doesn't load
+    /// auto-included navigations, and EF applies that to the whole query: a plain query joined or combined with it
+    /// doesn't load its own auto-included navigations either.
     /// </summary>
     /// <param name="read">The compute's reads.</param>
     /// <param name="set">The set to read, on the context <see cref="Db{TContext}"/> returns.</param>
@@ -125,8 +135,8 @@ public static class SluiceReadsExtensions
     /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
     /// </exception>
     /// <exception cref="InvalidOperationException">
-    /// The context isn't configured with <c>UseSluice</c>, or a compute is running and the context isn't the one
-    /// <see cref="Db{TContext}"/> returned.
+    /// The context isn't configured with <c>UseSluice</c>, or a compute is running and <paramref name="read"/> isn't
+    /// the one it was given or the context isn't the one <see cref="Db{TContext}"/> returned.
     /// </exception>
     public static IQueryable<T> Children<T>(
         this SluiceReads read,
@@ -149,7 +159,7 @@ public static class SluiceReadsExtensions
         );
         var property = resolved.Properties[0];
         ModelSources.EnsureKeyType(property, principalKey, nameof(principalKey));
-        var query = TrackedReads.Query(set);
+        var query = TrackedReads.Query(read, set);
 
         read.From(ModelSources.ForeignKey(resolved).For(principalKey));
         return WhereEquals(query, property, principalKey);

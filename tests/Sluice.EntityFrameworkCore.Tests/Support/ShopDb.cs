@@ -216,13 +216,29 @@ public sealed class RecentOrder
     public int Id { get; set; }
 }
 
-/// <summary>Mapped table-per-concrete-type, with its one concrete type read through a view.</summary>
+/// <summary>Mapped table-per-concrete-type, with one concrete type read through a view and one stored in a table.</summary>
 public abstract class Promotion
 {
     public int Id { get; set; }
 }
 
 public sealed class LivePromotion : Promotion;
+
+public sealed class StoredPromotion : Promotion
+{
+    public string Code { get; set; } = "";
+}
+
+/// <summary>
+/// Stored in a table and mapped table-per-concrete-type, with a derived type read through a view, which a query of
+/// banners reads too.
+/// </summary>
+public class Banner
+{
+    public int Id { get; set; }
+}
+
+public sealed class LiveBanner : Banner;
 
 /// <summary>Loads its customer lazily, through the <see cref="ILazyLoader"/> EF passes its constructor.</summary>
 public sealed class Review
@@ -301,6 +317,40 @@ public sealed class Signature
     }
 }
 
+/// <summary>Auto-includes its songs, many-to-many through the shared-type join entity <c>PlaylistSongs</c>.</summary>
+public sealed class Playlist
+{
+    public int Id { get; set; }
+    public List<Song> Songs { get; set; } = [];
+}
+
+public sealed class Song
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = "";
+}
+
+/// <summary>Owns what it's playing, which auto-includes its song.</summary>
+public sealed class Jukebox
+{
+    public int Id { get; set; }
+    public NowPlaying NowPlaying { get; set; } = new();
+}
+
+public sealed class NowPlaying
+{
+    public int? SongId { get; set; }
+    public Song? Song { get; set; }
+}
+
+/// <summary>Auto-includes the review it was given for, which loads lazily.</summary>
+public sealed class Award
+{
+    public int Id { get; set; }
+    public int ReviewId { get; set; }
+    public Review? Review { get; set; }
+}
+
 /// <summary>Holds the context that loaded it, which EF passes its constructor.</summary>
 public sealed class Basket
 {
@@ -373,6 +423,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<TopCustomer> TopCustomers => Set<TopCustomer>();
     public DbSet<RecentOrder> RecentOrders => Set<RecentOrder>();
     public DbSet<Promotion> Promotions => Set<Promotion>();
+    public DbSet<Banner> Banners => Set<Banner>();
     public DbSet<Review> Reviews => Set<Review>();
     public DbSet<Ticket> Tickets => Set<Ticket>();
     public DbSet<Memo> Memos => Set<Memo>();
@@ -383,6 +434,12 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Basket> Baskets => Set<Basket>();
     public DbSet<Shape> Shapes => Set<Shape>();
     public DbSet<Circle> Circles => Set<Circle>();
+    public DbSet<Playlist> Playlists => Set<Playlist>();
+    public DbSet<Song> Songs => Set<Song>();
+    public DbSet<Dictionary<string, object>> PlaylistSongs =>
+        Set<Dictionary<string, object>>("PlaylistSongs");
+    public DbSet<Jukebox> Jukeboxes => Set<Jukebox>();
+    public DbSet<Award> Awards => Set<Award>();
 
     /// <summary>The tenant <see cref="Account"/>'s query filter reads.</summary>
     public int TenantId { get; init; }
@@ -511,6 +568,19 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             );
 
         model.Entity<Dog>().Navigation(dog => dog.Owner).AutoInclude();
+        model.Entity<Playlist>().HasMany(p => p.Songs).WithMany().UsingEntity("PlaylistSongs");
+        model.Entity<Playlist>().Navigation(p => p.Songs).AutoInclude();
+        model
+            .Entity<Jukebox>()
+            .OwnsOne(
+                j => j.NowPlaying,
+                playing =>
+                {
+                    playing.HasOne(n => n.Song).WithMany().HasForeignKey(n => n.SongId);
+                    playing.Navigation(n => n.Song).AutoInclude();
+                }
+            );
+        model.Entity<Award>().Navigation(a => a.Review).AutoInclude();
         model.Entity<Ticket>().HasQueryFilter("open", ticket => !ticket.Closed);
         model.Entity<Ticket>().HasQueryFilter("customer", ticket => ticket.Customer!.Name != "");
         model.Entity<Memo>().HasQueryFilter(memo => Customers.Any(c => c.Id == memo.CustomerId));
@@ -523,5 +593,8 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<RecentOrder>().ToFunction("recent_orders");
         model.Entity<Promotion>().UseTpcMappingStrategy();
         model.Entity<LivePromotion>().ToView("live_promotions");
+        model.Entity<StoredPromotion>();
+        model.Entity<Banner>().UseTpcMappingStrategy();
+        model.Entity<LiveBanner>().ToView("live_banners");
     }
 }

@@ -487,9 +487,9 @@ public static class ShopViews
 /// <summary>
 /// Makes random changes to the shop's rows through a context with <c>UseSluice</c>, the ways an app would: tracked
 /// inserts, edits and deletes, deletes of rows it never loaded, <c>Update</c> of a detached row, several changes in
-/// one save, saves in a transaction that commits or rolls back, and bulk statements. It reads the
-/// rows it may pick from the database before each change, through the same context, so it sees its own uncommitted
-/// rows inside a transaction.
+/// one save, saves in a transaction that commits or rolls back, and bulk statements that edit, re-parent and delete
+/// rows, alone or in a transaction. It reads the rows it may pick from the database before each change, through the
+/// same context, so it sees its own uncommitted rows inside a transaction.
 /// </summary>
 public sealed class RandomWriter(ShopDb db, Keys first, Random random)
 {
@@ -571,7 +571,7 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         var changes = new List<string>();
         for (var i = 0; i < 2; i++)
         {
-            changes.Add(await Saved(await Stage(await State.Of(db, first), bulk: false)));
+            changes.Add(await Saved(await Stage(await State.Of(db, first), bulk: true)));
             db.ChangeTracker.Clear();
         }
 
@@ -585,7 +585,9 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         return $"committed: {string.Join(", ", changes)}";
     }
 
-    // Stages one change for the next save, or, with bulk, may run a bulk statement and invalidate it by hand.
+    // Stages one change for the next save, or, with bulk, may run a bulk statement at once, which nobody invalidates by
+    // hand. A batch passes no bulk: its changes are all picked from one state, which a bulk statement could change
+    // under the others.
     private async Task<string> Stage(State state, bool bulk)
     {
         var changes = new List<(int Weight, Func<Task<string>> Make)>();
@@ -624,8 +626,9 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         Offer(2, any(state.Trucks), () => AddTrailer(state));
         Offer(1, any(state.Trailers) && any(state.Trucks), () => MoveTrailer(state));
         Offer(1, any(state.Trailers), () => DeleteTrailer(Pick(state.Trailers)));
-        Offer(bulk ? 1 : 0, any(state.Customers), () => BulkEditOrders(Pick(state.Customers)));
-        Offer(bulk ? 1 : 0, any(state.Customers), () => BulkDeleteCustomer(Pick(state.Customers)));
+        Offer(bulk ? 3 : 0, any(state.Customers), () => BulkEditOrders(Pick(state.Customers)));
+        Offer(bulk ? 3 : 0, state.Customers.Length > 1, () => BulkMoveOrders(state));
+        Offer(bulk ? 2 : 0, any(state.Customers), () => BulkDeleteCustomer(Pick(state.Customers)));
 
         var roll = random.Next(changes.Sum(change => change.Weight));
         foreach (var (weight, make) in changes)
@@ -908,6 +911,16 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
             .Orders.Where(o => o.CustomerId == customer)
             .ExecuteUpdateAsync(set => set.SetProperty(o => o.Item, item));
         return $"bulk-make customer {customer}'s orders {item}";
+    }
+
+    // Re-parents rows in bulk: both customers' lists change.
+    private async Task<string> BulkMoveOrders(State state)
+    {
+        var (from, to) = (Pick(state.Customers), Pick(state.Customers));
+        await db
+            .Orders.Where(o => o.CustomerId == from)
+            .ExecuteUpdateAsync(set => set.SetProperty(o => o.CustomerId, to));
+        return $"bulk-move customer {from}'s orders to customer {to}";
     }
 
     private async Task<string> BulkDeleteCustomer(int id)

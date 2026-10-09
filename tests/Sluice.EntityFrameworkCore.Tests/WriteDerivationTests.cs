@@ -5,7 +5,10 @@ using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
 
-/// <summary>What a tracked save evicts. Reads run on a context of their own, and writes on another.</summary>
+/// <summary>
+/// What a tracked save evicts. Cached reads run on each compute's own context; writes run on a <c>UseSluice</c>
+/// context, and the database is checked, and written behind Sluice's back, on one without it.
+/// </summary>
 [Collection(PostgresCollection.Name)]
 public sealed class WriteDerivationTests : IAsyncLifetime
 {
@@ -15,7 +18,7 @@ public sealed class WriteDerivationTests : IAsyncLifetime
 
     public WriteDerivationTests(PostgresFixture postgres)
     {
-        _reader = postgres.CreateDb(_node);
+        _reader = postgres.CreateDb();
         _db = postgres.CreateDb(_node);
     }
 
@@ -829,7 +832,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             ),
         ];
 
-        await _db.Customers.Where(c => c.Id == ada.Id).ExecuteDeleteAsync();
+        // On a context without Sluice, so only the invalidation by hand can evict.
+        await _reader.Customers.Where(c => c.Id == ada.Id).ExecuteDeleteAsync();
         await _node.Cache.InvalidateAsync(_db.Customers.AllDependencies());
 
         (await _reader.OrderLines.AnyAsync(l => l.OrderId == tea.Id)).Should().BeFalse();

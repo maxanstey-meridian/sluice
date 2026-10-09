@@ -279,4 +279,32 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         db.Invoking(d => d.Suppliers.AllDependencies()).Should().Throw<NotSupportedException>();
         db.Invoking(d => d.Promotions.AllDependencies()).Should().Throw<NotSupportedException>();
     }
+
+    [Fact]
+    public async Task A_type_stored_in_a_table_with_a_derived_type_mapped_to_a_view_is_refused()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        const string View =
+            "the derived type LiveBanner, which is mapped to the view 'live_banners'";
+
+        var helper = () =>
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Entity(r.Db<ShopDb>().Banners, 1).ToListAsync(ct)
+            );
+        var plain = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.Db<ShopDb>().Banners.ToListAsync(ct));
+
+        await helper
+            .Should()
+            .ThrowAsync<NotSupportedException>()
+            .WithMessage($"Banner has {View}*");
+        await plain
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage($"*it reads Banner, which has {View}*");
+        db.Invoking(d => d.Banners.Dependency(1)).Should().Throw<NotSupportedException>();
+        db.Invoking(d => d.Banners.AllDependencies()).Should().Throw<NotSupportedException>();
+    }
 }

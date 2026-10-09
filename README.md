@@ -94,10 +94,11 @@ public ValueTask<Dashboard> GetDashboard(UserId userId, CancellationToken ct) =>
         userId,
         async (read, ct) =>
         {
-            // EF Core: query the compute's own context. Each query records what it reads.
-            var db = read.Db<AppDb>();
-            var user = await db.Users.SingleAsync(u => u.Id == userId, ct);
-            var darkMode = await db.Flags
+            // EF Core: query the compute's own context, not an injected one.
+            // Each query records what it reads.
+            var computeDb = read.Db<AppDb>();
+            var user = await computeDb.Users.SingleAsync(u => u.Id == userId, ct);
+            var darkMode = await computeDb.Flags
                 .Where(flag => flag.Id == FlagId.DarkMode)
                 .Select(flag => flag.Enabled)
                 .SingleAsync(ct);
@@ -169,15 +170,17 @@ users table. Sluice logs each cached query that does this the first time it runs
 `Information`. When that's too broad, narrow a query to the rows it reads:
 
 ```csharp
-var user = await read.Entity(db.Users, userId).SingleAsync(ct);           // one row by key
-var orders = await read.Children(db.Orders, o => o.UserId, userId)        // the rows under one parent
-    .ToListAsync(ct);
+// One row, by key.
+var user = await read.Entity(computeDb.Users, userId).SingleAsync(ct);
+
+// The rows under one parent.
+var orders = await read.Children(computeDb.Orders, o => o.UserId, userId).ToListAsync(ct);
 ```
 
 `read.Entity` depends on one row, so renaming Bob leaves Alice's dashboard cached.
 `read.Children` depends on the rows under one parent. Both return a query you can filter and
 project. Keys are your model's own types: the playground maps `UserId` with a value converter,
-so `read.Entity(db.Users, userId)` takes a `UserId`.
+so `read.Entity(computeDb.Users, userId)` takes a `UserId`.
 
 ### Writing
 
@@ -209,9 +212,10 @@ for data written outside your app. For an EF set it's one line:
 ### What a compute can't read
 
 Inside a compute, a few things throw, because Sluice couldn't tell what they read: raw SQL
-(`FromSql`, `SqlQuery`), views, keyless types, database functions of your own, and a query on
-any context other than `read.Db`'s. Read those in the fetch of `read.From(dependency, fetch)`,
-with a `Source` you declare and invalidate yourself.
+(`FromSql`, `SqlQuery`), views, keyless types and database functions of your own. Read those in
+the fetch of `read.From(dependency, fetch)`, with a `Source` you declare and invalidate
+yourself. A query on any context other than `read.Db`'s throws too: that context may hold your
+request's unsaved edits or uncommitted rows, which mustn't be cached for everyone.
 [Strict reads](https://maxanstey-meridian.github.io/sluice/guides/strict-reads) has the full
 list, and what Sluice can't check.
 
@@ -257,14 +261,16 @@ start.
 ## How it's tested
 
 - The EF Core tests run on a real PostgreSQL in Docker, not an in-memory fake.
-- A random workload makes saves, moves, deletes, deletes of rows it never loaded, bulk updates and deletes,
-  batches and transactions across cascades, set-null keys, inheritance, composite keys and a many-to-many join.
-  After every write, it checks each cached read, through the helpers and through plain queries that follow
-  navigations, joins and `Include`, against the same read run fresh. A concurrent version runs four writers and four
-  readers at once, and checks once they've finished. `SLUICE_RANDOM_SEEDS=50 dotnet test` runs more of both.
+- A random workload makes saves, moves, deletes, deletes of rows it never loaded, bulk updates
+  and deletes, batches and transactions across cascades, set-null keys, inheritance, composite
+  keys and a many-to-many join. After every write, it checks each cached read, through the
+  helpers and through plain queries that follow navigations, joins and `Include`, against the
+  same read run fresh. A concurrent version runs four writers and four readers at once, and
+  checks once they've finished. `SLUICE_RANDOM_SEEDS=50 dotnet test` runs more of both.
 - Benchmarks against FusionCache on its own are in
-  [Performance](https://maxanstey-meridian.github.io/sluice/misc/performance). In short: a hit costs about 0.2 µs per
-  dependency, so keep each value's dependencies to tens rather than thousands.
+  [Performance](https://maxanstey-meridian.github.io/sluice/misc/performance). In short: a hit
+  costs about 0.2 µs per dependency, so keep each value's dependencies to tens rather than
+  thousands.
 
 ## Documentation
 

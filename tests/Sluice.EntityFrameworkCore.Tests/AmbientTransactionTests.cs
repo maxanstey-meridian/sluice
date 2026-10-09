@@ -9,8 +9,8 @@ using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
 namespace Sluice.EntityFrameworkCore.Tests;
 
 /// <summary>
-/// When a save inside an enlisted or ambient (<c>TransactionScope</c>) transaction publishes. Reads run on a context
-/// that doesn't enlist, so they run inside a scope too.
+/// When a save inside an enlisted or ambient (<c>TransactionScope</c>) transaction publishes. A compute reads on its own
+/// context with the ambient transaction suppressed, so cached reads run inside a scope too.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 public sealed class AmbientTransactionTests(PostgresFixture postgres)
@@ -136,7 +136,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
     public async Task A_save_left_behind_by_a_conflict_in_a_disposed_TransactionScope_is_evicted_by_the_next_save_without_failing_it()
     {
         await using var node = new SluiceNode();
-        await using var reader = postgres.CreateDb(node, enlist: false);
+        await using var reader = postgres.CreateDb(enlist: false);
         var (ada, bob) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
         await using var db = postgres.CreateDb(node);

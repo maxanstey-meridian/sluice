@@ -182,10 +182,11 @@ public ValueTask<Dashboard> GetDashboard(UserId userId, CancellationToken ct) =>
         userId,
         async (read, ct) =>
         {
-            // EF Core: query the compute's own context. Each query records what it reads.
-            var db = read.Db<AppDb>();
-            var user = await db.Users.SingleAsync(u => u.Id == userId, ct);
-            var darkMode = await db.Flags
+            // EF Core: query the compute's own context, not an injected one.
+            // Each query records what it reads.
+            var computeDb = read.Db<AppDb>();
+            var user = await computeDb.Users.SingleAsync(u => u.Id == userId, ct);
+            var darkMode = await computeDb.Flags
                 .Where(flag => flag.Id == FlagId.DarkMode)
                 .Select(flag => flag.Enabled)
                 .SingleAsync(ct);
@@ -217,20 +218,21 @@ and records what it reads:
 | Read | Records |
 |---|---|
 | `read.Db<AppDb>()` | nothing yet: it's the compute's own `AppDb`, made from the factory and disposed when the compute ends |
-| `db.Users.SingleAsync(…)` | the users table |
-| `db.Flags.Where(…)…` | the flags table |
+| `computeDb.Users.SingleAsync(…)` | the users table |
+| `computeDb.Flags.Where(…)…` | the flags table |
 | `read.From(Dashboards.Greeting.For(userId), fetch)` | that user's greeting, then runs `fetch` |
 
 Recording happens as the compute runs, so it records what was actually read. Bob isn't an admin,
 so his compute never reaches the greeting, and his dashboard doesn't depend on one.
 
 A plain query depends on the whole table: renaming any user evicts both dashboards. To depend
-on one row, start the query from `read.Entity(db.Users, userId)` instead; see
+on one row, start the query from `read.Entity(computeDb.Users, userId)` instead; see
 [Narrowing to rows](/guides/ef-core#narrowing-to-rows).
 
 Query the context `read.Db` gives you, not one you injected: the compute's own context holds
 nothing from your request, so it can't cache your unsaved edits for everyone. A query on any
-other context throws.
+other context throws. The sample names it `computeDb` so it can't be mistaken for the injected
+`db` the writes below use.
 
 A compute must record at least one dependency, or the call throws and nothing is cached. The
 `ct` the compute gets is the caller's token.
@@ -268,9 +270,9 @@ public async Task SetGreeting(UserId userId, string text)
 Only Alice's dashboard read Alice's greeting, so Bob's stays cached.
 
 The same goes for anything that writes without a `UseSluice` context: another service, a cron
-job, SQL run by hand, a trigger, or `ExecuteSql`. After one of those, invalidate by
-hand, or the old value stays cached until it expires. Keep durations short for data written
-outside your app. See [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see).
+job, SQL run by hand, a trigger, or `ExecuteSql`. After one of those, invalidate by hand, or the
+old value stays cached until it expires. Keep durations short for data written outside your
+app. See [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see).
 
 ## Check the declarations in a test
 

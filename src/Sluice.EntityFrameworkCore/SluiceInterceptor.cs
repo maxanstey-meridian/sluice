@@ -86,7 +86,7 @@ internal sealed partial class SluiceInterceptor
 
     public int SavedChanges(SaveChangesCompletedEventData eventData, int result)
     {
-        Complete(eventData.Context, keep: false);
+        Complete(Save(eventData.Context, keep: false));
         return result;
     }
 
@@ -97,27 +97,27 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
-        await CompleteAsync(eventData.Context, keep: false).ConfigureAwait(false);
+        await CompleteAsync(Save(eventData.Context, keep: false)).ConfigureAwait(false);
         return result;
     }
 
     // A failed or cancelled save may have committed earlier batches (without a transaction, or under
     // AutoTransactionBehavior.Never), so it publishes too.
     public void SaveChangesFailed(DbContextErrorEventData eventData) =>
-        Complete(eventData.Context, keep: false);
+        Complete(Save(eventData.Context, keep: false));
 
     public Task SaveChangesFailedAsync(
         DbContextErrorEventData eventData,
         CancellationToken cancellationToken = default
-    ) => CompleteAsync(eventData.Context, keep: false);
+    ) => CompleteAsync(Save(eventData.Context, keep: false));
 
     public void SaveChangesCanceled(DbContextEventData eventData) =>
-        Complete(eventData.Context, keep: false);
+        Complete(Save(eventData.Context, keep: false));
 
     public Task SaveChangesCanceledAsync(
         DbContextEventData eventData,
         CancellationToken cancellationToken = default
-    ) => CompleteAsync(eventData.Context, keep: false);
+    ) => CompleteAsync(Save(eventData.Context, keep: false));
 
     // EF reports a concurrency failure here and not through SaveChangesFailed. The save is kept: if an interceptor
     // suppresses the exception, the save goes on and publishes again when it completes.
@@ -126,7 +126,7 @@ internal sealed partial class SluiceInterceptor
         InterceptionResult result
     )
     {
-        Complete(eventData.Context, keep: true);
+        Complete(Save(eventData.Context, keep: true));
         return result;
     }
 
@@ -136,14 +136,15 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
-        await CompleteAsync(eventData.Context, keep: true).ConfigureAwait(false);
+        await CompleteAsync(Save(eventData.Context, keep: true)).ConfigureAwait(false);
         return result;
     }
 
-    // A bulk write is one statement: whether it failed before or after the database ran it, publishing is safe.
+    // A bulk write is one statement. Whether it failed or was cancelled before or after the database ran it, publishing
+    // is safe; EF reports a cancellation through CommandCanceled, not CommandFailed.
     public int NonQueryExecuted(DbCommand command, CommandExecutedEventData eventData, int result)
     {
-        CompleteBulkWrite(command, eventData);
+        Complete(BulkWrite(command, eventData));
         return result;
     }
 
@@ -154,18 +155,27 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
-        await CompleteBulkWriteAsync(command, eventData).ConfigureAwait(false);
+        await CompleteAsync(BulkWrite(command, eventData)).ConfigureAwait(false);
         return result;
     }
 
     public void CommandFailed(DbCommand command, CommandErrorEventData eventData) =>
-        CompleteBulkWrite(command, eventData);
+        Complete(BulkWrite(command, eventData));
 
     public Task CommandFailedAsync(
         DbCommand command,
         CommandErrorEventData eventData,
         CancellationToken cancellationToken = default
-    ) => CompleteBulkWriteAsync(command, eventData);
+    ) => CompleteAsync(BulkWrite(command, eventData));
+
+    public void CommandCanceled(DbCommand command, CommandEndEventData eventData) =>
+        Complete(BulkWrite(command, eventData));
+
+    public Task CommandCanceledAsync(
+        DbCommand command,
+        CommandEndEventData eventData,
+        CancellationToken cancellationToken = default
+    ) => CompleteAsync(BulkWrite(command, eventData));
 
     // A provider may hand out the same DbTransaction object again (Npgsql does, per connection). Anything still
     // pending on it belongs to an earlier transaction that ended without a commit or rollback EF saw succeed: one
@@ -226,53 +236,36 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     ) => PublishAsync(() => Take(_pending, transaction, keep: true) ?? []);
 
-    private void Complete(DbContext? context, bool keep)
+    // Publishes what a write wrote: when the transaction it ran in ends, or at once outside one.
+    private void Complete((DbContext Context, Func<List<Dependency>> Derive)? write)
     {
-        if (context is not null && Take(_saves, context, keep) is { } save)
+        if (write is var (context, derive) && !DeferToTransaction(context, derive))
         {
-            if (!DeferToTransaction(context, save.Dependencies))
-            {
-                Publish(save.Dependencies);
-            }
+            Publish(derive);
         }
     }
 
-    private async Task CompleteAsync(DbContext? context, bool keep)
+    private async Task CompleteAsync((DbContext Context, Func<List<Dependency>> Derive)? write)
     {
-        if (context is not null && Take(_saves, context, keep) is { } save)
+        if (write is var (context, derive) && !DeferToTransaction(context, derive))
         {
-            if (!DeferToTransaction(context, save.Dependencies))
-            {
-                await PublishAsync(save.Dependencies).ConfigureAwait(false);
-            }
+            await PublishAsync(derive).ConfigureAwait(false);
         }
     }
+
+    // The save the context has in progress, if any, taken unless kept.
+    private (DbContext Context, Func<List<Dependency>> Derive)? Save(
+        DbContext? context,
+        bool keep
+    ) =>
+        context is not null && Take(_saves, context, keep) is { } save
+            ? (context, save.Dependencies)
+            : null;
 
     // Which rows a bulk write changed is unknown, so every read of the types it may have written is evicted. EF 10
-    // reports ExecuteDelete as ExecuteUpdate, so the statement says which it was; anything but an UPDATE is taken for a
-    // delete, which also evicts the lists its rows were in and what the database cascades to.
-    private void CompleteBulkWrite(DbCommand command, CommandEventData eventData)
-    {
-        if (BulkWrite(command, eventData) is var (context, derive))
-        {
-            if (!DeferToTransaction(context, derive))
-            {
-                Publish(derive);
-            }
-        }
-    }
-
-    private async Task CompleteBulkWriteAsync(DbCommand command, CommandEventData eventData)
-    {
-        if (BulkWrite(command, eventData) is var (context, derive))
-        {
-            if (!DeferToTransaction(context, derive))
-            {
-                await PublishAsync(derive).ConfigureAwait(false);
-            }
-        }
-    }
-
+    // reports ExecuteDelete as ExecuteUpdate (both pass CommandSource.BulkUpdate, its old name), so the statement says
+    // which it was; anything but an UPDATE is taken for a delete, which also evicts the lists its rows were in and what
+    // the database cascades to.
     private static (DbContext Context, Func<List<Dependency>> Derive)? BulkWrite(
         DbCommand command,
         CommandEventData eventData
@@ -455,7 +448,7 @@ internal sealed partial class SluiceInterceptor
     [LoggerMessage(
         EventId = 1,
         Level = LogLevel.Error,
-        Message = "Sluice couldn't invalidate the cached values that depend on an EF save; they stay cached until their duration ends. Dependencies: {DependencyCount}"
+        Message = "Sluice couldn't invalidate the cached values that depend on an EF write; they stay cached until their duration ends. Dependencies: {DependencyCount}"
     )]
     private partial void LogPublishFailed(Exception exception, int? dependencyCount);
 }

@@ -19,10 +19,11 @@ public sealed class DashboardActions(
             {
                 computes.Add(userId);
 
-                // EF Core: query the compute's own context. Each query records what it reads.
-                var db = read.Db<AppDb>();
-                var user = await db.Users.SingleAsync(u => u.Id == userId, ct);
-                var darkMode = await db
+                // EF Core: query the compute's own context, not an injected one.
+                // Each query records what it reads.
+                var computeDb = read.Db<AppDb>();
+                var user = await computeDb.Users.SingleAsync(u => u.Id == userId, ct);
+                var darkMode = await computeDb
                     .Flags.Where(flag => flag.Id == FlagId.DarkMode)
                     .Select(flag => flag.Enabled)
                     .SingleAsync(ct);

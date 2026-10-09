@@ -8,8 +8,8 @@ no longer than the entry's duration.
 
 - **Anything that writes without a `UseSluice` context must invalidate by hand**: another
   service, a cron job, SQL run by hand, a database trigger, a context without `UseSluice`, and
-  `ExecuteSql`. Otherwise the old value stays
-  cached until it expires, so keep durations short for data written outside your app. See
+  `ExecuteSql`. Otherwise the old value stays cached until it expires, so keep durations short
+  for data written outside your app. See
   [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see).
 - **On the generic path, every write is yours to report**, after it commits. Before the commit,
   or never, and the old value can stay until it expires. See
@@ -27,8 +27,6 @@ no longer than the entry's duration.
   soft-delete switch. See [Tenants](/guides/strict-reads#tenants-and-other-context-state).
 - **Cached values are shared instances**, entities included, unless you turn on auto-clone. See
   [Shared instances](/guides/configuration#shared-instances-and-auto-clone).
-- **No keyless queries.** Key a global value by something real, such as a tenant or a locale.
-  See [Queries](/guides/sources-and-queries#queries).
 - **Your `format` functions and `IFormattable` ids must give different text for different
   keys.** Sluice can't check that. See [Key text](/guides/sources-and-queries#key-text).
 - **Source names aren't checked for duplicates**, and query names only within one process. See
@@ -63,8 +61,7 @@ no longer than the entry's duration.
   types is evicted, whichever rows it hit. See
   [Database cascades](/guides/ef-core#database-cascades).
 - **Cascades the model doesn't know about** (triggers, a database that differs from the model)
-  aren't seen at all.
-  See [Database cascades](/guides/ef-core#database-cascades).
+  aren't seen at all. See [Database cascades](/guides/ef-core#database-cascades).
 - **A row saved from an object you built yourself** misses its real old parent when its foreign
   key differs from the stored one. See
   [Rows saved without loading them](/guides/ef-core#rows-saved-without-loading-them).
@@ -93,9 +90,12 @@ no longer than the entry's duration.
 - **Some reads go unchecked inside a compute**, such as `Find` of an entity a captured outside
   context already tracks, or Dapper on a context's connection. See
   [What isn't checked](/guides/strict-reads#what-isn-t-checked).
-- **Some reads only work in a fused fetch**: raw SQL, views, keyless types, your own database
-  functions, and query filters that read the context's state. See
-  [The declared route](/guides/strict-reads#the-declared-route).
-- **Entities that load lazily can't be returned by a query in a compute.** Select the values you
-  need. See [What throws inside a compute](/guides/strict-reads#what-throws-inside-a-compute).
+- **Some reads only work in a fused fetch**: raw SQL, views, keyless types and your own
+  database functions. See [The declared route](/guides/strict-reads#the-declared-route).
+- **Query filters that read the context's state are refused inside a compute.** Put what they
+  read in the query key and filter by it yourself. See
+  [Tenants](/guides/strict-reads#tenants-and-other-context-state).
+- **Entities that load lazily or hold their context can't be returned by a query in a
+  compute.** Select the values you need. See
+  [What throws inside a compute](/guides/strict-reads#what-throws-inside-a-compute).
 - **Writes can't run inside a compute.** See [Writes](/guides/strict-reads#writes).

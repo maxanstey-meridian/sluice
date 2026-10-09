@@ -1,6 +1,10 @@
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Query;
+using Microsoft.Extensions.Logging;
 using Sluice.EntityFrameworkCore.Tests.Support;
+using ZiggyCreatures.Caching.Fusion;
+using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
 
 namespace Sluice.EntityFrameworkCore.Tests;
 
@@ -12,8 +16,10 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class BulkWriteTests(PostgresFixture postgres)
 {
-    [Fact]
-    public async Task ExecuteUpdate_evicts_every_read_of_the_type_it_writes_and_no_other()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExecuteUpdate_evicts_every_read_of_the_type_it_writes_and_no_other(bool sync)
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
@@ -26,9 +32,11 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
         );
         var orders = await CachedRead.OrdersOf(node.Cache, ada);
 
-        await db
-            .Customers.Where(c => c.Id == ada)
-            .ExecuteUpdateAsync(set => set.SetProperty(c => c.Name, "Ada Lovelace"));
+        await Update(
+            db.Customers.Where(c => c.Id == ada),
+            set => set.SetProperty(c => c.Name, "Ada Lovelace"),
+            sync
+        );
 
         (await adaRead.WasEvicted()).Should().BeTrue();
         (await bobRead.WasEvicted()).Should().BeTrue("which rows changed is unknown");
@@ -36,8 +44,10 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
         (await orders.WasEvicted()).Should().BeFalse("no order changed");
     }
 
-    [Fact]
-    public async Task ExecuteDelete_also_evicts_reads_of_what_the_database_cascades_to()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExecuteDelete_also_evicts_reads_of_what_the_database_cascades_to(bool sync)
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
@@ -50,10 +60,143 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
             (read, ct) => read.Db<ShopDb>().Coupons.ToListAsync(ct)
         );
 
-        await db.Customers.Where(c => c.Id == ada).ExecuteDeleteAsync();
+        await Delete(db.Customers.Where(c => c.Id == ada), sync);
 
         (await orders.WasEvicted()).Should().BeTrue("deleting a customer deletes its orders");
         (await coupons.WasEvicted()).Should().BeFalse("no coupon changed");
+    }
+
+    [Fact]
+    public async Task A_bulk_update_that_moves_rows_to_another_parent_evicts_Children_readers_of_both_parents()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, bob) = await db.AddCustomers();
+        db.Orders.Add(new Order { CustomerId = ada, Item = "Tea" });
+        await db.SaveChangesAsync();
+        var adasOrders = await CachedRead.OrdersOf(node.Cache, ada);
+        var bobsOrders = await CachedRead.OrdersOf(node.Cache, bob);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+
+        await db
+            .Orders.Where(o => o.CustomerId == ada)
+            .ExecuteUpdateAsync(set => set.SetProperty(o => o.CustomerId, bob));
+
+        (await adasOrders.WasEvicted()).Should().BeTrue("Ada's order left her");
+        (await bobsOrders.WasEvicted()).Should().BeTrue("Bob gained Ada's order");
+        (await adaRead.WasEvicted()).Should().BeFalse("no customer changed");
+    }
+
+    [Fact]
+    public async Task Sync_ExecuteUpdate_and_ExecuteDelete_evict_without_going_through_async_code()
+    {
+        // Any async call into the distributed cache throws, and FusionCache logs it as a warning.
+        await using var node = new SluiceNode(cache =>
+            cache
+                .WithSerializer(new FusionCacheSystemTextJsonSerializer())
+                .WithDistributedCache(new SyncOnlyDistributedCache())
+        );
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+
+        node.Logs.Clear();
+        db.Customers.Where(c => c.Id == ada)
+            .ExecuteUpdate(set => set.SetProperty(c => c.Name, "Ada Lovelace"));
+        node.Logs.GetSnapshot()
+            .Should()
+            .NotContain(record => record.Level >= LogLevel.Warning, "ExecuteUpdate stayed sync");
+        (await adaRead.WasEvicted()).Should().BeTrue();
+
+        node.Logs.Clear();
+        db.Customers.Where(c => c.Id == ada).ExecuteDelete();
+        node.Logs.GetSnapshot()
+            .Should()
+            .NotContain(record => record.Level >= LogLevel.Warning, "ExecuteDelete stayed sync");
+        (await adaRead.WasEvicted()).Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task A_bulk_write_that_fails_or_is_cancelled_after_it_ran_is_still_evicted(
+        bool cancel,
+        bool sync
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node, before: [new FailAfterBulkWrite(cancel)]);
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+
+        var update = () =>
+            Update(
+                db.Customers.Where(c => c.Id == ada),
+                set => set.SetProperty(c => c.Name, "Ada Lovelace"),
+                sync
+            );
+
+        if (cancel)
+        {
+            await update.Should().ThrowAsync<OperationCanceledException>();
+        }
+        else
+        {
+            await update.Should().ThrowAsync<InvalidOperationException>();
+        }
+
+        (await reader.NameOf(ada)).Should().Be("Ada Lovelace", "the statement committed");
+        (await adaRead.WasEvicted()).Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task A_bulk_write_to_a_type_whose_sibling_reads_refuse_is_evicted(
+        bool delete,
+        bool inTransaction
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var stored = new StoredPromotion { Code = "SPRING" };
+        db.Add(stored);
+        await db.SaveChangesAsync();
+        var promotions = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Db<ShopDb>()
+                    .Set<StoredPromotion>()
+                    .Where(p => p.Id == stored.Id)
+                    .ToListAsync(ct)
+        );
+
+        await using var transaction = inTransaction
+            ? await db.Database.BeginTransactionAsync()
+            : null;
+        var rows = db.Set<StoredPromotion>().Where(p => p.Id == stored.Id);
+        if (delete)
+        {
+            await rows.ExecuteDeleteAsync();
+        }
+        else
+        {
+            await rows.ExecuteUpdateAsync(set => set.SetProperty(p => p.Code, "SUMMER"));
+        }
+
+        if (transaction is not null)
+        {
+            (await promotions.WasEvicted()).Should().BeFalse("the transaction hasn't committed");
+            await transaction.CommitAsync();
+        }
+
+        (await promotions.WasEvicted()).Should().BeTrue();
+        node.Logs.GetSnapshot().Should().NotContain(record => record.Level >= LogLevel.Error);
     }
 
     [Theory]
@@ -111,4 +254,26 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
         (await adaRead.WasEvicted()).Should().BeTrue();
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
     }
+
+    // Npgsql leaves a lowercase name unquoted, so it must stand alone; a quoted one carries its own delimiters.
+    [Theory]
+    [InlineData("""DELETE FROM users AS u WHERE u."Id" = @id""", "users", true)]
+    [InlineData("""UPDATE public.users SET "Name" = @name""", "users", true)]
+    [InlineData("""DELETE FROM users AS u""", "user", false)]
+    [InlineData("""DELETE FROM "Orders" AS o WHERE o.user_id = @id""", "user", false)]
+    [InlineData("""DELETE FROM "Users" AS u""", "\"Users\"", true)]
+    public void A_bulk_write_names_an_unquoted_table_only_as_a_whole_identifier(
+        string sql,
+        string table,
+        bool names
+    ) => ModelSources.Names(sql, table).Should().Be(names);
+
+    private static Task Update<T>(
+        IQueryable<T> rows,
+        Action<UpdateSettersBuilder<T>> set,
+        bool sync
+    ) => sync ? Task.FromResult(rows.ExecuteUpdate(set)) : rows.ExecuteUpdateAsync(set);
+
+    private static Task Delete<T>(IQueryable<T> rows, bool sync) =>
+        sync ? Task.FromResult(rows.ExecuteDelete()) : rows.ExecuteDeleteAsync();
 }

@@ -5,6 +5,10 @@
 EF Core reads inside a compute are ordinary queries now. Sluice records the tables each one
 reads, instead of refusing everything but its helpers.
 
+- **Breaking: upgrade `Meridian.Sluice` and `Meridian.Sluice.EntityFrameworkCore` together.**
+  The EF package 0.2.0 calls a hidden core member that 0.3.0 removed, so mixing the two versions
+  fails at run time with `MissingMethodException`.
+
 - **New: `read.Db<TContext>()`.** A compute queries a context of its own, made from the
   registered `IDbContextFactory<TContext>` and disposed when the compute ends. It tracks nothing
   by default and isn't in the caller's transaction, so it can't cache a request's unsaved edits
@@ -19,19 +23,30 @@ reads, instead of refusing everything but its helpers.
   logs it at `Information`, so you can see what to narrow.
 - **`read.Entity` and `read.Children` narrow a query** to one row or one parent's rows. Their
   queries may now follow navigations and `Include`, which record the types they reach.
-- **Removed: `read.All`.** A plain query on `read.Db`'s context does the same.
+- **Removed: `read.All`.** A plain query on `read.Db`'s context does the same, except that it
+  also loads auto-included navigations (ones the model includes in every query); add
+  `.IgnoreAutoIncludes()` to get `read.All`'s shape.
+- **Every query on a `UseSluice` context now starts with a SQL comment,** inside a compute or
+  not: `-- Sluice reads: …` naming the tables it reads, or `-- Sluice can't track: …` with the
+  reason. You'll see it in logs, `ToQueryString()` and SQL snapshot tests.
 - **Still refused inside a compute:** raw SQL, views, keyless types, your own database functions,
   query filters that read the context's state, entities that load lazily or hold their context,
   writes, and reads inside a transaction. Read the first four in a fused `read.From` fetch.
 - **New: `ExecuteUpdate` and `ExecuteDelete` invalidate by themselves,** once they commit: every
-  read of the table they wrote, and for a delete what the database cascades into.
-- **New: a compute runs outside the caller's ambient transaction.**
+  read of the table they wrote, and for a delete what the database cascades into. One that fails
+  or is cancelled still invalidates, as a save does. Delete any invalidation you wrote by hand
+  after them.
+- **Behaviour change: a compute runs outside the caller's ambient transaction.** Inside a
+  `TransactionScope`, connections a compute opens don't join it, so computes read what's
+  committed. That applies to Dapper and other non-EF computes too: one called inside a
+  `TransactionScope` no longer sees that scope's uncommitted rows.
 - **New: `Query<TValue>`,** a query with no key.
 - **`UseSluice` is safe to call twice** for one context; EF composes a pool's and a factory's
   configuration, which used to make a save publish before its commit.
-- **Clearer errors:** `AddSluice` called twice, `UseSluice` without `AddSluice`, `read.Db`
-  without a factory or without `UseSluice`, and a compute that recorded nothing all say what to
-  do.
+- **Breaking: calling `AddSluice` twice on one service collection throws**
+  `InvalidOperationException`, saying to call it once.
+- **Clearer errors:** `UseSluice` without `AddSluice`, `read.Db` without a factory or without
+  `UseSluice`, and a compute that recorded nothing all say what to do.
 
 ## 0.2.0 — breaking
 

@@ -50,7 +50,7 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 
 ## SLUICE-CORE-007 A value is cached only with the dependencies its compute recorded
 
-**Rule:** a compute that records no dependency, or calls `GetOrSetAsync` itself (a fused fetch included), makes the call throw `InvalidOperationException` and stores nothing. The guard returns from the factory with memory, L2 and backplane writes skipped and rethrows after `GetOrSetAsync` returns; swallowing it in the compute doesn't help. The EF package marks the compute the same way through the hidden public `Sluice.Infrastructure.ActiveCompute` (`Reads`, `InFetch`, `Violate`, `Hold`, `Holds`), held by the public API files like any other member.
+**Rule:** a compute that records no dependency, or calls `GetOrSetAsync` itself (a fused fetch included), makes the call throw `InvalidOperationException` and stores nothing. The guard returns from the factory with memory, L2 and backplane writes skipped and rethrows after `GetOrSetAsync` returns; swallowing it in the compute doesn't help. The EF package marks the compute the same way through the hidden public `Sluice.Infrastructure.ActiveCompute` (`Reads`, `InFetch`, `QueryName`, `Violate`), held by the public API files like any other member.
 **Why:** a value with no dependencies is never invalidated, and a nested hit hides the inner value's dependencies. Throwing from the factory would let fail-safe serve a stale value and hide the bug.
 **Accepts:** work started under `ExecutionContext.SuppressFlow` doesn't see the compute, so every guard is off there.
 **Owner:** `SluiceCache.GetOrSetAsync` and `SluiceCache.ComputeAsync`.
@@ -104,15 +104,15 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 
 ## SLUICE-CORE-015 What a compute holds lives exactly as long as the compute
 
-**Rule:** `ActiveCompute.Hold` gives a compute one instance of each resource type, made from the application's services on first use, and the compute disposes each once it has returned, before its caller resumes. Holding something after the compute returned throws.
+**Rule:** `ActiveCompute.Hold` gives a compute one instance of each resource type, made from the application's services on first use, and the compute disposes every one once it has returned, before its caller resumes, however it ended (a value, an exception, a cancellation, a violation, no dependencies). A dispose that throws doesn't stop the rest; the caller then gets its exception (an `AggregateException` for several). Holding something after the compute returned throws. `ActiveCompute.Holds` compares by reference. Both are hidden public members of `Sluice.Infrastructure.ActiveCompute`, held by the public API files.
 **Why:** the EF package's `read.Db` context must be the compute's own: created inside it, recognisable as its own (`ActiveCompute.Holds`), and gone with it, so nothing it read outlives the compute.
 **Accepts:** a task the compute leaves running may find its resource disposed.
-**Owner:** `SluiceReads.Hold` and `SluiceReads.ReleaseAsync`, called from `SluiceCache.ComputeAsync`.
-**Proof:** `ComputeScopeTests.What_a_compute_holds_is_one_instance_per_type_and_is_disposed_when_it_ends`; the EF tests' `ComputeContextTests.A_compute_gets_one_context_that_does_not_track_and_is_disposed_when_it_ends`.
+**Owner:** `SluiceReads.Hold`, `SluiceReads.Holds` and `SluiceReads.ReleaseAsync`, called from `SluiceCache.ComputeAsync`.
+**Proof:** `ComputeScopeTests.What_a_compute_holds_is_one_instance_per_type_and_is_disposed_when_it_ends`, `What_a_compute_holds_is_disposed_however_the_compute_ends` (throws, is cancelled, records a violation, records no dependencies), `When_one_held_resource_s_dispose_throws_the_rest_are_still_disposed_and_its_exception_reaches_the_caller`, `When_several_held_resources_dispose_throws_all_are_disposed_and_the_caller_gets_every_exception`, `A_compute_holds_only_the_very_instance_it_was_given`; the EF tests' `ComputeContextTests.A_compute_gets_one_context_that_does_not_track_and_is_disposed_when_it_ends`.
 
 ## SLUICE-CORE-016 Sluice is registered once
 
 **Rule:** a second `AddSluice` on one service collection throws `InvalidOperationException`, saying to call it once.
 **Why:** FusionCache's own error for a second named cache doesn't say which call made it.
 **Owner:** `SluiceServiceCollectionExtensions.AddSluice`.
-**Proof:** `ComputeScopeTests.Registering_Sluice_twice_throws`.
+**Proof:** `FusionCacheConfigurationTests.Registering_Sluice_twice_throws`.

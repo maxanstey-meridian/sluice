@@ -62,9 +62,9 @@ instead. The same goes for a query expression interceptor of your own: one added
 `AddDbContextPool((services, options) => ...)`, `AddPooledDbContextFactory` and
 `AddDbContextFactory` all work for writes. Each use of a pooled context invalidates what it
 commits, and nothing an earlier use left uncommitted. `read.Db` needs one of the two factories;
-with `AddDbContextPool`, register a factory beside it. Contexts sharing a transaction need nothing more, as
-long as each uses `UseSluice` with the same `SluiceCache`.
-See [Contexts sharing a transaction](/guides/transactions#contexts-sharing-a-transaction).
+with `AddDbContextPool`, register a factory beside it. Contexts sharing a transaction need
+nothing more, as long as each uses `UseSluice` with the same `SluiceCache`. See
+[Contexts sharing a transaction](/guides/transactions#contexts-sharing-a-transaction).
 
 ## Reading
 
@@ -88,8 +88,8 @@ var orders = await db.Orders
 The context is made from your factory the first time the compute asks for it, and the same one
 comes back for every call in that compute. It's disposed when the compute ends. It holds nothing
 from outside the compute, so it can't hand back your request's tracked entities or their unsaved
-edits. Its queries don't track unless you ask (`AsTracking()`), and it isn't in your request's
-transaction, so it reads what's committed.
+edits. Its queries don't track, and it isn't in your request's transaction, so it reads what's
+committed.
 
 ### What a query records
 
@@ -108,10 +108,12 @@ works that out from the query when EF compiles it, so everything EF can express 
 
 Owned types and JSON columns are stored in their owner's row, so they count as the owner.
 
-A query records the whole of each table, so in the example above, a change to *any* customer
-or order evicts the value. That's always correct, just broad. When it's too broad, narrow it.
+A query records the whole of each table, so in the example above, a change to *any* customer,
+address, order or coupon evicts the value (if `Address` were an owned type, it would count as the
+customer). That's always correct, just broad. When it's too broad, narrow it.
 So you can see which queries do this, Sluice logs each one the first time it runs, at
-`Information`, naming the query and the types it reads whole.
+`Information`, naming the query and the types it reads whole (see
+[Logging](/guides/configuration#logging)).
 
 ### Narrowing to rows
 
@@ -128,7 +130,7 @@ var orders = await read.Children(db.Orders, order => order.CustomerId, customerI
 
 | Query | Reads | Evicted by a write to |
 |---|---|---|
-| `db.Customers…` | whatever it filters | any customer |
+| `db.Customers.Where(…)` | the rows its `Where` matches | any customer |
 | `read.Entity(db.Customers, key)` | the row with that primary key | that row |
 | `read.Children(db.Orders, fk, key)` | the rows whose foreign key is `key` | any of those rows, or a row joining or leaving the set |
 
@@ -137,6 +139,11 @@ Each returns an `IQueryable<T>` you can filter, order, page and project, on the 
 query still depends on every coupon. A read that finds nothing still depends on what it looked
 for, so inserting the row later evicts the cached "not found". The helpers never track and don't
 load auto-included navigations.
+
+A helper's query skips auto-includes by calling `IgnoreAutoIncludes()`, and EF applies that to
+the whole query, not just the helper's set. So a plain query combined with a helper's, in a
+join, a subquery or a `Concat`, loses its own auto-includes too. Add an `Include` for each
+navigation you need there.
 
 ### Keys
 
@@ -153,9 +160,9 @@ load auto-included navigations.
 
 ### What's refused
 
-Inside a compute, these throw `InvalidOperationException`, because Sluice can't tell what they
-read or nothing would ever evict them. [Strict Reads](/guides/strict-reads) has the list, and
-how to read them anyway:
+Inside a compute, these throw `InvalidOperationException`. Each would cache a value that no
+write evicts, or one built from data other callers shouldn't see.
+[Strict Reads](/guides/strict-reads) says why for each, and how to read them anyway:
 
 - raw SQL (`FromSql`, `SqlQuery`), table-valued functions and database functions of your own;
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
@@ -287,9 +294,19 @@ table it wrote:
 | `ExecuteUpdate` | every read of the type, and every `Children` list of its foreign keys, since rows may have moved between parents |
 | `ExecuteDelete` | the same, every `Children` list pointing at the type, and what the delete [cascades into](#database-cascades) |
 
-They follow the same timing as saves: inside a transaction, at its commit or rollback. EF
-doesn't tell Sluice which table a bulk statement wrote, so Sluice finds it in the statement's
-SQL. A column or alias named like another table evicts that table's reads too, which is safe.
+They follow the same timing as saves: inside a transaction, at its commit or rollback. One that
+fails or is cancelled still invalidates, as a save does, because it may have committed.
+
+EF doesn't tell Sluice which table a bulk statement wrote, so Sluice scans the statement's SQL
+for table names. The scan can match too much, never too little:
+
+- a table the statement only reads, in a subquery or a join, counts as written;
+- a column or alias named like another table counts as that table;
+- an unquoted, lowercase table name counts wherever it appears inside a longer name, so
+  `orders` matches in `orders_archive`.
+
+Each of those evicts more than the statement changed, which costs a recompute but never serves
+an old value.
 
 ## Writes Sluice can't see
 

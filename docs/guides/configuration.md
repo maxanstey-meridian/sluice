@@ -56,8 +56,11 @@ thrown. ASP.NET Core and the Generic Host register it. Elsewhere, call
 `services.AddLogging()`.
 
 The EF package also logs, at `Information`, the first time each cached query reads whole types
-(see [What a query records](/guides/ef-core#what-a-query-records)). Its category is
-`Sluice.EntityFrameworkCore`.
+(see [What a query records](/guides/ef-core#what-a-query-records)): "Sluice's cached query
+{Query} depends on every row of {EntityTypes}, so a write to any of their rows evicts it. …".
+It's event id 2, under the category `Sluice.EntityFrameworkCore.TrackedReads`, and it goes
+through EF's logger factory, which under dependency injection is your app's. To hide it, raise
+that category to `Warning`.
 
 FusionCache logs several lines at `Information` for every cache call. To keep them out of your
 logs, raise its category in `appsettings.json`:
@@ -187,8 +190,7 @@ that never matters.
 
 ## Shared instances and auto-clone
 
-From memory, FusionCache hands every caller the same object, EF entities from the read helpers
-included. Modifying a cached value changes it for every later caller, and no invalidation ever
+From memory, FusionCache hands every caller the same object, EF entities included. Modifying a cached value changes it for every later caller, and no invalidation ever
 undoes that. Treat cached values as immutable (records with `init` properties make that
 the default), or turn on FusionCache's auto-clone, which hands each caller its own copy. It
 copies through the serialiser, so it needs one, and every cached value must survive a round

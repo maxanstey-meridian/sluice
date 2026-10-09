@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -95,6 +96,10 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             (db, ct) => db.Promotions.ToListAsync(ct),
             "*LivePromotion, which is mapped to the view 'live_promotions'*"
         ),
+        ["derived type mapped to a view"] = (
+            (db, ct) => db.Set<LivePromotion>().ToListAsync(ct),
+            "*LivePromotion, which is mapped to the view 'live_promotions'*"
+        ),
         ["query filter reading the context"] = (
             (db, ct) => db.Accounts.ToListAsync(ct),
             "*Account's query filter reads the context's state*"
@@ -117,6 +122,19 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                     .Customers.Select(c => db.Reviews.Where(r => r.CustomerId == c.Id).ToList())
                     .ToListAsync(ct),
             "*returns Review entities*"
+        ),
+        ["entities including entities that load lazily"] = (
+            (db, ct) =>
+                db
+                    .Awards.IgnoreAutoIncludes()
+                    .Include(a => a.Review)
+                    .OrderBy(a => a.Id)
+                    .ToListAsync(ct),
+            "*returns Award entities*Review entities, which load their navigations lazily*"
+        ),
+        ["entities auto-including entities that load lazily"] = (
+            (db, ct) => db.Awards.ToListAsync(ct),
+            "*returns Award entities*Review entities, which load their navigations lazily*"
         ),
         ["entities with a lazy loader delegate"] = (
             (db, ct) => db.Ratings.ToListAsync(ct),
@@ -239,6 +257,26 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             db => [db.Customers.Dependency(-1)],
             db => [db.Coupons.Dependency(-1)]
         ),
+        ["auto-included many-to-many navigation"] = (
+            (r, ct) => r.Db<ShopDb>().Playlists.ToListAsync(ct),
+            db => [db.Songs.Dependency(-1)],
+            db => [db.Coupons.Dependency(-1)]
+        ),
+        ["auto-included many-to-many join rows"] = (
+            (r, ct) => r.Db<ShopDb>().Playlists.ToListAsync(ct),
+            db => db.PlaylistSongs.AllDependencies(),
+            db => [db.Coupons.Dependency(-1)]
+        ),
+        ["navigation an owned value auto-includes"] = (
+            (r, ct) => r.Db<ShopDb>().Jukeboxes.ToListAsync(ct),
+            db => [db.Songs.Dependency(-1)],
+            db => [db.Coupons.Dependency(-1)]
+        ),
+        ["entities without the navigation that loads lazily"] = (
+            (r, ct) => r.Db<ShopDb>().Awards.IgnoreAutoIncludes().ToListAsync(ct),
+            db => [db.Awards.Dependency(-1)],
+            db => [db.Reviews.Dependency(-1)]
+        ),
         ["subquery"] = (
             (r, ct) =>
             {
@@ -313,6 +351,17 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             },
             db => [db.Customers.Dependency(-2)],
             db => [db.Orders.Dependency(-2)]
+        ),
+        ["helper query that reads its own type again"] = (
+            (r, ct) =>
+            {
+                var db = r.Db<ShopDb>();
+                return r.Children(db.Orders, o => o.CustomerId, -1)
+                    .Select(o => db.Orders.Count(other => other.CouponId == o.CouponId))
+                    .ToListAsync(ct);
+            },
+            db => [db.Orders.Dependency(-2)],
+            db => [db.Coupons.Dependency(-1)]
         ),
         ["compiled query"] = (
             (r, ct) => _ordersOf(r.Db<ShopDb>(), -1),
@@ -540,13 +589,13 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
 
         var logged = node
             .Logs.GetSnapshot()
-            .Where(record => record.Message.Contains("reads every row of"))
+            .Where(record => record.Message.Contains("depends on every row of"))
             .ToList();
         logged.Should().ContainSingle();
         logged[0].Level.Should().Be(LogLevel.Information);
         logged[0]
             .Message.Should()
-            .Contain("ef-tracked-whole-types reads every row of Customer, so")
+            .Contain("ef-tracked-whole-types depends on every row of Customer, so")
             .And.Contain("read.Entity or read.Children");
     }
 
@@ -613,6 +662,93 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         await plain.Should().ThrowAsync<InvalidOperationException>().WithMessage(ForeignContext);
         await helper.Should().ThrowAsync<InvalidOperationException>().WithMessage(ForeignContext);
         await lazy.Should().ThrowAsync<InvalidOperationException>().WithMessage(ForeignContext);
+    }
+
+    [Fact]
+    public async Task A_read_helper_called_with_another_compute_s_read_throws()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        SluiceReads? other = null;
+        var captured = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // A compute that lets its read escape, and is still running when another compute uses it.
+        var first = CachedRead.Of(
+            node.Cache,
+            async (read, ct) =>
+            {
+                await read.Entity(read.Db<ShopDb>().Customers, -2).ToListAsync(ct);
+                other = read;
+                captured.SetResult();
+                await release.Task;
+            }
+        );
+        await captured.Task;
+        var call = () =>
+            CachedRead.Of(
+                node.Cache,
+                async (read, ct) =>
+                {
+                    await read.Entity(read.Db<ShopDb>().Customers, -1).ToListAsync(ct);
+                    await other!.Entity(read.Db<ShopDb>().Orders, -1).ToListAsync(ct);
+                }
+            );
+
+        await call.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("*another compute's read*Use the read the compute was given*");
+        release.SetResult();
+        await first;
+    }
+
+    [Fact]
+    public async Task A_query_on_a_table_mapped_type_whose_TPC_root_has_a_view_is_cached_and_evicted_by_a_write_to_it()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+
+        var stored = await CachedRead.Of(
+            node.Cache,
+            (read, ct) => read.Db<ShopDb>().Set<StoredPromotion>().ToListAsync(ct)
+        );
+
+        (await stored.WasEvicted()).Should().BeFalse("it was cached");
+        db.Add(new StoredPromotion { Code = "TEN" });
+        await db.SaveChangesAsync();
+        (await stored.WasEvicted()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_query_the_analysis_fails_on_is_tagged_as_untrackable_instead_of_failing_to_compile()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var customer = Expression.Parameter(typeof(Customer), "c");
+        var query = Expression.Call(
+            typeof(Queryable),
+            nameof(Queryable.Where),
+            [typeof(Customer)],
+            db.Customers.AsQueryable().Expression,
+            Expression.Quote(Expression.Lambda(new Unanalysable(), customer))
+        );
+
+        // The analysis reads only the event's context, so its logging parts are left out.
+        var tagged = (MethodCallExpression)
+            TrackedReads.Instance.QueryCompilationStarting(
+                query,
+                new QueryExpressionEventData(null!, null!, db, query, null!)
+            );
+
+        ((MethodCallExpression)tagged.Arguments[0])
+            .Arguments[1]
+            .Should()
+            .BeOfType<ConstantExpression>()
+            .Which.Value.Should()
+            .Be(
+                "Sluice can't track: Sluice couldn't work out what it reads "
+                    + "(InvalidOperationException: The analysis failed on this.)"
+            );
     }
 
     [Theory]
@@ -919,4 +1055,17 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     }
 
     private sealed record OwnRows(int Ada, int Parcel, int Review);
+
+    // An expression the analysis fails on, standing for a bug in it.
+    private sealed class Unanalysable : Expression
+    {
+        public override ExpressionType NodeType => ExpressionType.Extension;
+
+        public override Type Type => typeof(bool);
+
+        protected override Expression VisitChildren(ExpressionVisitor visitor) =>
+            throw new InvalidOperationException(
+                $"The analysis failed{Environment.NewLine}on this."
+            );
+    }
 }

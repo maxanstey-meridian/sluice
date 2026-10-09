@@ -4,8 +4,8 @@ using Sluice.EntityFrameworkCore;
 namespace Sluice;
 
 /// <summary>
-/// The dependencies Sluice derives from the EF model, for invalidating after a write a <c>UseSluice</c> context
-/// doesn't make: raw SQL, another service, or a context without <c>UseSluice</c>. Pass them to
+/// The dependencies Sluice derives from the EF model, for invalidating after a write Sluice doesn't see: raw SQL
+/// (on any context, <c>UseSluice</c> or not), another service, or a context without <c>UseSluice</c>. Pass them to
 /// <see cref="SluiceCache.InvalidateAsync(IEnumerable{Dependency})"/> after the write commits; they batch with
 /// dependencies from declared sources.
 /// </summary>
@@ -47,6 +47,7 @@ public static class DbSetDependencyExtensions
     {
         ArgumentNullException.ThrowIfNull(set);
 
+        ModelSources.EnsureTable(set.EntityType);
         return ModelSources.AllDependencies(set.EntityType);
     }
 }

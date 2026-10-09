@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
 using Sluice.EntityFrameworkCore;
 
 namespace Sluice;
@@ -39,11 +38,7 @@ public static class SluiceDbContextOptionsBuilderExtensions
         // EF composes every configuration registered for a context type (AddDbContext and AddDbContextFactory for the
         // same type, say), so this can run twice for one context. Twice would capture each save twice, and the second
         // capture would publish the first before its commit.
-        if (
-            builder
-                .Options.FindExtension<CoreOptionsExtension>()
-                ?.Interceptors?.Contains(TrackedReads.Instance) == true
-        )
+        if (TrackedReads.IsOn(builder.Options))
         {
             return builder;
         }

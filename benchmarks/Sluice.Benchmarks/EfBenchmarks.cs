@@ -20,8 +20,8 @@ public sealed class ItemDb(DbContextOptions<ItemDb> options) : DbContext(options
 
 /// <summary>
 /// What <c>UseSluice</c> adds to EF: a save of one changed row, and a cache miss that reads one row on the compute's
-/// own pooled context, through a read helper and as a plain query, each beside the same without Sluice. On in-memory SQLite, so the database is about as fast as it gets and
-/// Sluice's share is as large as it gets.
+/// own pooled context, through a read helper and as a plain query, each beside the same without Sluice. On in-memory
+/// SQLite, so the database is about as fast as it gets and Sluice's share is as large as it gets.
 /// </summary>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]

@@ -3,8 +3,9 @@ using System.Collections.Concurrent;
 namespace Sluice;
 
 /// <summary>
-/// The duplicate <see cref="Query{TKey, TValue}"/> name guard. Nothing ever reads a declaration back from
-/// here. Source names aren't checked: a clash there only over-invalidates.
+/// The query name guard, for keyed <see cref="Query{TKey, TValue}"/> and keyless <see cref="Query{TValue}"/> alike:
+/// a name must not be blank, contain ':' or start with <c>__fc</c>, and must keep one query type. Nothing ever reads
+/// a declaration back from here. Source names aren't checked: a clash there only over-invalidates.
 /// </summary>
 internal static class QueryNames
 {

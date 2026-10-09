@@ -11,9 +11,11 @@ public sealed class SluiceReads
 {
     private readonly Lock _lock = new();
     private readonly HashSet<string> _tags = new(StringComparer.Ordinal);
-    private readonly Dictionary<Type, IAsyncDisposable> _held = [];
     private readonly IServiceProvider _services;
     private readonly CancellationToken _ct;
+
+    // Made on the first Hold: a hit, and a compute that holds nothing, never needs it.
+    private Dictionary<Type, IAsyncDisposable>? _held;
     private bool _open = true;
     private Exception? _violation;
 
@@ -47,8 +49,9 @@ public sealed class SluiceReads
     /// Safe to call from concurrent tasks inside one compute.
     /// </summary>
     /// <remarks>
-    /// The fetch is a declared read: the dependencies cover whatever it reads, so the EF package lets it run any EF
-    /// query, on any context, and records nothing more for it. Calling <see cref="SluiceCache.GetOrSetAsync{TKey, TValue}"/> from it still throws.
+    /// The fetch is a declared read: the dependencies cover whatever it reads, so the EF package lets its queries run
+    /// on any context, not only <c>read.Db</c>'s, and records nothing more for them. An EF write, a read inside a
+    /// transaction, and a call to <see cref="SluiceCache.GetOrSetAsync{TKey, TValue}"/> still throw there.
     /// </remarks>
     /// <exception cref="ArgumentException">
     /// <paramref name="dependencies"/> is empty, or holds a null; the fetch doesn't run.
@@ -106,11 +109,12 @@ public sealed class SluiceReads
             if (!_open)
             {
                 throw new InvalidOperationException(
-                    "The compute has already returned, so it can't hold anything more. Await every read before "
-                        + "returning from the compute."
+                    "The compute has already returned, so it can't open anything more (read.Db included). Await "
+                        + "every read before returning from the compute."
                 );
             }
 
+            _held ??= [];
             if (_held.TryGetValue(typeof(T), out var held))
             {
                 return (T)held;
@@ -122,20 +126,48 @@ public sealed class SluiceReads
         }
     }
 
-    internal bool Holds(object resource)
+    // By reference: a resource that overrides Equals mustn't pass for the compute's own.
+    internal bool Holds(IAsyncDisposable resource)
     {
         lock (_lock)
         {
-            return resource is IAsyncDisposable held && _held.ContainsValue(held);
+            return _held is not null && _held.Values.Any(held => ReferenceEquals(held, resource));
         }
     }
 
-    // Once the compute has closed, so nothing is added after.
+    // Once the compute has closed, so nothing is added after. Disposes every resource even when one throws, so a
+    // pooled context still goes back to its pool, then throws what they threw.
     internal async ValueTask ReleaseAsync()
     {
+        if (_held is null)
+        {
+            return;
+        }
+
+        List<Exception>? failures = null;
         foreach (var held in _held.Values)
         {
-            await held.DisposeAsync().ConfigureAwait(false);
+            try
+            {
+                await held.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception failure)
+            {
+                (failures ??= []).Add(failure);
+            }
+        }
+
+        if (failures is [var only])
+        {
+            ExceptionDispatchInfo.Throw(only);
+        }
+
+        if (failures is not null)
+        {
+            throw new AggregateException(
+                "Disposing what the compute held threw more than once.",
+                failures
+            );
         }
     }
 
