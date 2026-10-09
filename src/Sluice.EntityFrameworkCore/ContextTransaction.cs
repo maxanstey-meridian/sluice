@@ -32,7 +32,6 @@ internal readonly record struct ContextTransaction(DbTransaction? Ef, Transactio
     internal static IRelationalConnection Connection(IInfrastructure<IServiceProvider> context) =>
         context.Instance.GetService(typeof(IRelationalConnection)) as IRelationalConnection
         ?? throw new NotSupportedException(
-            "Sluice supports relational EF providers only: it reads a context's transaction from its relational "
-                + "connection, and checks a compute's reads on its SQL commands. This context's provider has neither."
+            "Sluice supports relational EF providers only, and this context's provider isn't relational."
         );
 }

@@ -25,9 +25,9 @@ public static class SluiceDbContextOptionsBuilderExtensions
     /// <remarks>
     /// <para>
     /// Strict reads, inside a compute: a command not built by a read helper throws
-    /// <see cref="InvalidOperationException"/> when it runs, so lazy loading, explicit loading, <c>FromSql</c>,
-    /// compiled queries and writes can't be used there outside the fetch of <c>read.From(dependency, fetch)</c>, nor
-    /// can a helper's query run inside a transaction. Inside a compute or not, a helper's query that reads beyond its
+    /// <see cref="InvalidOperationException"/> when it runs, so lazy loading, explicit loading, <c>FromSql</c> and
+    /// compiled queries can't be used there outside the fetch of <c>read.From(dependency, fetch)</c>, writes can't be
+    /// used there at all, and no read can run inside a transaction. Inside a compute or not, a helper's query that reads beyond its
     /// own rows (<see cref="SluiceReadsExtensions"/> lists how) throws when EF compiles it, which happens when it runs.
     /// Commands run outside a compute aren't checked.
     /// </para>

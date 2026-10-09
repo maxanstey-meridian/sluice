@@ -291,6 +291,19 @@ public sealed class DependencyTrackingTests
             node
                 .Cache.GetOrSetAsync(_invoiceSummary, "fused", (read, _) => read.From([], Fetch))
                 .AsTask();
+
+        await fused
+            .Should()
+            .ThrowExactlyAsync<ArgumentException>()
+            .WithMessage("*must declare what it reads*");
+        fetched.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_record_only_read_of_no_dependencies_counts_as_no_read()
+    {
+        await using var node = new SluiceNode();
+
         var recordOnly = () =>
             node
                 .Cache.GetOrSetAsync(
@@ -304,18 +317,10 @@ public sealed class DependencyTrackingTests
                 )
                 .AsTask();
 
-        await fused
-            .Should()
-            .ThrowExactlyAsync<ArgumentException>()
-            .WithMessage("*must declare what it reads*");
-        fetched.Should().BeFalse();
         await recordOnly
             .Should()
             .ThrowExactlyAsync<InvalidOperationException>()
-            .WithMessage(
-                "*recorded no dependencies*",
-                "recording nothing is allowed, and counts as no read"
-            );
+            .WithMessage("*recorded no dependencies*");
     }
 
     [Fact]

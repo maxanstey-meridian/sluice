@@ -12,9 +12,9 @@ namespace Sluice.EntityFrameworkCore;
 /// Makes a compute's EF reads go through the read helpers, so every row it reads is covered by a recorded
 /// dependency. The helpers mark their queries with <see cref="Marker"/>. Inside a compute, a command without the
 /// marker throws (the origin check: forgotten reads, lazy and explicit loading, <c>FromSql</c>, compiled queries,
-/// writes), and so does a marked one inside a transaction. A marked query that reads anything beyond its own rows
-/// (another set, a navigation, <c>Include</c>, a query filter that does either), tracks, or returns entities that load
-/// lazily throws when EF compiles it, inside a compute or not (the shape check).
+/// writes), and so does a marked one, or a read a fused fetch runs, inside a transaction. A marked query that reads
+/// anything beyond its own rows (another set, a navigation, <c>Include</c>, a query filter that does either), tracks,
+/// or returns entities that load lazily throws when EF compiles it, inside a compute or not (the shape check).
 /// </summary>
 /// <remarks>
 /// One instance for the whole process, separate from <see cref="SluiceInterceptor"/>, which is one per cache: EF
@@ -22,7 +22,7 @@ namespace Sluice.EntityFrameworkCore;
 /// its own model and compiled-query cache) per distinct set of them, throwing after twenty. Nothing here depends on
 /// the cache. Each violation is also recorded on the running compute, so a compute that catches it still caches
 /// nothing and its caller still gets it. A fused <c>read.From(dependency, fetch)</c> fetch is a declared read, so the
-/// origin check lets its commands through while it runs; the other checks still apply there.
+/// origin check lets its reads through while it runs, though not its writes; the other checks still apply there.
 /// </remarks>
 internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInterceptor
 {
@@ -58,7 +58,7 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
             );
         }
 
-        ContextTransaction.Connection(context);
+        _ = ContextTransaction.Connection(context);
         return set.TagWith(Marker).AsNoTracking().IgnoreAutoIncludes();
     }
 
@@ -156,11 +156,11 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
         }
     }
 
-    // A command a read helper didn't build, unless it runs in a fused fetch, whose declared dependencies cover it. Or a
-    // helper's command inside a transaction (in a fetch too), where a compute would cache rows other callers can't see
-    // yet, or an old snapshot under RepeatableRead or Serializable. The transaction is read as the write side reads it,
-    // from EF's own inputs: the command's own transaction would miss an enlisted or ambient one, which the connection
-    // carries instead.
+    // A write a read helper didn't build, anywhere in a compute. A read a helper didn't build, unless it runs in a fused
+    // fetch, whose declared dependencies cover it. Or any read the compute may make (a helper's, or one in a fetch)
+    // inside a transaction, where a compute would cache rows other callers can't see yet, or an old snapshot under
+    // RepeatableRead or Serializable. The transaction is read as the write side reads it, from EF's own inputs: the
+    // command's own transaction would miss an enlisted or ambient one, which the connection carries instead.
     private static InvalidOperationException? ViolationOf(
         (DbCommand Command, CommandEventData Event) execution,
         bool inFetch
@@ -169,7 +169,18 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
         var (command, eventData) = execution;
         if (!command.CommandText.Contains(MarkerComment, StringComparison.Ordinal))
         {
-            return inFetch ? null : NotFromHelper(command, eventData.CommandSource);
+            if (IsWrite(eventData.CommandSource))
+            {
+                return new(
+                    $"An EF write ran inside a compute ({Statement(command)}). Writes can't run inside a compute, "
+                        + "which is a read: run them before or after GetOrSetAsync."
+                );
+            }
+
+            if (!inFetch)
+            {
+                return NotFromHelper(command);
+            }
         }
 
         if (eventData.Context is { } context && !ContextTransaction.Of(context).IsNone)
@@ -184,25 +195,20 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
     }
 
     // EF reports ExecuteDelete's command as ExecuteUpdate too.
-    private static InvalidOperationException NotFromHelper(
-        DbCommand command,
-        CommandSource source
-    ) =>
+    private static bool IsWrite(CommandSource source) =>
         source
             is CommandSource.SaveChanges
                 or CommandSource.ExecuteSqlRaw
-                or CommandSource.ExecuteUpdate
-            ? new(
-                $"An EF write ran inside a compute ({Statement(command)}). Writes can't run inside a compute, which "
-                    + "is a read: run them before or after GetOrSetAsync."
-            )
-            : new(
-                $"An EF command that wasn't built by a Sluice read helper ran inside a compute ({Statement(command)}), "
-                    + "so nothing recorded what it read and no write would invalidate the cached value. Read through "
-                    + "read.Entity, read.Children or read.All, or run it in the fetch of read.From(dependency, fetch) "
-                    + "with a declared Source. Lazy and explicit loading, FromSql and compiled queries can't run "
-                    + "anywhere else inside a compute."
-            );
+                or CommandSource.ExecuteUpdate;
+
+    private static InvalidOperationException NotFromHelper(DbCommand command) =>
+        new(
+            $"An EF command that wasn't built by a Sluice read helper ran inside a compute ({Statement(command)}), "
+                + "so nothing recorded what it read and no write would invalidate the cached value. Read through "
+                + "read.Entity, read.Children or read.All, or run it in the fetch of read.From(dependency, fetch) "
+                + "with a declared Source. Lazy and explicit loading, FromSql and compiled queries can't run "
+                + "anywhere else inside a compute."
+        );
 
     // The command's first line after its tags, so the message says which command it was. A LINQ query's captured
     // values go to the database as parameters and don't show, but constants inlined in a query and the text of raw
@@ -497,8 +503,8 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
                     {
                         var subject =
                             part == entityType
-                                ? $"{entityType.DisplayName()} entities, which"
-                                : $"{entityType.DisplayName()} entities, whose owned {part.ClrType.Name} values";
+                                ? $"{entityType.ShortName()} entities, which"
+                                : $"{entityType.ShortName()} entities, whose owned {part.ShortName()} values";
                         refused.Add(
                             (
                                 entityType.ClrType,

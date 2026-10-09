@@ -7,8 +7,6 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class ReadGuardTests(PostgresFixture postgres)
 {
-    internal const string InTransaction = "*can't run inside a transaction*";
-
     [Fact]
     public async Task A_key_of_the_wrong_type_throws_naming_the_expected_type()
     {
@@ -168,9 +166,17 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             );
         var all = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
 
-        await entity.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
-        await children.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
-        await all.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
+        await entity
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(Messages.InTransaction);
+        await children
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(Messages.InTransaction);
+        await all.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(Messages.InTransaction);
 
         await transaction.CommitAsync();
         await transaction.DisposeAsync();
@@ -188,7 +194,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
 
         var read = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
 
-        await read.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
+        await read.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(Messages.InTransaction);
     }
 
     [Fact]
@@ -200,7 +208,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
 
         var read = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
 
-        await read.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
+        await read.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(Messages.InTransaction);
     }
 
     [Fact]
@@ -229,6 +239,8 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             CachedRead.Of(node.Cache, (r, ct) => r.All(db.TopCustomers).ToListAsync(ct));
         var function = () =>
             CachedRead.Of(node.Cache, (r, ct) => r.All(db.RecentOrders).ToListAsync(ct));
+        var rootOfAView = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.All(db.Promotions).ToListAsync(ct));
 
         await keylessView.Should().ThrowAsync<NotSupportedException>().WithMessage("*keyless*");
         await view.Should()
@@ -239,6 +251,12 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             .Should()
             .ThrowAsync<NotSupportedException>()
             .WithMessage("*function 'recent_orders'*");
+        await rootOfAView
+            .Should()
+            .ThrowAsync<NotSupportedException>()
+            .WithMessage(
+                "Promotion has the derived type LivePromotion, which is mapped to the view 'live_promotions'*"
+            );
         db.Invoking(d => d.CustomerTotals.AllDependencies())
             .Should()
             .Throw<NotSupportedException>();
@@ -246,5 +264,6 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         db.Invoking(d => d.ActiveCustomers.AllDependencies())
             .Should()
             .Throw<NotSupportedException>();
+        db.Invoking(d => d.Promotions.AllDependencies()).Should().Throw<NotSupportedException>();
     }
 }

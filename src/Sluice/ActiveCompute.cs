@@ -1,6 +1,9 @@
 namespace Sluice;
 
-/// <summary>The ambient "a compute is running" flag: the open <see cref="SluiceReads"/> of the current flow.</summary>
+/// <summary>
+/// The ambient "a compute is running" flag: the open <see cref="SluiceReads"/> of the current flow, and the scope of
+/// the fused fetch it's running in, if any.
+/// </summary>
 internal static class ActiveCompute
 {
     private static readonly AsyncLocal<SluiceReads?> _current = new();
@@ -27,9 +30,10 @@ internal static class ActiveCompute
     /// A fused fetch (<see cref="SluiceReads.From{T}(IEnumerable{Dependency}, Func{CancellationToken, Task{T}})"/>)
     /// is a declared read: the dependencies recorded with it cover whatever it reads. So a check of where a read
     /// comes from may let it through there; every other check ignores it. The fetch lasts from its call until its task
-    /// completes, in its own flow: a task it started that runs on after it, the rest of the compute, and a compute
-    /// started from the fetch's flow are outside it. The one internal <c>Sluice.EntityFrameworkCore</c> uses (its
-    /// strict reads record their violations here), which is why that package depends on this exact core version.
+    /// completes, in its own flow (see <see cref="Fetch{T}"/>): a task it started that runs on after it (unless a fetch
+    /// it's nested in is still running), the rest of the compute, and a compute started from the fetch's flow are
+    /// outside it. The one internal <c>Sluice.EntityFrameworkCore</c> uses (its strict reads record their violations
+    /// here), which is why that package depends on this exact core version.
     /// </remarks>
     internal static Exception? Violate<TState>(
         TState state,
@@ -51,55 +55,38 @@ internal static class ActiveCompute
     }
 
     /// <summary>
-    /// Runs <paramref name="reads"/>' fused fetch as a declared read in its own flow: the scope is set for the call and
-    /// restored after it, so an async fetch's continuations keep it, and it ends when the fetch's task completes (or
-    /// the fetch throws), so nothing the fetch left running is inside it after that.
+    /// Runs <paramref name="reads"/>' fused fetch as a declared read, in a scope that its flow and the tasks it starts
+    /// inherit, and that ends before the returned task completes. The scope is set inside this async method, so it
+    /// doesn't reach the caller, and a scope opened inside it chains to it, so a task an inner fetch leaves running is
+    /// still inside the outer fetch while that runs. Not covered: a continuation registered on the fetch's own task
+    /// before the fetch returns it can run before the scope ends, and work started under
+    /// <see cref="ExecutionContext.SuppressFlow"/> carries no scope (and no compute).
     /// </summary>
-    internal static Task<T> Fetch<T>(
+    internal static async Task<T> Fetch<T>(
         SluiceReads reads,
         Func<CancellationToken, Task<T>> fetch,
         CancellationToken ct
     )
     {
-        var outer = _fetch.Value;
-        var scope = new FetchScope(reads);
+        var scope = new FetchScope(reads, _fetch.Value);
         _fetch.Value = scope;
-        Task<T>? task = null;
         try
         {
-            task = fetch(ct);
-            return task;
+            return await fetch(ct).ConfigureAwait(false);
         }
         finally
         {
-            _fetch.Value = outer;
-            scope.EndWith(task);
+            scope.End();
         }
     }
 
-    private sealed class FetchScope(SluiceReads reads)
+    private sealed class FetchScope(SluiceReads reads, FetchScope? outer)
     {
         private volatile bool _ended;
 
-        internal bool IsOpenFor(SluiceReads current) => !_ended && current == reads;
+        internal bool IsOpenFor(SluiceReads current) =>
+            (!_ended && current == reads) || outer?.IsOpenFor(current) == true;
 
-        // Ends now if the fetch threw or has completed, else as its task completes. The continuation is registered
-        // before the fetch's caller can await the task, and runs synchronously, so it runs before an await resumes.
-        internal void EndWith(Task? task)
-        {
-            if (task is null || task.IsCompleted)
-            {
-                _ended = true;
-                return;
-            }
-
-            _ = task.ContinueWith(
-                static (_, scope) => ((FetchScope)scope!)._ended = true,
-                this,
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default
-            );
-        }
+        internal void End() => _ended = true;
     }
 }

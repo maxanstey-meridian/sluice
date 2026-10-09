@@ -250,7 +250,7 @@ public sealed class StrictReadTests(PostgresFixture postgres)
         ),
         ["a lazily loading owned value"] = (
             (db, r, ct) => r.All(db.Deliveries).Select(d => d.Signature).ToListAsync(ct),
-            "*returns *Signature entities, which load their navigations lazily*"
+            "*returns Signature entities, which load their navigations lazily*"
         ),
         ["entities holding their context"] = (
             (db, r, ct) => r.All(db.Baskets).ToListAsync(ct),
@@ -265,10 +265,7 @@ public sealed class StrictReadTests(PostgresFixture postgres)
     > _caughtViolations = new()
     {
         ["plain query"] = ((db, _, ct) => db.Orders.ToListAsync(ct), NotFromHelper),
-        ["read beyond its own rows"] = (
-            (db, r, ct) => r.All(db.Orders).Include(o => o.Customer).ToListAsync(ct),
-            "*Include*"
-        ),
+        ["read beyond its own rows"] = _beyondOwnRows["Include"],
         ["read beyond its own rows in a fused fetch"] = (
             (db, r, ct) =>
                 r.From(
@@ -289,7 +286,33 @@ public sealed class StrictReadTests(PostgresFixture postgres)
                         return await r.All(db.Customers).ToListAsync(fetchCt);
                     }
                 ),
-            ReadGuardTests.InTransaction
+            Messages.InTransaction
+        ),
+        ["plain query in a transaction in a fused fetch"] = (
+            (db, r, _) =>
+                r.From(
+                    _totals.All,
+                    async fetchCt =>
+                    {
+                        await using var transaction = await db.Database.BeginTransactionAsync(
+                            fetchCt
+                        );
+                        return await db.Customers.ToListAsync(fetchCt);
+                    }
+                ),
+            Messages.InTransaction
+        ),
+        ["write in a fused fetch"] = (
+            (db, r, _) =>
+                r.From(
+                    _totals.All,
+                    fetchCt =>
+                    {
+                        db.Customers.Add(new Customer { Name = "Cy" });
+                        return db.SaveChangesAsync(fetchCt);
+                    }
+                ),
+            Write
         ),
     };
 
@@ -613,7 +636,7 @@ public sealed class StrictReadTests(PostgresFixture postgres)
 
         await read.Should()
             .ThrowAsync<InvalidOperationException>()
-            .WithMessage(ReadGuardTests.InTransaction);
+            .WithMessage(Messages.InTransaction);
     }
 
     [Fact]
@@ -746,11 +769,12 @@ public sealed class StrictReadTests(PostgresFixture postgres)
                     await Task.Yield();
                     return 0;
                 },
-                _ => _ =>
+                "throws synchronously" => _ =>
                 {
                     left = Task.Run(CountOnceEnded);
                     throw new TimeoutException("The fetch failed.");
                 },
+                _ => throw new ArgumentOutOfRangeException(nameof(ending)),
             };
 
             try
@@ -771,6 +795,49 @@ public sealed class StrictReadTests(PostgresFixture postgres)
         await call.Should().ThrowAsync<InvalidOperationException>().WithMessage(NotFromHelper);
         await call.Should().ThrowAsync<InvalidOperationException>();
         runs.Should().Be(2, "nothing was cached");
+    }
+
+    [Fact]
+    public async Task A_query_an_inner_fused_fetch_leaves_running_passes_while_the_outer_fetch_runs()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        var count = 0;
+
+        var call = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, _) =>
+                    read.From(
+                        _totals.All,
+                        async _ =>
+                        {
+                            var innerEnded = new TaskCompletionSource(
+                                TaskCreationOptions.RunContinuationsAsynchronously
+                            );
+                            Task<int>? left = null;
+                            await read.From(
+                                _totals.For(ada),
+                                _ =>
+                                {
+                                    left = Task.Run(async () =>
+                                    {
+                                        await innerEnded.Task;
+                                        return await db.Customers.CountAsync();
+                                    });
+                                    return Task.FromResult(0);
+                                }
+                            );
+
+                            innerEnded.SetResult();
+                            return count = await left!;
+                        }
+                    )
+            );
+
+        await call.Should().NotThrowAsync();
+        count.Should().BeGreaterThanOrEqualTo(2);
     }
 
     [Fact]

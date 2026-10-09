@@ -152,13 +152,17 @@ internal static class ModelSources
         : entityType.GetViewName() is { } view ? $"is mapped to the view '{view}'"
         : entityType.GetFunctionName() is { } function ? $"is mapped to the function '{function}'"
         : entityType.GetSqlQuery() is not null ? "is mapped to a SQL query"
-        : entityType.GetTableName() is not null
-        || entityType.IsAbstract()
-            && entityType
-                .GetDerivedTypes()
-                .All(derived => derived.IsAbstract() || Unmapped(derived) is null)
-            ? null
-        : "isn't mapped to a table";
+        : entityType.GetTableName() is not null ? null
+        : !entityType.IsAbstract() ? "isn't mapped to a table"
+        : entityType
+            .GetDerivedTypes()
+            .Where(derived => !derived.IsAbstract())
+            .Select(derived =>
+                Unmapped(derived) is { } reason
+                    ? $"has the derived type {derived.DisplayName()}, which {reason}"
+                    : null
+            )
+            .FirstOrDefault(reason => reason is not null);
 
     // A composite key, which only writes produce, arrives as an array of its values in key order.
     private static Source<object> Build(string name, IReadOnlyList<IProperty> properties) =>

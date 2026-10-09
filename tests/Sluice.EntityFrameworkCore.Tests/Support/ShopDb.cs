@@ -199,6 +199,14 @@ public sealed class RecentOrder
     public int Id { get; set; }
 }
 
+/// <summary>Mapped table-per-concrete-type, with its one concrete type read through a view.</summary>
+public abstract class Promotion
+{
+    public int Id { get; set; }
+}
+
+public sealed class LivePromotion : Promotion;
+
 /// <summary>Loads its customer lazily, through the <see cref="ILazyLoader"/> EF passes its constructor.</summary>
 public sealed class Review
 {
@@ -346,6 +354,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<ActiveCustomer> ActiveCustomers => Set<ActiveCustomer>();
     public DbSet<TopCustomer> TopCustomers => Set<TopCustomer>();
     public DbSet<RecentOrder> RecentOrders => Set<RecentOrder>();
+    public DbSet<Promotion> Promotions => Set<Promotion>();
     public DbSet<Review> Reviews => Set<Review>();
     public DbSet<Ticket> Tickets => Set<Ticket>();
     public DbSet<Memo> Memos => Set<Memo>();
@@ -452,13 +461,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Parcel>().OwnsOne(p => p.Address, address => address.OwnsOne(a => a.Contact));
         model.Entity<Parcel>().OwnsMany(p => p.Stops);
         model.Entity<Parcel>().OwnsOne(p => p.Label, label => label.ToJson());
-        model
-            .Entity<Delivery>()
-            .OwnsOne(
-                d => d.Signature,
-                signature =>
-                    signature.HasOne(s => s.Signer).WithMany().HasForeignKey(s => s.SignerId)
-            );
+        model.Entity<Delivery>().OwnsOne(d => d.Signature);
         model
             .Entity<Bin>()
             .HasOne<Warehouse>()
@@ -487,5 +490,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<ActiveCustomer>().ToView("active_customers");
         model.Entity<TopCustomer>().ToSqlQuery("select 1 as \"Id\"");
         model.Entity<RecentOrder>().ToFunction("recent_orders");
+        model.Entity<Promotion>().UseTpcMappingStrategy();
+        model.Entity<LivePromotion>().ToView("live_promotions");
     }
 }
