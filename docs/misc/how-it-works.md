@@ -41,8 +41,8 @@ The caller still gets its value; the next caller recomputes.
 
 ### The guards
 
-A compute that recorded nothing, or called `GetOrSetAsync` from inside itself, is a bug. Sluice
-doesn't throw from the factory, because FusionCache's fail-safe would catch the exception and
+A compute that recorded nothing, called `GetOrSetAsync` from inside itself, or used another
+compute's `read`, is a bug. Sluice doesn't throw from the factory, because FusionCache's fail-safe would catch the exception and
 serve a stale value instead. The factory records the violation, tells FusionCache to skip the
 memory write, the distributed write and the backplane message, and returns. `GetOrSetAsync` then
 throws once FusionCache returns. The EF package's strict-read checks use the same route, so a
@@ -51,7 +51,8 @@ compute that catches their exception still caches nothing.
 A compute also runs outside the caller's ambient transaction (`TransactionScope`), so a
 connection it opens can't see the caller's uncommitted rows. And it can hold resources for its
 own lifetime: the EF package's `read.Db` context is one, made on first use and disposed when the
-compute ends.
+compute ends, newest first. A dispose that throws takes the guards' route too, so it can't hide
+the compute's own exception or let fail-safe serve a stale value.
 
 "A compute is running" is an `AsyncLocal` set inside the factory, so it flows into tasks the
 compute starts, and not into anything else.

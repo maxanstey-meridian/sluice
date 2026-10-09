@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
+using Sluice.Infrastructure;
 using Sluice.Tests.Support;
 using ZiggyCreatures.Caching.Fusion;
 
@@ -170,5 +171,85 @@ public sealed class ComputeGuardTests
             .ThrowAsync<InvalidOperationException>()
             .WithMessage("*inside another compute*");
         (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#3");
+    }
+
+    private sealed class Resource : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    // Nested computes are refused, so a read can only reach another compute by being captured: compute A's read,
+    // used in compute B while A is still running. B catches the exception, which must not help.
+    [Theory]
+    [InlineData("records")]
+    [InlineData("fetches")]
+    [InlineData("holds")]
+    public async Task Using_another_running_compute_s_read_throws_and_caches_nothing(string use)
+    {
+        await using var node = new SluiceNode();
+        SluiceReads? captured = null;
+        var aStarted = new TaskCompletionSource();
+        var aMayFinish = new TaskCompletionSource();
+        var fetched = false;
+
+        var a = node
+            .Cache.GetOrSetAsync(
+                _outer,
+                "a",
+                async (read, _) =>
+                {
+                    read.From(_rows.For(1));
+                    captured = read;
+                    aStarted.SetResult();
+                    await aMayFinish.Task;
+                    return "a";
+                }
+            )
+            .AsTask();
+        await aStarted.Task;
+
+        var b = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _outer,
+                    "b",
+                    async (read, _) =>
+                    {
+                        read.From(_rows.For(2));
+                        try
+                        {
+                            switch (use)
+                            {
+                                case "records":
+                                    captured!.From(_rows.For(3));
+                                    break;
+                                case "fetches":
+                                    await captured!.From(
+                                        _rows.For(3),
+                                        _ => Task.FromResult(fetched = true)
+                                    );
+                                    break;
+                                default:
+                                    ActiveCompute.Hold(captured!, _ => new Resource());
+                                    break;
+                            }
+                        }
+                        catch (InvalidOperationException) { }
+
+                        return "b";
+                    }
+                )
+                .AsTask();
+
+        await b.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(
+                "A read from another compute was used inside this one, so what it read would be recorded on the "
+                    + "wrong compute. Use the read the compute was given."
+            );
+        fetched.Should().BeFalse();
+        aMayFinish.SetResult();
+        (await a).Should().Be("a");
+        (await node.Cache.GetOrSetAsync(_outer, "b", Good)).Should().Be("good#1");
     }
 }

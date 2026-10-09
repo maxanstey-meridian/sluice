@@ -71,7 +71,10 @@ public static class ActiveCompute
     /// <typeparam name="T">The resource; the compute holds one of each type.</typeparam>
     /// <param name="reads">The compute's reads.</param>
     /// <param name="create">Makes the resource from the application's services.</param>
-    /// <exception cref="InvalidOperationException">The compute has already returned.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The compute has already returned, or <paramref name="reads"/> is another compute's, used inside a running
+    /// compute.
+    /// </exception>
     public static T Hold<T>(SluiceReads reads, Func<IServiceProvider, T> create)
         where T : class, IAsyncDisposable
     {

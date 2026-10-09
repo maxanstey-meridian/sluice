@@ -86,7 +86,7 @@ internal sealed class CapturedSave
             // row under one. Which row is unknown, so the whole type is invalidated, and so is the whole of each
             // foreign key still pointing at such a row.
             var entityType = entry.Metadata;
-            var source = ModelSources.WrittenEntity(entityType);
+            var source = ModelSources.Entity(entityType);
             dependencies.Add(
                 KeyOf(entry, entityType.FindPrimaryKey()!.Properties, Current) is { } key
                     ? source.For(key)

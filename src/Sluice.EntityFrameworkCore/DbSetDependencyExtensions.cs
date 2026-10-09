@@ -35,7 +35,7 @@ public static class DbSetDependencyExtensions
     }
 
     /// <summary>
-    /// Every dependency on <typeparamref name="T"/>: the whole set, and every foreign key it (or a derived type)
+    /// Every dependency on <typeparamref name="T"/>: the whole set, and every foreign key it, a base or a derived type
     /// declares, so every read of <typeparamref name="T"/> is evicted. Also the same for every type the model lets the
     /// database delete or set to null when <typeparamref name="T"/> rows are deleted (<c>Cascade</c> or
     /// <c>SetNull</c>, transitively), so it covers a delete in raw SQL.

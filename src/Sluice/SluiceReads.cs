@@ -14,8 +14,9 @@ public sealed class SluiceReads
     private readonly IServiceProvider _services;
     private readonly CancellationToken _ct;
 
-    // Made on the first Hold: a hit, and a compute that holds nothing, never needs it.
-    private Dictionary<Type, IAsyncDisposable>? _held;
+    // Made on the first Hold: a hit, and a compute that holds nothing, never needs it. In creation order, so they're
+    // disposed in reverse: one made later may use one made earlier.
+    private List<(Type Type, IAsyncDisposable Resource)>? _held;
     private bool _open = true;
     private Exception? _violation;
 
@@ -36,7 +37,10 @@ public sealed class SluiceReads
     /// the compute returns instead is still evicted by it. Safe to call from concurrent tasks inside one compute.
     /// </summary>
     /// <inheritdoc cref="From{T}(IEnumerable{Dependency}, Func{CancellationToken, Task{T}})" path="/remarks"/>
-    /// <exception cref="InvalidOperationException">The compute has already returned; the fetch doesn't run.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The compute has already returned, or this is another compute's read, used inside a running compute; the fetch
+    /// doesn't run.
+    /// </exception>
     public Task<T> From<T>(Dependency dependency, Func<CancellationToken, Task<T>> fetch)
     {
         ArgumentNullException.ThrowIfNull(dependency);
@@ -56,7 +60,10 @@ public sealed class SluiceReads
     /// <exception cref="ArgumentException">
     /// <paramref name="dependencies"/> is empty, or holds a null; the fetch doesn't run.
     /// </exception>
-    /// <exception cref="InvalidOperationException">The compute has already returned; the fetch doesn't run.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The compute has already returned, or this is another compute's read, used inside a running compute; the fetch
+    /// doesn't run.
+    /// </exception>
     public Task<T> From<T>(
         IEnumerable<Dependency> dependencies,
         Func<CancellationToken, Task<T>> fetch
@@ -81,12 +88,15 @@ public sealed class SluiceReads
     /// Records that the compute read these dependencies, for a value already in hand or a fetch that isn't one call.
     /// Safe to call from concurrent tasks inside one compute.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The compute has already returned.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The compute has already returned, or this is another compute's read, used inside a running compute.
+    /// </exception>
     public void From(params IEnumerable<Dependency> dependencies) =>
         Record(Dependency.TagsOf(dependencies, dependency => dependency.ReadTags));
 
     private void Record(List<string> tags)
     {
+        ThrowIfAnotherCompute();
         lock (_lock)
         {
             if (!_open)
@@ -104,6 +114,7 @@ public sealed class SluiceReads
     internal T Hold<T>(Func<IServiceProvider, T> create)
         where T : class, IAsyncDisposable
     {
+        ThrowIfAnotherCompute();
         lock (_lock)
         {
             if (!_open)
@@ -115,13 +126,16 @@ public sealed class SluiceReads
             }
 
             _held ??= [];
-            if (_held.TryGetValue(typeof(T), out var held))
+            foreach (var (type, resource) in _held)
             {
-                return (T)held;
+                if (type == typeof(T))
+                {
+                    return (T)resource;
+                }
             }
 
             var created = create(_services);
-            _held.Add(typeof(T), created);
+            _held.Add((typeof(T), created));
             return created;
         }
     }
@@ -131,25 +145,39 @@ public sealed class SluiceReads
     {
         lock (_lock)
         {
-            return _held is not null && _held.Values.Any(held => ReferenceEquals(held, resource));
+            if (_held is null)
+            {
+                return false;
+            }
+
+            foreach (var (_, held) in _held)
+            {
+                if (ReferenceEquals(held, resource))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 
-    // Once the compute has closed, so nothing is added after. Disposes every resource even when one throws, so a
-    // pooled context still goes back to its pool, then throws what they threw.
-    internal async ValueTask ReleaseAsync()
+    // Once the compute has closed, so nothing is added after. Disposes every resource, newest first, even when one
+    // throws, so a pooled context still goes back to its pool, then returns what they threw: one exception, an
+    // AggregateException for several, or null.
+    internal async ValueTask<Exception?> ReleaseAsync()
     {
         if (_held is null)
         {
-            return;
+            return null;
         }
 
         List<Exception>? failures = null;
-        foreach (var held in _held.Values)
+        for (var i = _held.Count - 1; i >= 0; i--)
         {
             try
             {
-                await held.DisposeAsync().ConfigureAwait(false);
+                await _held[i].Resource.DisposeAsync().ConfigureAwait(false);
             }
             catch (Exception failure)
             {
@@ -157,16 +185,30 @@ public sealed class SluiceReads
             }
         }
 
-        if (failures is [var only])
+        return failures switch
         {
-            ExceptionDispatchInfo.Throw(only);
-        }
-
-        if (failures is not null)
-        {
-            throw new AggregateException(
+            null => null,
+            [var only] => only,
+            _ => new AggregateException(
                 "Disposing what the compute held threw more than once.",
                 failures
+            ),
+        };
+    }
+
+    // A read captured from another compute would record on that compute (or nowhere, once it has returned) what this
+    // one's value is built from, so this one would be cached without it. The running compute gets the violation, so it caches
+    // nothing even if it catches the exception.
+    private void ThrowIfAnotherCompute()
+    {
+        if (ActiveCompute.Reads is { } current && current != this)
+        {
+            throw ActiveCompute.Violate(
+                current,
+                new InvalidOperationException(
+                    "A read from another compute was used inside this one, so what it read would be recorded on the "
+                        + "wrong compute. Use the read the compute was given."
+                )
             );
         }
     }

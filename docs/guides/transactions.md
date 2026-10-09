@@ -95,13 +95,12 @@ So a compute runs outside your ambient transaction. If you call `GetOrSetAsync` 
 when the compute ends. A connection the compute opens, `read.Db`'s or your own for Dapper,
 doesn't join (enlist in) your transaction, so it reads what's committed.
 
-Every EF query on `read.Db`'s context is checked, and two cases still throw
-`InvalidOperationException` inside a compute:
+Inside a compute, two cases still throw `InvalidOperationException`:
 
-- **A transaction opened inside the compute that `read.Db`'s context runs in**: its own
-  `BeginTransaction`, or a `TransactionScope` the compute opens itself.
-- **A query in a fused fetch on a context that's already in a transaction**, such as your
-  request's context halfway through one.
+- **A query on `read.Db`'s context inside a transaction the compute opened**: `BeginTransaction`
+  on that context, or a `TransactionScope` the compute opens.
+- **A query in a fused fetch on a context already in a transaction**, such as your request's
+  context halfway through one.
 
 Compute the value outside the transaction, or after it commits.
 

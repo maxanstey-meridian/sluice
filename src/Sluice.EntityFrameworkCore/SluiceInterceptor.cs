@@ -237,7 +237,7 @@ internal sealed partial class SluiceInterceptor
     ) => PublishAsync(() => Take(_pending, transaction, keep: true) ?? []);
 
     // Publishes what a write wrote: when the transaction it ran in ends, or at once outside one.
-    private void Complete((DbContext Context, Func<List<Dependency>> Derive)? write)
+    private void Complete(Write? write)
     {
         if (write is var (context, derive) && !DeferToTransaction(context, derive))
         {
@@ -245,7 +245,7 @@ internal sealed partial class SluiceInterceptor
         }
     }
 
-    private async Task CompleteAsync((DbContext Context, Func<List<Dependency>> Derive)? write)
+    private async Task CompleteAsync(Write? write)
     {
         if (write is var (context, derive) && !DeferToTransaction(context, derive))
         {
@@ -254,28 +254,22 @@ internal sealed partial class SluiceInterceptor
     }
 
     // The save the context has in progress, if any, taken unless kept.
-    private (DbContext Context, Func<List<Dependency>> Derive)? Save(
-        DbContext? context,
-        bool keep
-    ) =>
+    private Write? Save(DbContext? context, bool keep) =>
         context is not null && Take(_saves, context, keep) is { } save
-            ? (context, save.Dependencies)
+            ? new(context, save.Dependencies)
             : null;
 
     // Which rows a bulk write changed is unknown, so every read of the types it may have written is evicted. EF 10
     // reports ExecuteDelete as ExecuteUpdate (both pass CommandSource.BulkUpdate, its old name), so the statement says
     // which it was; anything but an UPDATE is taken for a delete, which also evicts the lists its rows were in and what
     // the database cascades to.
-    private static (DbContext Context, Func<List<Dependency>> Derive)? BulkWrite(
-        DbCommand command,
-        CommandEventData eventData
-    ) =>
+    private static Write? BulkWrite(DbCommand command, CommandEventData eventData) =>
         eventData
             is {
                 Context: { } context,
                 CommandSource: CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete,
             }
-            ? (context, () => BulkWritten(context, command))
+            ? new(context, () => BulkWritten(context, command))
             : null;
 
     private static List<Dependency> BulkWritten(DbContext context, DbCommand command)
@@ -293,19 +287,11 @@ internal sealed partial class SluiceInterceptor
         ];
     }
 
-    private static bool IsUpdate(DbCommand command)
-    {
-        foreach (var line in command.CommandText.AsSpan().EnumerateLines())
-        {
-            var statement = line.TrimStart();
-            if (!statement.IsEmpty && !statement.StartsWith("--"))
-            {
-                return statement.StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase);
-            }
-        }
-
-        return false;
-    }
+    private static bool IsUpdate(DbCommand command) =>
+        TrackedReads
+            .FirstStatement(command)
+            ?.StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase)
+            is true;
 
     // Hands the write to the transaction the context is in now, if any, to publish when that ends: read here, not
     // when a save began, since an interceptor may have committed the save's transaction already. Its dependencies
@@ -451,4 +437,7 @@ internal sealed partial class SluiceInterceptor
         Message = "Sluice couldn't invalidate the cached values that depend on an EF write; they stay cached until their duration ends. Dependencies: {DependencyCount}"
     )]
     private partial void LogPublishFailed(Exception exception, int? dependencyCount);
+
+    // A write that ended on a context, with how to derive what it may have changed.
+    private readonly record struct Write(DbContext Context, Func<List<Dependency>> Derive);
 }

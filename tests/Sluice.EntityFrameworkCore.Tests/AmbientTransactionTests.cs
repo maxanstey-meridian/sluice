@@ -23,7 +23,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
     )
     {
         await using var node = new SluiceNode();
-        await using var reader = postgres.CreateDb(node, enlist: false);
+        await using var reader = postgres.CreateDb(enlist: false);
         var (ada, _) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
         Task completed;
@@ -54,7 +54,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
     )
     {
         await using var node = new SluiceNode();
-        await using var reader = postgres.CreateDb(node, enlist: false);
+        await using var reader = postgres.CreateDb(enlist: false);
         var (ada, _) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
         using var transaction = new CommittableTransaction();
@@ -84,7 +84,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
     public async Task Contexts_saving_inside_one_TransactionScope_are_all_evicted_when_it_completes()
     {
         await using var node = new SluiceNode();
-        await using var reader = postgres.CreateDb(node, enlist: false);
+        await using var reader = postgres.CreateDb(enlist: false);
         var (ada, bob) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
         var bobRead = await CachedRead.Customer(node.Cache, bob);
@@ -115,7 +115,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
     public async Task With_Enlist_false_a_save_inside_a_TransactionScope_is_evicted_at_once_and_outlives_the_scope()
     {
         await using var node = new SluiceNode();
-        await using var reader = postgres.CreateDb(node, enlist: false);
+        await using var reader = postgres.CreateDb(enlist: false);
         var (ada, _) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
 
@@ -175,7 +175,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
                 .WithSerializer(new FusionCacheSystemTextJsonSerializer())
                 .WithDistributedCache(new SyncOnlyDistributedCache())
         );
-        await using var reader = postgres.CreateDb(node, enlist: false);
+        await using var reader = postgres.CreateDb(enlist: false);
         var (ada, _) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
         Task completed;

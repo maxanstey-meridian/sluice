@@ -63,12 +63,13 @@ serves a wrong value. Declare each source once and use that one declaration ever
 
 ## Queries
 
-A query has a name, a key type and a value type:
+A query has a name, a key type and a value type (or just a name and a value type, for a
+[query with no key](#queries-with-no-key)):
 
 - The compiler checks that each compute returns the query's value type.
 - Every caller gets the same cache key for the same key value, and the same duration.
-- The cache key is `<name>:<key text>`. To change what a query caches and drop its old entries,
-  rename it.
+- The cache key is `<name>:<key text>`, or just `<name>` for a query with no key. To change
+  what a query caches and drop its old entries, rename it.
 
 Query names can't be blank, contain `:` or start with `__fc` (FusionCache keeps its own data
 there). Declaring the same name twice with different key or value types, or once with a key and

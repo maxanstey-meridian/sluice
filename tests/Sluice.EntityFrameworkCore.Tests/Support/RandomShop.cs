@@ -599,14 +599,24 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
             }
         }
 
+        // The state is read one table at a time, so under concurrent writers a change that also picks a customer checks
+        // there is one: orders or notes can appear after the customers were read.
         var any = (int[] rows) => rows.Length > 0;
         Offer(state.Customers.Length < 6 ? 3 : 0, true, AddCustomer);
         Offer(2, any(state.Customers), () => RenameCustomer(Pick(state.Customers)));
         Offer(1, any(state.Customers), () => DeleteCustomer(Pick(state.Customers)));
         Offer(1, any(state.Customers), () => DeleteCustomerUnloaded(Pick(state.Customers)));
         Offer(4, any(state.Customers), () => AddOrder(state));
-        Offer(4, any(state.Orders), () => EditOrder(state, Pick(state.Orders)));
-        Offer(2, any(state.Orders), () => UpdateDetachedOrder(state, Pick(state.Orders)));
+        Offer(
+            4,
+            any(state.Orders) && any(state.Customers),
+            () => EditOrder(state, Pick(state.Orders))
+        );
+        Offer(
+            2,
+            any(state.Orders) && any(state.Customers),
+            () => UpdateDetachedOrder(state, Pick(state.Orders))
+        );
         Offer(1, any(state.Orders), () => DeleteOrder(Pick(state.Orders)));
         Offer(1, any(state.Orders), () => DeleteOrderUnloaded(Pick(state.Orders)));
         Offer(3, any(state.Orders), () => AddLine(state, Pick(state.Orders)));
@@ -617,7 +627,11 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         Offer(2, any(state.Customers) && any(state.Coupons), () => Link(state));
         Offer(1, state.Links.Length > 0, () => Unlink(Pick(state.Links)));
         Offer(3, any(state.Customers), () => AddNote(state));
-        Offer(2, any(state.Notes), () => EditNote(state, Pick(state.Notes)));
+        Offer(
+            2,
+            any(state.Notes) && any(state.Customers),
+            () => EditNote(state, Pick(state.Notes))
+        );
         Offer(1, any(state.Notes), () => DeleteNote(Pick(state.Notes)));
         Offer(state.Vehicles.Length < 5 ? 2 : 0, true, AddVehicle);
         Offer(1, any(state.Vehicles), () => EditVehicle(Pick(state.Vehicles)));
@@ -835,8 +849,9 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
                 db.Entry(note).Property("CustomerId").CurrentValue = customer;
                 return $"move note {id} to customer {customer}";
             default:
+                // Every reply points at a lower id, so replies never form a cycle EF can't order a delete through.
                 var replyTo = Pick(state.Notes);
-                note.ReplyToId = replyTo == id ? null : replyTo;
+                note.ReplyToId = replyTo < id ? replyTo : null;
                 return $"make note {id} reply to {note.ReplyToId}";
         }
     }

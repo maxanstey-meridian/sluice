@@ -162,8 +162,8 @@ each compute have a context of its own.
 Inside a compute, `read.Db<AppDb>()` gives you that context. Query it as you would any context:
 filters, projections, `Include`, navigations, joins, subqueries, many-to-many, `Find`, compiled
 queries. Sluice records every table each query reads, and a write to any of them evicts the
-value. The compute's context is fresh, tracks nothing, and isn't in your request's transaction,
-so it reads what's committed and nothing else.
+value. The compute's context is fresh, tracks nothing by default, and isn't in your request's
+transaction, so it reads what's committed and nothing else.
 
 A plain query depends on whole tables: renaming any user evicts every dashboard that read the
 users table. Sluice logs each cached query that does this the first time it runs, at
@@ -215,7 +215,8 @@ Inside a compute, a few things throw, because Sluice couldn't tell what they rea
 (`FromSql`, `SqlQuery`), views, keyless types and database functions of your own. Read those in
 the fetch of `read.From(dependency, fetch)`, with a `Source` you declare and invalidate
 yourself. A query on any context other than `read.Db`'s throws too: that context may hold your
-request's unsaved edits or uncommitted rows, which mustn't be cached for everyone.
+request's unsaved edits or uncommitted rows, which mustn't be cached for everyone. So does a
+query filter that reads the context's state or static state, such as a tenant id.
 [Strict reads](https://maxanstey-meridian.github.io/sluice/guides/strict-reads) has the full
 list, and what Sluice can't check.
 

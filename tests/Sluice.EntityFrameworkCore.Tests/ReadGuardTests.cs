@@ -126,10 +126,11 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb();
+        var made = new MadeContexts(
+            new DbContextOptionsBuilder<ShopDb>().UseNpgsql(postgres.ConnectionString).Options
+        );
         await using var withoutSluice = new SluiceNode(services: services =>
-            services.AddDbContextFactory<ShopDb>(options =>
-                options.UseNpgsql(postgres.ConnectionString)
-            )
+            services.AddSingleton<IDbContextFactory<ShopDb>>(made)
         );
 
         var entity = () =>
@@ -146,6 +147,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await entity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
         await children.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
         await factory.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
+        made.Context!.Invoking(context => context.Model)
+            .Should()
+            .Throw<ObjectDisposedException>("read.Db disposes the context it refused");
         await plain
             .Should()
             .ThrowAsync<InvalidOperationException>()
@@ -306,5 +310,13 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             .WithMessage($"*it reads Banner, which has {View}*");
         db.Invoking(d => d.Banners.Dependency(1)).Should().Throw<NotSupportedException>();
         db.Invoking(d => d.Banners.AllDependencies()).Should().Throw<NotSupportedException>();
+    }
+
+    // A factory that keeps the last context it made.
+    private sealed class MadeContexts(DbContextOptions<ShopDb> options) : IDbContextFactory<ShopDb>
+    {
+        public ShopDb? Context { get; private set; }
+
+        public ShopDb CreateDbContext() => Context = new(options);
     }
 }

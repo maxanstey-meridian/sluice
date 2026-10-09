@@ -16,8 +16,17 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class TrackedReadTests(PostgresFixture postgres)
 {
-    private const string NotLinq = "*isn't a LINQ query*";
-    private const string Write = "*Writes can't run inside a compute*";
+    private const string NotLinq =
+        "*isn't a LINQ query*Run it in the fetch of read.From(dependency, fetch)*";
+    private const string Write =
+        "*Writes can't run inside a compute*run them before or after GetOrSetAsync*";
+
+    // The remedies the analysis's reasons end with.
+    private const string Declare =
+        "*Run it in the fetch of read.From(dependency, fetch)*invalidate that source when its data changes*";
+    private const string FilterYourself =
+        "*Call IgnoreQueryFilters(), filter by that value yourself, and put it in the cache key*";
+    private const string SelectValues = "*Select the values you need instead*";
     private const string ForeignContext = "*didn't get from read.Db<TContext>()*";
     private const string Rename = """update "Customers" set "Name" = 'Cy' where "Id" = -1""";
 
@@ -50,11 +59,11 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ["non-query async"] = ((db, ct) => db.Database.ExecuteSqlRawAsync(Rename, ct), Write),
         ["FromSql"] = (
             (db, ct) => db.Orders.FromSqlRaw("""select * from "Orders" """).ToListAsync(ct),
-            "*Order through FromSql*"
+            "*Order through FromSql" + Declare
         ),
         ["SqlQuery"] = (
             (db, ct) => db.Database.SqlQueryRaw<int>("""select 1 as "Value" """).ToListAsync(ct),
-            "*SqlQuery<Int32>*"
+            "*SqlQuery<Int32>" + Declare
         ),
         ["FromSql in a subquery"] = (
             (db, ct) =>
@@ -63,7 +72,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                         db.Orders.FromSqlRaw("""select * from "Orders" """).Any(x => x.Id == o.Id)
                     )
                     .ToListAsync(ct),
-            "*Order through FromSql*"
+            "*Order through FromSql" + Declare
         ),
         ["SqlQuery in a subquery"] = (
             (db, ct) =>
@@ -73,24 +82,24 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                             .Contains(o.CustomerId)
                     )
                     .ToListAsync(ct),
-            "*SqlQuery<Int32>*"
+            "*SqlQuery<Int32>" + Declare
         ),
         ["database function of the app's"] = (
             (db, ct) => db.Orders.Select(o => ShopDb.CustomerName(o.CustomerId)).ToListAsync(ct),
-            "*database function customer_name*"
+            "*database function customer_name" + Declare
         ),
-        ["keyless view"] = ((db, ct) => db.CustomerTotals.ToListAsync(ct), "*keyless*"),
+        ["keyless view"] = ((db, ct) => db.CustomerTotals.ToListAsync(ct), "*keyless" + Declare),
         ["table read through a view"] = (
             (db, ct) => db.Suppliers.ToListAsync(ct),
-            "*view 'supplier_names'*"
+            "*view 'supplier_names'" + Declare
         ),
         ["type mapped to a SQL query"] = (
             (db, ct) => db.TopCustomers.ToListAsync(ct),
-            "*SQL query*"
+            "*SQL query" + Declare
         ),
         ["type mapped to a function"] = (
             (db, ct) => db.RecentOrders.ToListAsync(ct),
-            "*function 'recent_orders'*"
+            "*function 'recent_orders'" + Declare
         ),
         ["root whose derived type is a view"] = (
             (db, ct) => db.Promotions.ToListAsync(ct),
@@ -102,26 +111,26 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ),
         ["query filter reading the context"] = (
             (db, ct) => db.Accounts.ToListAsync(ct),
-            "*Account's query filter reads the context's state*"
+            "*Account's query filter reads the context's state" + FilterYourself
         ),
         ["lazily loading entities"] = (
             (db, ct) => db.Reviews.ToListAsync(ct),
-            "*returns Review entities*Review entities load their navigations lazily*"
+            "*returns Review entities*Review entities load their navigations lazily" + SelectValues
         ),
         ["entities with a lazy loader property"] = (
             (db, ct) => db.Receipts.ToListAsync(ct),
-            "*returns Receipt entities*"
+            "*returns Receipt entities" + SelectValues
         ),
         ["lazily loading entities in an anonymous type"] = (
             (db, ct) => db.Reviews.Select(x => new { x.Id, Review = x }).ToListAsync(ct),
-            "*returns Review entities*"
+            "*returns Review entities" + SelectValues
         ),
         ["lazily loading entities in a nested collection"] = (
             (db, ct) =>
                 db
                     .Customers.Select(c => db.Reviews.Where(r => r.CustomerId == c.Id).ToList())
                     .ToListAsync(ct),
-            "*returns Review entities*"
+            "*returns Review entities" + SelectValues
         ),
         ["entities including entities that load lazily"] = (
             (db, ct) =>
@@ -130,27 +139,59 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                     .Include(a => a.Review)
                     .OrderBy(a => a.Id)
                     .ToListAsync(ct),
-            "*returns Award entities*Review entities, which load their navigations lazily*"
+            "*returns Award entities*Review entities, which load their navigations lazily"
+                + SelectValues
         ),
         ["entities auto-including entities that load lazily"] = (
             (db, ct) => db.Awards.ToListAsync(ct),
-            "*returns Award entities*Review entities, which load their navigations lazily*"
+            "*returns Award entities*Review entities, which load their navigations lazily"
+                + SelectValues
         ),
         ["entities with a lazy loader delegate"] = (
             (db, ct) => db.Ratings.ToListAsync(ct),
-            "*returns Rating entities*Rating entities load their navigations lazily*"
+            "*returns Rating entities*Rating entities load their navigations lazily" + SelectValues
         ),
         ["owners of a lazily loading owned value"] = (
             (db, ct) => db.Deliveries.ToListAsync(ct),
-            "*returns Delivery entities*Signature entities load their navigations lazily*"
+            "*returns Delivery entities*Signature entities load their navigations lazily"
+                + SelectValues
         ),
         ["a lazily loading owned value"] = (
             (db, ct) => db.Deliveries.Select(d => d.Signature).ToListAsync(ct),
-            "*returns Signature entities*Signature entities load their navigations lazily*"
+            "*returns Signature entities*Signature entities load their navigations lazily"
+                + SelectValues
         ),
         ["entities holding their context"] = (
             (db, ct) => db.Baskets.ToListAsync(ct),
-            "*returns Basket entities*Basket entities hold the context that loaded them*"
+            "*returns Basket entities*Basket entities hold the context that loaded them"
+                + SelectValues
+        ),
+        ["entities filtered by entities that load lazily"] = (
+            (db, ct) =>
+                db.Customers.Where(c => db.Reviews.Any(r => r.CustomerId == c.Id)).ToListAsync(ct),
+            "*returns Customer entities*Review entities, which load their navigations lazily*"
+                + "Sluice doesn't follow which of the entities it reads the result holds"
+                + SelectValues
+        ),
+        ["query filter reading a static property"] = (
+            (db, ct) =>
+                db.Ledgers.IgnoreQueryFilters(["method", "clock", "captured"]).ToListAsync(ct),
+            "*Ledger's query filter reads shared state (TenantAccessor.Current)" + FilterYourself
+        ),
+        ["query filter calling a static method"] = (
+            (db, ct) =>
+                db.Ledgers.IgnoreQueryFilters(["accessor", "clock", "captured"]).ToListAsync(ct),
+            "*Ledger's query filter reads shared state (TenantAccessor.Read())" + FilterYourself
+        ),
+        ["query filter reading the clock"] = (
+            (db, ct) =>
+                db.Ledgers.IgnoreQueryFilters(["accessor", "method", "captured"]).ToListAsync(ct),
+            "*Ledger's query filter reads shared state (DateTime.UtcNow)" + FilterYourself
+        ),
+        ["query filter reading an object it captured"] = (
+            (db, ct) =>
+                db.Ledgers.IgnoreQueryFilters(["accessor", "method", "clock"]).ToListAsync(ct),
+            "*Ledger's query filter reads shared state (the captured tenants)" + FilterYourself
         ),
         ["save"] = (
             (db, ct) =>
@@ -270,6 +311,29 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ["navigation an owned value auto-includes"] = (
             (r, ct) => r.Db<ShopDb>().Jukeboxes.ToListAsync(ct),
             db => [db.Songs.Dependency(-1)],
+            db => [db.Coupons.Dependency(-1)]
+        ),
+        ["navigation an auto-included navigation's target auto-includes"] = (
+            (r, ct) => r.Db<ShopDb>().Kennels.ToListAsync(ct),
+            db => [db.Customers.Dependency(-1)],
+            db => [db.Coupons.Dependency(-1)]
+        ),
+        ["navigation a derived type's owned value auto-includes"] = (
+            (r, ct) => r.Db<ShopDb>().Pets.ToListAsync(ct),
+            db => [db.Songs.Dependency(-1)],
+            db => [db.Coupons.Dependency(-1)]
+        ),
+        ["auto-includes and filters despite a query filter that ignores them in its subquery"] = (
+            (r, ct) => r.Db<ShopDb>().Vouchers.ToListAsync(ct),
+            db => [db.Customers.Dependency(-1)],
+            db => [db.Orders.Dependency(-1)]
+        ),
+        ["query filter reading only what can't change between calls"] = (
+            (r, ct) =>
+                r.Db<ShopDb>()
+                    .Ledgers.IgnoreQueryFilters(["accessor", "method", "clock", "captured"])
+                    .ToListAsync(ct),
+            db => [db.Ledgers.Dependency(-1)],
             db => [db.Coupons.Dependency(-1)]
         ),
         ["entities without the navigation that loads lazily"] = (
@@ -685,7 +749,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             }
         );
         await captured.Task;
-        var call = () =>
+        var helper = () =>
             CachedRead.Of(
                 node.Cache,
                 async (read, ct) =>
@@ -694,10 +758,24 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                     await other!.Entity(read.Db<ShopDb>().Orders, -1).ToListAsync(ct);
                 }
             );
+        var context = () =>
+            CachedRead.Of(
+                node.Cache,
+                async (read, ct) =>
+                {
+                    await read.Entity(read.Db<ShopDb>().Customers, -1).ToListAsync(ct);
+                    await other!.Db<ShopDb>().Orders.ToListAsync(ct);
+                }
+            );
 
-        await call.Should()
+        await helper
+            .Should()
             .ThrowAsync<InvalidOperationException>()
-            .WithMessage("*another compute's read*Use the read the compute was given*");
+            .WithMessage("*Use the read the compute was given*");
+        await context
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("*Use the read the compute was given*");
         release.SetResult();
         await first;
     }
@@ -720,7 +798,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     }
 
     [Fact]
-    public async Task A_query_the_analysis_fails_on_is_tagged_as_untrackable_instead_of_failing_to_compile()
+    public async Task A_query_the_analysis_fails_on_is_tagged_as_untrackable_instead_of_throwing()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
@@ -747,7 +825,10 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             .Which.Value.Should()
             .Be(
                 "Sluice can't track: Sluice couldn't work out what it reads "
-                    + "(InvalidOperationException: The analysis failed on this.)"
+                    + "(InvalidOperationException: The analysis failed on this.). Run it in the fetch of "
+                    + "read.From(dependency, fetch), with a dependency on a Source you declare, and invalidate that "
+                    + "source when its data changes. This is a bug in Sluice's analysis; please report it with the "
+                    + "query"
             );
     }
 

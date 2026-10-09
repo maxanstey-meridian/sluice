@@ -117,6 +117,48 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_sync_bulk_write_that_fails_or_is_cancelled_after_it_ran_evicts_without_going_through_async_code(
+        bool cancel
+    )
+    {
+        // Any async call into the distributed cache throws, and FusionCache logs it as a warning.
+        await using var node = new SluiceNode(cache =>
+            cache
+                .WithSerializer(new FusionCacheSystemTextJsonSerializer())
+                .WithDistributedCache(new SyncOnlyDistributedCache())
+        );
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node, before: [new FailAfterBulkWrite(cancel)]);
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+
+        node.Logs.Clear();
+        var update = () =>
+            db
+                .Customers.Where(c => c.Id == ada)
+                .ExecuteUpdate(set => set.SetProperty(c => c.Name, "Ada Lovelace"));
+        if (cancel)
+        {
+            update.Should().Throw<OperationCanceledException>();
+        }
+        else
+        {
+            update.Should().Throw<InvalidOperationException>();
+        }
+
+        node.Logs.GetSnapshot()
+            .Should()
+            .NotContain(
+                record => record.Level >= LogLevel.Warning,
+                cancel ? "CommandCanceled stayed sync" : "CommandFailed stayed sync"
+            );
+        (await reader.NameOf(ada)).Should().Be("Ada Lovelace", "the statement committed");
+        (await adaRead.WasEvicted()).Should().BeTrue();
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
     [InlineData(true, false)]
@@ -237,7 +279,7 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
     public async Task A_bulk_write_in_a_TransactionScope_is_evicted_once_the_scope_completes()
     {
         await using var node = new SluiceNode();
-        await using var reader = postgres.CreateDb(node);
+        await using var reader = postgres.CreateDb();
         var (ada, _) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
 
@@ -261,12 +303,15 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
     [InlineData("""UPDATE public.users SET "Name" = @name""", "users", true)]
     [InlineData("""DELETE FROM users AS u""", "user", false)]
     [InlineData("""DELETE FROM "Orders" AS o WHERE o.user_id = @id""", "user", false)]
+    [InlineData("""DELETE FROM old_users AS o""", "users", false)]
+    [InlineData("""DELETE FROM app$users AS a""", "users", false)]
     [InlineData("""DELETE FROM "Users" AS u""", "\"Users\"", true)]
+    [InlineData("""DELETE FROM "OldUsers" AS u""", "\"Users\"", false)]
     public void A_bulk_write_names_an_unquoted_table_only_as_a_whole_identifier(
         string sql,
         string table,
         bool names
-    ) => ModelSources.Names(sql, table).Should().Be(names);
+    ) => ModelSources.NamePattern(table).IsMatch(sql).Should().Be(names);
 
     private static Task Update<T>(
         IQueryable<T> rows,

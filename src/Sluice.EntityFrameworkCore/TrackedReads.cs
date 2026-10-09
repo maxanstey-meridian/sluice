@@ -17,10 +17,10 @@ namespace Sluice.EntityFrameworkCore;
 /// roots, the navigations and <c>Include</c>s it follows, auto-included navigations, and the query filters EF adds)
 /// and tags the query with them, so its SQL names them every time it runs. Inside a compute, each command records a
 /// whole-type dependency on every type its tag names, so a write to any of them evicts the value. A query whose reads
-/// can't be worked out (raw SQL, a database function, a view or keyless type, a query filter that reads the context,
-/// entities that load lazily or hold their context) is tagged as such, and throws inside a compute instead, saying
-/// what to do about it. Inside a compute, every command must also come from a context the compute got from
-/// <c>read.Db</c>, writes throw, and so do reads inside a transaction.
+/// can't be worked out (raw SQL, a database function, a view or keyless type, a query filter that reads the context or
+/// other shared state, entities that load lazily or hold their context) is tagged as such, and throws inside a compute
+/// instead, saying what to do about it. Inside a compute, every command must also come from a context the compute got
+/// from <c>read.Db</c>, writes throw, and so do reads inside a transaction.
 /// </summary>
 /// <remarks>
 /// A read helper's query records its own, narrower dependency on its root type when it's called, so the tag marks
@@ -66,7 +66,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     /// </summary>
     /// <exception cref="InvalidOperationException">The context wasn't configured with <c>UseSluice</c>.</exception>
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
-    internal static void EnsureOn(IInfrastructure<IServiceProvider> context)
+    internal static void EnsureOn(DbContext context)
     {
         if (!IsOn(context.GetService<IDbContextOptions>()))
         {
@@ -76,48 +76,34 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             );
         }
 
-        // Only for its throw when the provider isn't relational.
-        _ = ContextTransaction.Connection(context);
+        if (!context.Database.IsRelational())
+        {
+            throw new NotSupportedException(ContextTransaction.NotRelational);
+        }
     }
 
     /// <summary>
     /// The query every read helper starts from: marked, no-tracking, and without auto-included navigations. Refuses a
-    /// context the checks don't run on, and, while a compute is running, another compute's <paramref name="read"/> or
-    /// a context the compute didn't get from <c>read.Db</c>.
+    /// context the checks don't run on, and, while a compute is running, a context the compute didn't get from
+    /// <c>read.Db</c>. The helper's read is checked where it records, by the core.
     /// </summary>
     /// <exception cref="InvalidOperationException">
-    /// The context wasn't configured with <c>UseSluice</c>, or a compute is running and <paramref name="read"/> isn't
-    /// its own or it didn't get the context from <c>read.Db</c>.
+    /// The context wasn't configured with <c>UseSluice</c>, or a compute is running and didn't get the context from
+    /// <c>read.Db</c>.
     /// </exception>
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
-    internal static IQueryable<T> Query<T>(SluiceReads read, DbSet<T> set)
+    internal static IQueryable<T> Query<T>(DbSet<T> set)
         where T : class
     {
-        IInfrastructure<IServiceProvider> context = set;
+        var context = set.GetService<ICurrentDbContext>().Context;
         EnsureOn(context);
-        if (ActiveCompute.Reads is { } reads)
+        if (
+            ActiveCompute.Reads is { } reads
+            && !ActiveCompute.InFetch(reads)
+            && !ActiveCompute.Holds(reads, context)
+        )
         {
-            // The helper records on the read it's given, and the query is checked against the running compute: a
-            // read captured from another compute would record there what this one's value is built from.
-            if (reads != read)
-            {
-                throw ActiveCompute.Violate(
-                    reads,
-                    new InvalidOperationException(
-                        "A read helper was called inside a compute with another compute's read, so it would "
-                            + "record what it reads on that compute instead of this one. Use the read the compute "
-                            + "was given."
-                    )
-                );
-            }
-
-            if (
-                !ActiveCompute.InFetch(reads)
-                && !ActiveCompute.Holds(reads, context.GetService<ICurrentDbContext>().Context)
-            )
-            {
-                throw ActiveCompute.Violate(reads, ForeignContext("A read helper's query"));
-            }
+            throw ActiveCompute.Violate(reads, ForeignContext("A read helper's query"));
         }
 
         return set.TagWith(Marker).AsNoTracking().IgnoreAutoIncludes();
@@ -138,21 +124,23 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             return queryExpression;
         }
 
+        IReadOnlyList<string> tags;
         try
         {
-            return Tagging.Tag(queryExpression, Analysis.Of(context.Model, queryExpression));
+            tags = Analysis.Of(context.Model, queryExpression);
         }
         catch (Exception exception)
         {
-            return Tagging.Tag(
-                queryExpression,
-                [
-                    UntrackableTag
-                        + "Sluice couldn't work out what it reads "
-                        + $"({exception.GetType().Name}: {exception.Message.ReplaceLineEndings(" ")})",
-                ]
-            );
+            tags =
+            [
+                UntrackableTag
+                    + "Sluice couldn't work out what it reads "
+                    + $"({exception.GetType().Name}: {exception.Message.ReplaceLineEndings(" ")}){DeclareIt}. "
+                    + "This is a bug in Sluice's analysis; please report it with the query",
+            ];
         }
+
+        return Tagging.Tag(queryExpression, tags);
     }
 
     // EF creates a fresh command for every execution on every path (reader, scalar and non-query; sync and async),
@@ -290,7 +278,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                         return null;
                     }
 
-                    dependencies.Add(ModelSources.WrittenEntity(entityType).All);
+                    dependencies.Add(ModelSources.Entity(entityType).All);
                 }
 
                 return [.. dependencies];
@@ -333,22 +321,32 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         return null;
     }
 
-    // The command's first line after its tags, so the message says which command it was. A LINQ query's captured
-    // values go to the database as parameters and don't show, but constants inlined in a query and the text of raw
-    // SQL do.
-    private static string Statement(DbCommand command)
+    /// <summary>
+    /// The command's first line that isn't empty or a comment (its tags), trimmed; null if it has none.
+    /// </summary>
+    internal static string? FirstStatement(DbCommand command)
     {
         foreach (var line in command.CommandText.AsSpan().EnumerateLines())
         {
             var statement = line.Trim();
             if (!statement.IsEmpty && !statement.StartsWith("--"))
             {
-                return statement.Length > 120 ? $"{statement[..120]}…" : statement.ToString();
+                return statement.ToString();
             }
         }
 
-        return "an empty command";
+        return null;
     }
+
+    // The command's first statement line, so the message says which command it was. A LINQ query's captured values go
+    // to the database as parameters and don't show, but constants inlined in a query and the text of raw SQL do.
+    private static string Statement(DbCommand command) =>
+        FirstStatement(command) switch
+        {
+            null => "an empty command",
+            { Length: > 120 } statement => $"{statement[..120]}…",
+            var statement => statement,
+        };
 
     /// <summary>Puts the analysis's tags on the query's first root, where EF collects them like any <c>TagWith</c>.</summary>
     private sealed class Tagging(IReadOnlyList<string> tags) : ExpressionVisitor
@@ -385,6 +383,25 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         }
     }
 
+    /// <summary>Whether an expression reads the query's rows: whether it holds a parameter or a query root.</summary>
+    private sealed class RowReader : ExpressionVisitor
+    {
+        private bool _found;
+
+        internal static bool In(Expression expression)
+        {
+            var reader = new RowReader();
+            reader.Visit(expression);
+            return reader._found;
+        }
+
+        public override Expression? Visit(Expression? node)
+        {
+            _found |= node is ParameterExpression or QueryRootExpression;
+            return _found ? node : base.Visit(node);
+        }
+    }
+
     /// <summary>
     /// Works out the entity types a query reads, in the tree and in what EF adds to it later: the query filters of
     /// every type it reaches, and their auto-included navigations. A navigation is matched by name on every entity
@@ -393,6 +410,10 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     /// </summary>
     private sealed class Analysis(IModel model) : ExpressionVisitor
     {
+        // The remedy for a query filter whose rows depend on more than the tables it reads.
+        private const string FilterByItYourself =
+            ". Call IgnoreQueryFilters(), filter by that value yourself, and put it in the cache key";
+
         private readonly List<IEntityType> _reached = [];
 
         // The root type of each read helper's query in the tree, which the helper's own dependency covers.
@@ -427,8 +448,8 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             {
                 Untrackable(
                     $"{_filter.DisplayName()}'s query filter reads the context's state (such as a tenant or the "
-                        + "current user), and the cached value is served to every caller whatever that state is. Call "
-                        + "IgnoreQueryFilters(), filter by that value yourself, and put it in the cache key"
+                        + "current user), and the cached value is served to every caller whatever that state is"
+                        + FilterByItYourself
                 );
             }
 
@@ -499,11 +520,21 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             {
                 ReachNavigation(instance.Type, name);
             }
-            else if (model.FindDbFunction(method) is { IsBuiltIn: false } function)
+            else if (model.FindDbFunction(method) is { } function)
             {
-                Untrackable(
-                    $"it calls the database function {function.Name}, which can read any table{DeclareIt}"
-                );
+                if (!function.IsBuiltIn)
+                {
+                    Untrackable(
+                        $"it calls the database function {function.Name}, which can read any table{DeclareIt}"
+                    );
+                }
+            }
+            // A static method none of whose arguments reads the query's rows doesn't depend on them: EF calls it
+            // before the query runs, or (Guid.NewGuid()) translates it to SQL that reads no table. One that does read
+            // them is translated or refused by EF; EF.Functions' methods take EF.Functions and the rows.
+            else if (_filter is not null && method.IsStatic && !node.Arguments.Any(RowReader.In))
+            {
+                SharedState($"{method.DeclaringType?.Name}.{method.Name}()");
             }
 
             return base.VisitMethodCall(node);
@@ -516,8 +547,42 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 ReachNavigation(declaringType, node.Member.Name);
             }
 
+            // A query filter's static members and captured values are read afresh each time the query runs (or, like
+            // DateTime.UtcNow, become SQL that reads no table), so they can differ between calls. Only a readonly
+            // static field or a captured variable holding a plain value can't change once the model is built; an
+            // object held either way can, whatever it holds. EF.Functions is EF's own, and a captured context is
+            // refused in Visit, for its own reason.
+            if (_filter is not null)
+            {
+                switch (node)
+                {
+                    case { Expression: null, Member: FieldInfo { IsInitOnly: true } }
+                        when IsPlain(node.Type):
+                    case { Expression: null } when node.Type == typeof(DbFunctions):
+                    case { Expression: ConstantExpression { Value: DbContext } }:
+                    case { Expression: ConstantExpression, Member: FieldInfo }
+                        when IsPlain(node.Type):
+                        break;
+                    case { Expression: null, Member: var member }:
+                        SharedState($"{member.DeclaringType?.Name}.{member.Name}");
+                        break;
+                    case { Expression: ConstantExpression, Member: var member }:
+                        SharedState($"the captured {member.Name}");
+                        break;
+                }
+            }
+
             return base.VisitMember(node);
         }
+
+        private static bool IsPlain(Type type) => type.IsValueType || type == typeof(string);
+
+        private void SharedState(string state) =>
+            Untrackable(
+                $"{_filter!.DisplayName()}'s query filter reads shared state ({state}), which can differ between "
+                    + "calls, and the cached value is served to every caller whatever it is"
+                    + FilterByItYourself
+            );
 
         private void VisitQueryOperator(MethodCallExpression node)
         {
@@ -552,13 +617,16 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                     }
 
                     break;
-                case nameof(EntityFrameworkQueryableExtensions.IgnoreAutoIncludes):
+                // As the query's own operators, both apply to the whole query. One inside a query filter is passed
+                // over, so the analysis still follows what it would skip.
+                case nameof(EntityFrameworkQueryableExtensions.IgnoreAutoIncludes)
+                    when _filter is null:
                     _ignoresAutoIncludes = true;
                     break;
-                // As EF reads it, for the whole query: without names, every filter; with them, those named. EF keeps
-                // the names a constant; names that aren't can't be read, so the query is refused rather than taken
-                // to ignore every filter.
-                case nameof(EntityFrameworkQueryableExtensions.IgnoreQueryFilters):
+                // As EF reads it: without names, every filter; with them, those named. EF keeps the names a constant;
+                // names that aren't can't be read, so the query is refused rather than taken to ignore every filter.
+                case nameof(EntityFrameworkQueryableExtensions.IgnoreQueryFilters)
+                    when _filter is null:
                     switch (node.Arguments)
                     {
                         case [_]:
@@ -678,12 +746,12 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
         // A cached entity must stand alone: one that loads lazily would read related rows later, through its context,
         // outside any compute, and one that holds its context keeps that context, and all it tracks, in the cache.
-        // Owned values are materialised with their owner, so an owner is refused for what it owns too. An entity the
-        // result returns can hold any other the query reaches (through Include or an auto-included navigation), so
-        // a result that can hold any reached entity is refused when any reached entity is. The result is checked by
-        // type: the element of a sequence, a single result, and what those hold through generic arguments
-        // (anonymous types and tuples included) and arrays. An entity inside a class of your own isn't seen; an
-        // object-typed value is taken for one.
+        // Owned values are materialised with their owner, so an owner is refused for what it owns too. Sluice doesn't
+        // follow which of the entities a query reaches its result holds (through Include or an auto-included
+        // navigation), so a result that can hold any reached entity is refused when any reached entity is. The result
+        // is checked by type: the element of a sequence, a single result, and what those hold through generic
+        // arguments (anonymous types and tuples included) and arrays. An entity inside a class of your own isn't
+        // seen; an object-typed value is taken for one.
         private void CheckResult(Type result)
         {
             var types = _reached
@@ -719,9 +787,9 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
             var (other, why) = refused[0];
             Untrackable(
-                $"it returns {returned[0].ShortName()} entities, which can hold the other entities it reads "
-                    + $"(through Include or an auto-included navigation), and it reads {other.ShortName()} "
-                    + $"entities, which {why}. Select the values you need instead"
+                $"it returns {returned[0].ShortName()} entities, and it reads {other.ShortName()} entities, which "
+                    + $"{why}. Sluice doesn't follow which of the entities it reads the result holds, so it refuses "
+                    + "them all. Select the values you need instead"
             );
         }
 

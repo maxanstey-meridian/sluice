@@ -396,6 +396,71 @@ public sealed class Account
     public int TenantId { get; set; }
 }
 
+/// <summary>The current tenant, held in shared state as an app's ambient accessor would hold it.</summary>
+public static class TenantAccessor
+{
+    public static int Current { get; set; }
+
+    public static int Read() => Current;
+}
+
+/// <summary>An object a query filter captures, which reads the current tenant when the query runs.</summary>
+public sealed class TenantSource
+{
+    public int Current => TenantAccessor.Current;
+}
+
+/// <summary>
+/// Has named query filters that read shared state, one way each: <c>accessor</c> a static property, <c>method</c> a
+/// static method, <c>clock</c> the time, and <c>captured</c> an object it captured; and <c>plain</c>, which reads only
+/// a readonly static field, a captured value and <c>EF.Functions</c>, which can't change between calls.
+/// </summary>
+public sealed class Ledger
+{
+    public static readonly string Closed = "closed";
+
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public string Code { get; set; } = "";
+    public DateTime PostedAt { get; set; }
+}
+
+/// <summary>
+/// Auto-includes its ticket, and has a query filter whose subquery calls <c>IgnoreAutoIncludes()</c> and
+/// <c>IgnoreQueryFilters()</c>, which the analysis mustn't take for the whole query's.
+/// </summary>
+public sealed class Voucher
+{
+    public int Id { get; set; }
+    public int? TicketId { get; set; }
+    public Ticket? Ticket { get; set; }
+}
+
+/// <summary>Auto-includes its dog, which auto-includes its owner in turn.</summary>
+public sealed class Kennel
+{
+    public int Id { get; set; }
+    public int? DogId { get; set; }
+    public Dog? Dog { get; set; }
+}
+
+public abstract class Pet
+{
+    public int Id { get; set; }
+}
+
+/// <summary>Owns its perch, which auto-includes the song it's learning, though its base type owns nothing.</summary>
+public sealed class Parrot : Pet
+{
+    public Perch Perch { get; set; } = new();
+}
+
+public sealed class Perch
+{
+    public int? SongId { get; set; }
+    public Song? Song { get; set; }
+}
+
 public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options)
 {
     public DbSet<Customer> Customers => Set<Customer>();
@@ -440,6 +505,10 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         Set<Dictionary<string, object>>("PlaylistSongs");
     public DbSet<Jukebox> Jukeboxes => Set<Jukebox>();
     public DbSet<Award> Awards => Set<Award>();
+    public DbSet<Ledger> Ledgers => Set<Ledger>();
+    public DbSet<Voucher> Vouchers => Set<Voucher>();
+    public DbSet<Kennel> Kennels => Set<Kennel>();
+    public DbSet<Pet> Pets => Set<Pet>();
 
     /// <summary>The tenant <see cref="Account"/>'s query filter reads.</summary>
     public int TenantId { get; init; }
@@ -585,6 +654,46 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Ticket>().HasQueryFilter("customer", ticket => ticket.Customer!.Name != "");
         model.Entity<Memo>().HasQueryFilter(memo => Customers.Any(c => c.Id == memo.CustomerId));
         model.Entity<Account>().HasQueryFilter(account => account.TenantId == TenantId);
+        var tenants = new TenantSource();
+        var code = "open";
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("accessor", ledger => ledger.TenantId == TenantAccessor.Current);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("method", ledger => ledger.TenantId == TenantAccessor.Read());
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("clock", ledger => ledger.PostedAt <= DateTime.UtcNow);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("captured", ledger => ledger.TenantId == tenants.Current);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter(
+                "plain",
+                ledger =>
+                    ledger.Code != Ledger.Closed
+                    && ledger.Code != code
+                    && !EF.Functions.Like(ledger.Code, "void%")
+            );
+        model.Entity<Voucher>().Navigation(voucher => voucher.Ticket).AutoInclude();
+        model
+            .Entity<Voucher>()
+            .HasQueryFilter(voucher =>
+                Coupons.IgnoreAutoIncludes().IgnoreQueryFilters().Any(c => c.Id != voucher.Id)
+            );
+        model.Entity<Kennel>().Navigation(kennel => kennel.Dog).AutoInclude();
+        model
+            .Entity<Parrot>()
+            .OwnsOne(
+                parrot => parrot.Perch,
+                perch =>
+                {
+                    perch.HasOne(p => p.Song).WithMany().HasForeignKey(p => p.SongId);
+                    perch.Navigation(p => p.Song).AutoInclude();
+                }
+            );
 
         model.Entity<Supplier>().ToTable("Suppliers").ToView("supplier_names");
         model.Entity<CustomerTotal>().HasNoKey().ToView("customer_totals");

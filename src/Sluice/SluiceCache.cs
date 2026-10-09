@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.ExceptionServices;
 using System.Transactions;
 using Sluice.Infrastructure;
 using ZiggyCreatures.Caching.Fusion;
@@ -64,6 +65,11 @@ public sealed class SluiceCache
     /// <exception cref="OperationCanceledException">
     /// The compute was cancelled, or <paramref name="ct"/> was already cancelled, in which case no cached value is
     /// returned and nothing is computed.
+    /// </exception>
+    /// <exception cref="AggregateException">
+    /// The compute threw and disposing what it held (such as <c>read.Db</c>'s context) threw too, or several disposes
+    /// threw. A single failed dispose after a compute that didn't throw reaches the caller as it is. Nothing is cached
+    /// in either case.
     /// </exception>
     [SuppressMessage(
         "ApiDesign",
@@ -229,7 +235,9 @@ public sealed class SluiceCache
         ActiveCompute.Reads = reads;
 
         TValue value = default!;
+        Exception? computeFailure = null;
         string[] tags;
+        Exception? releaseFailure;
 
         // A cached value is served to every caller, so it mustn't see a transaction's uncommitted rows. Connections the
         // compute opens don't enlist in the caller's ambient transaction.
@@ -246,15 +254,31 @@ public sealed class SluiceCache
             {
                 value = await compute(reads, ct).ConfigureAwait(false);
             }
-            catch (Exception) when (reads.HasViolation)
+            catch (Exception failure)
             {
-                // The guard violation is rethrown once GetOrSetAsync returns.
+                computeFailure = failure;
             }
-            finally
-            {
-                tags = reads.Close();
-                await reads.ReleaseAsync().ConfigureAwait(false);
-            }
+
+            tags = reads.Close();
+            releaseFailure = await reads.ReleaseAsync().ConfigureAwait(false);
+        }
+
+        // A failed dispose mustn't throw out of the factory: it would replace the compute's exception or a guard
+        // violation, skip the check below, and with fail-safe on let FusionCache serve an expired value over it. It
+        // becomes a violation instead, behind any guard violation the compute recorded (Violate keeps the first).
+        if (releaseFailure is not null)
+        {
+            reads.Violate(
+                computeFailure is null
+                    ? releaseFailure
+                    : new AggregateException(computeFailure, releaseFailure)
+            );
+        }
+        else if (computeFailure is not null && !reads.HasViolation)
+        {
+            // The compute's own exception, as it would have propagated; a guard violation is rethrown instead once
+            // GetOrSetAsync returns.
+            ExceptionDispatchInfo.Throw(computeFailure);
         }
 
         if (tags.Length == 0)

@@ -17,9 +17,9 @@ namespace Sluice;
 /// write to that row, or to the rows under that parent, evicts it. Inside a compute, EF commands on any other context
 /// throw, unless they run in the fetch of <c>read.From(dependency, fetch)</c>, and so do writes, reads inside a
 /// transaction, and reads Sluice can't track: raw SQL, database functions, views and keyless types, query filters
-/// that read the context's state, and results holding entities that load lazily or hold their context. A violation
-/// inside a compute also makes the call that ran it throw and cache nothing, even if the compute catches it. The
-/// rules in full:
+/// that read the context's or other shared state (a static property, the clock), and results holding entities that
+/// load lazily or hold their context. A violation inside a compute also makes the call that ran it throw and cache
+/// nothing, even if the compute catches it. The rules in full:
 /// <see href="https://maxanstey-meridian.github.io/sluice/guides/ef-core">EF Core</see>.
 /// </remarks>
 public static class SluiceReadsExtensions
@@ -105,7 +105,7 @@ public static class SluiceReadsExtensions
         ArgumentNullException.ThrowIfNull(key);
 
         var dependency = ModelSources.EntityDependency(set.EntityType, key, nameof(key));
-        var query = TrackedReads.Query(read, set);
+        var query = TrackedReads.Query(set);
 
         read.From(dependency);
         return WhereEquals(query, ModelSources.KeyProperty(set.EntityType), key);
@@ -159,7 +159,7 @@ public static class SluiceReadsExtensions
         );
         var property = resolved.Properties[0];
         ModelSources.EnsureKeyType(property, principalKey, nameof(principalKey));
-        var query = TrackedReads.Query(read, set);
+        var query = TrackedReads.Query(set);
 
         read.From(ModelSources.ForeignKey(resolved).For(principalKey));
         return WhereEquals(query, property, principalKey);

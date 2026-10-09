@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -16,20 +17,14 @@ internal static class ModelSources
 {
     private const string SourceAnnotation = "Sluice:Source";
     private const string CascadeAnnotation = "Sluice:Cascades";
-
-    /// <summary>The source of <paramref name="entityType"/>'s rows, keyed by primary key.</summary>
-    /// <exception cref="NotSupportedException">The type isn't mapped to a table.</exception>
-    internal static Source<object> Entity(IEntityType entityType)
-    {
-        EnsureTable(entityType);
-        return WrittenEntity(entityType);
-    }
+    private const string TableNameAnnotation = "Sluice:TableName";
 
     /// <summary>
-    /// The same source without the mapping check, for writes: a type no read accepts has no reader to evict, and a
-    /// throw would lose the rest of the save's invalidations. A composite key is passed as an array of its values.
+    /// The source of <paramref name="entityType"/>'s rows, keyed by primary key; a composite key is passed as an
+    /// array of its values. Unchecked: a write to a type no read accepts has no reader to evict, and a throw would lose
+    /// the rest of the save's invalidations. Public entry points check the mapping first (<see cref="EnsureTable"/>).
     /// </summary>
-    internal static Source<object> WrittenEntity(IEntityType entityType)
+    internal static Source<object> Entity(IEntityType entityType)
     {
         var root = entityType.GetRootType();
         return root.GetOrAddRuntimeAnnotationValue(
@@ -100,7 +95,13 @@ internal static class ModelSources
             .Where(entityType =>
                 entityType.FindPrimaryKey() is not null
                 && entityType.GetTableName() is { } table
-                && Names(sql, quote.DelimitIdentifier(table))
+                && entityType
+                    .GetOrAddRuntimeAnnotationValue(
+                        TableNameAnnotation,
+                        static identifier => NamePattern(identifier!),
+                        quote.DelimitIdentifier(table)
+                    )
+                    .IsMatch(sql)
             )
             .Select(Unowned)
             .Select(entityType => entityType.GetRootType())
@@ -109,11 +110,11 @@ internal static class ModelSources
 
     /// <summary>
     /// What an update of <paramref name="entityType"/> rows may change: the whole type, and every foreign key a row of
-    /// it may have, since an update may move rows between parents. Unchecked, like <see cref="WrittenEntity"/>.
+    /// it may have, since an update may move rows between parents. Unchecked, like <see cref="Entity"/>.
     /// </summary>
     internal static IEnumerable<Dependency> UpdateDependencies(IEntityType entityType) =>
         [
-            WrittenEntity(entityType).All,
+            Entity(entityType).All,
             .. RowForeignKeys(entityType).Select(foreignKey => ForeignKey(foreignKey).All),
         ];
 
@@ -121,7 +122,7 @@ internal static class ModelSources
     /// Every dependency on <paramref name="entityType"/>: its <see cref="UpdateDependencies"/>, and every foreign key
     /// that points at it and lets the database act on its rows, so every read of it is evicted. Also the same for
     /// every type the model lets the database delete or set to null when its rows are deleted. Unchecked, like
-    /// <see cref="WrittenEntity"/>.
+    /// <see cref="Entity"/>.
     /// </summary>
     internal static IEnumerable<Dependency> AllDependencies(IEntityType entityType) =>
         [
@@ -142,12 +143,12 @@ internal static class ModelSources
         string parameterName
     )
     {
-        var source = Entity(entityType);
+        EnsureTable(entityType);
         EnsureKeyType(KeyProperty(entityType), key, parameterName);
-        return source.For(key);
+        return Entity(entityType).For(key);
     }
 
-    /// <summary>The single-column primary key of <paramref name="entityType"/>, which <see cref="Entity"/> has checked.</summary>
+    /// <summary>The single-column primary key of <paramref name="entityType"/>, which <see cref="EnsureTable"/> has checked.</summary>
     /// <exception cref="NotSupportedException">The primary key is composite.</exception>
     internal static IProperty KeyProperty(IEntityType entityType) =>
         entityType.FindPrimaryKey()!.Properties is [var property]
@@ -288,7 +289,7 @@ internal static class ModelSources
                     continue;
                 }
 
-                dependencies.Add(WrittenEntity(dependent).All);
+                dependencies.Add(Entity(dependent).All);
                 if (!principal.First)
                 {
                     dependencies.Add(ForeignKey(foreignKey).All);
@@ -315,38 +316,12 @@ internal static class ModelSources
         entityType.GetForeignKeys().Concat(entityType.GetDerivedForeignKeys());
 
     /// <summary>
-    /// Whether <paramref name="sql"/> names <paramref name="identifier"/>, as the provider delimits it. One left unquoted
-    /// (Npgsql leaves a lowercase name bare) must stand alone, not be part of a longer identifier: <c>user</c> in
-    /// <c>users</c> or <c>user_id</c> isn't it. A quoted one carries its own delimiters.
+    /// The pattern of <paramref name="identifier"/>, as the provider delimits it, standing alone in SQL: not part of a
+    /// longer identifier, so an unquoted <c>users</c> (Npgsql leaves a lowercase name bare) isn't found in
+    /// <c>old_users</c> or <c>users_id</c>. A quoted one carries its own delimiters.
     /// </summary>
-    internal static bool Names(string sql, string identifier)
-    {
-        if (!IsIdentifierChar(identifier[0]))
-        {
-            return sql.Contains(identifier, StringComparison.Ordinal);
-        }
-
-        for (
-            var at = sql.IndexOf(identifier, StringComparison.Ordinal);
-            at >= 0;
-            at = sql.IndexOf(identifier, at + 1, StringComparison.Ordinal)
-        )
-        {
-            var end = at + identifier.Length;
-            if (
-                (at == 0 || !IsIdentifierChar(sql[at - 1]))
-                && (end == sql.Length || !IsIdentifierChar(sql[end]))
-            )
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // A character an unquoted SQL identifier can hold.
-    private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '$';
+    internal static Regex NamePattern(string identifier) =>
+        new($@"(?<![\w$]){Regex.Escape(identifier)}(?![\w$])", RegexOptions.CultureInvariant);
 
     /// <summary>The entity whose rows <paramref name="entityType"/> is stored with: itself, unless it's owned.</summary>
     internal static IEntityType Unowned(IEntityType entityType) =>

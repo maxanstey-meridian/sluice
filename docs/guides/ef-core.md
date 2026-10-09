@@ -26,8 +26,9 @@ builder.Services.AddDbContextFactory<ShopDb>(
   either, `UseSluice` throws `InvalidOperationException`.
 - Relational providers only: Sluice reads each save's transaction from the relational
   connection. A context on any other provider throws `NotSupportedException` when it saves,
-  before it writes anything, and the read helpers refuse it. The test suite runs on
-  PostgreSQL; see [Key folding](#key-folding) for what that means for other providers.
+  before it writes anything, and `read.Db` and the read helpers refuse it the same way. The
+  test suite runs on PostgreSQL; see [Key folding](#key-folding) for what that means for other
+  providers.
 - Building options by hand works too: `UseSluice` has a generic overload, so
   `new DbContextOptionsBuilder<ShopDb>().UseNpgsql(connectionString).UseSluice(services).Options`
   is a `DbContextOptions<ShopDb>`.
@@ -72,13 +73,13 @@ Inside a compute, `read.Db<ShopDb>()` gives you the compute's own context. Query
 ordinary LINQ:
 
 ```csharp
-var db = read.Db<ShopDb>();
+var computeDb = read.Db<ShopDb>();
 
-var customer = await db.Customers
+var customer = await computeDb.Customers
     .Include(customer => customer.Address)
     .SingleOrDefaultAsync(customer => customer.Id == customerId, ct);
 
-var orders = await db.Orders
+var orders = await computeDb.Orders
     .Where(order => order.CustomerId == customerId)
     .OrderByDescending(order => order.PlacedAt)
     .Select(order => new OrderSummary(order.Id, order.Total, order.Coupon!.Code))
@@ -88,8 +89,8 @@ var orders = await db.Orders
 The context is made from your factory the first time the compute asks for it, and the same one
 comes back for every call in that compute. It's disposed when the compute ends. It holds nothing
 from outside the compute, so it can't hand back your request's tracked entities or their unsaved
-edits. Its queries don't track, and it isn't in your request's transaction, so it reads what's
-committed.
+edits. Its queries don't track unless you call `AsTracking()`, and it isn't in your request's
+transaction, so it reads what's committed.
 
 ### What a query records
 
@@ -109,20 +110,19 @@ works that out from the query when EF compiles it, so everything EF can express 
 Owned types and JSON columns are stored in their owner's row, so they count as the owner.
 
 A query records the whole of each table, so in the example above, a change to *any* customer,
-address, order or coupon evicts the value (if `Address` were an owned type, it would count as the
-customer). That's always correct, just broad. When it's too broad, narrow it.
-So you can see which queries do this, Sluice logs each one the first time it runs, at
-`Information`, naming the query and the types it reads whole (see
-[Logging](/guides/configuration#logging)).
+address, order or coupon evicts the value (if `Address` were an owned type, it would count as
+the customer). That's always correct, just broad. When it's too broad, narrow it. So you can
+see which queries do this, Sluice logs each one the first time it runs, at `Information`,
+naming the query and the types it reads whole (see [Logging](/guides/configuration#logging)).
 
 ### Narrowing to rows
 
 Two helpers on `read` start a query that depends on fewer rows:
 
 ```csharp
-var customer = await read.Entity(db.Customers, customerId).SingleOrDefaultAsync(ct);
+var customer = await read.Entity(computeDb.Customers, customerId).SingleOrDefaultAsync(ct);
 
-var orders = await read.Children(db.Orders, order => order.CustomerId, customerId)
+var orders = await read.Children(computeDb.Orders, order => order.CustomerId, customerId)
     .OrderByDescending(order => order.PlacedAt)
     .Select(order => new OrderSummary(order.Id, order.Total, order.Coupon!.Code))
     .ToListAsync(ct);
@@ -130,15 +130,15 @@ var orders = await read.Children(db.Orders, order => order.CustomerId, customerI
 
 | Query | Reads | Evicted by a write to |
 |---|---|---|
-| `db.Customers.Where(…)` | the rows its `Where` matches | any customer |
-| `read.Entity(db.Customers, key)` | the row with that primary key | that row |
-| `read.Children(db.Orders, fk, key)` | the rows whose foreign key is `key` | any of those rows, or a row joining or leaving the set |
+| `computeDb.Customers.Where(…)` | the rows its `Where` matches | any customer |
+| `read.Entity(computeDb.Customers, key)` | the row with that primary key | that row |
+| `read.Children(computeDb.Orders, fk, key)` | the rows whose foreign key is `key` | any of those rows, or a row joining or leaving the set |
 
 Each returns an `IQueryable<T>` you can filter, order, page and project, on the context
 `read.Db` gave you. Only the helper's own type is narrowed: the `Coupon` navigation in the second
 query still depends on every coupon. A read that finds nothing still depends on what it looked
-for, so inserting the row later evicts the cached "not found". The helpers never track and don't
-load auto-included navigations.
+for, so inserting the row later evicts the cached "not found". The helpers don't track unless
+you call `AsTracking()`, and don't load auto-included navigations.
 
 A helper's query skips auto-includes by calling `IgnoreAutoIncludes()`, and EF applies that to
 the whole query, not just the helper's set. So a plain query combined with a helper's, in a
@@ -168,10 +168,13 @@ write evicts, or one built from data other callers shouldn't see.
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
   `ToSqlQuery`. No tracked write ever invalidates them. An abstract TPC base type is fine when
   every concrete type under it has a table;
-- a query filter that reads the context's state, such as a tenant id;
+- a query filter that reads the context's state, such as a tenant id, or static state, such as
+  a static tenant accessor or `DateTime.Now`;
 - entities that load lazily, or hold their context: select the values you need instead;
 - a query on any context other than `read.Db`'s, and reading inside a transaction. See
   [Transactions](/guides/transactions);
+- another compute's `read`, captured and used in this one (for `read.From`, `read.Db` or a
+  helper);
 - writes.
 
 The helpers also refuse types not mapped to a table, with `NotSupportedException`, and a
@@ -301,9 +304,7 @@ EF doesn't tell Sluice which table a bulk statement wrote, so Sluice scans the s
 for table names. The scan can match too much, never too little:
 
 - a table the statement only reads, in a subquery or a join, counts as written;
-- a column or alias named like another table counts as that table;
-- an unquoted, lowercase table name counts wherever it appears inside a longer name, so
-  `orders` matches in `orders_archive`.
+- a column or alias named like another table counts as that table.
 
 Each of those evicts more than the statement changed, which costs a recompute but never serves
 an old value.

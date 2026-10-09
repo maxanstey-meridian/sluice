@@ -190,11 +190,11 @@ that never matters.
 
 ## Shared instances and auto-clone
 
-From memory, FusionCache hands every caller the same object, EF entities included. Modifying a cached value changes it for every later caller, and no invalidation ever
-undoes that. Treat cached values as immutable (records with `init` properties make that
-the default), or turn on FusionCache's auto-clone, which hands each caller its own copy. It
-copies through the serialiser, so it needs one, and every cached value must survive a round
-trip through it:
+From memory, FusionCache hands every caller the same object, EF entities included. Modifying a
+cached value changes it for every later caller, and no invalidation ever undoes that. Treat
+cached values as immutable (records with `init` properties make that the default), or turn on
+FusionCache's auto-clone, which hands each caller its own copy. It copies through the
+serialiser, so it needs one, and every cached value must survive a round trip through it:
 
 ```csharp
 builder.Services.AddSluice(cache =>

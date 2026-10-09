@@ -14,6 +14,9 @@ namespace Sluice.EntityFrameworkCore;
 /// <param name="Ambient">The enlisted or ambient transaction, if any.</param>
 internal readonly record struct ContextTransaction(DbTransaction? Ef, Transaction? Ambient)
 {
+    internal const string NotRelational =
+        "Sluice supports relational EF providers only, and this context's provider isn't relational.";
+
     internal bool IsNone => Ef is null && Ambient is null;
 
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
@@ -31,7 +34,5 @@ internal readonly record struct ContextTransaction(DbTransaction? Ef, Transactio
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
     internal static IRelationalConnection Connection(IInfrastructure<IServiceProvider> context) =>
         context.Instance.GetService(typeof(IRelationalConnection)) as IRelationalConnection
-        ?? throw new NotSupportedException(
-            "Sluice supports relational EF providers only, and this context's provider isn't relational."
-        );
+        ?? throw new NotSupportedException(NotRelational);
 }

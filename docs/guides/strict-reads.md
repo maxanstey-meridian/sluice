@@ -21,25 +21,42 @@ compute:
 - raw SQL: `FromSql` and `SqlQuery`. SQL can read any table;
 - table-valued functions, and database functions you've mapped yourself, which can read any
   table. Functions mapped with `IsBuiltIn = true`, such as `upper`, are fine;
+- temporal queries (`TemporalAsOf` and the rest), which read the history table, and any other
+  kind of query root EF adds that Sluice doesn't know how to follow;
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
   `ToSqlQuery`. No tracked write ever invalidates them;
-- a query filter that reads the context's state, such as a tenant id held on the context. See
+- a query filter that reads the context's state, such as a tenant id held on the context, or
+  static state, such as a static tenant accessor or `DateTime.Now`. See
   [Tenants](#tenants-and-other-context-state);
 - entities that load lazily or hold their context: lazy-loading proxies, an injected lazy
   loader or `DbContext`, or an owned value that holds one. A cached one would read related rows
   later, outside the compute, or keep its context alive. They're refused even when they arrive
   through `Include` or an auto-include rather than as the query's own result. To be safe, a
   query that returns entities is refused if it reads such a type anywhere, even only in a
-  filter; select the values you need instead.
+  filter; select the values you need instead;
+- an `Include` path that isn't a constant, or `IgnoreQueryFilters` names that aren't, since
+  Sluice can't tell what the query loads or which filters still apply;
+- an EF command that isn't a LINQ query, so Sluice never worked out what it reads;
+- a query Sluice failed to work out, which the message says as "Sluice couldn't work out what it
+  reads".
+
+With lazy-loading proxies on for the whole model (`UseLazyLoadingProxies()`), every entity type
+loads lazily, so every query that returns entities is refused inside a compute. Select the
+values you need (projections) instead.
 
 The message says which, names the command by the first line of its SQL, and says what to do,
 which depends on the reason:
 
 | Refused because of | Do this instead |
 |---|---|
-| raw SQL, a function, or a type not mapped to a table | read it in a fused fetch: [the declared route](#the-declared-route) |
-| a query filter that reads the context's state | put the tenant (or whatever it reads) in the query key, filter by it yourself and add `IgnoreQueryFilters()`: [Tenants](#tenants-and-other-context-state) |
+| raw SQL, a function, a table-valued function, a temporal query or another query root Sluice doesn't know | read it in a fused fetch: [the declared route](#the-declared-route) |
+| a type not mapped to a table | read it in a fused fetch |
+| a query filter that reads the context's state or static state | put the tenant (or whatever it reads) in the query key, filter by it yourself and add `IgnoreQueryFilters()`: [Tenants](#tenants-and-other-context-state) |
 | entities that load lazily or hold their context | select the values you need (`Select(o => new { o.Id, o.Total })`), not the entities |
+| an `Include` path that isn't a constant | include by a lambda (`Include(o => o.Lines)`) or a constant path (`Include("Lines")`) |
+| `IgnoreQueryFilters` names that aren't constants | name the filters by constants |
+| an EF command that isn't a LINQ query | run it in a fused fetch |
+| Sluice couldn't work out what it reads | run it in a fused fetch, and report it as a Sluice bug |
 
 ### A query on another context
 
@@ -48,9 +65,10 @@ context may hold tracked entities with unsaved edits, or rows it loaded before a
 the value, or be inside a transaction, and the cached value is served to every caller. The read
 helpers check this when you call them, too.
 
-Call the helpers with the compute's own `read`, the one its lambda was given. A helper records
-its dependency on the `read` you pass it, so one captured from another compute would record it
-there and this value would miss it. So a helper given any other `read` throws.
+Use the compute's own `read`, the one its lambda was given. What you record through a `read`
+lands on its compute, so one captured from another compute would record it there (or nowhere,
+once that compute has returned), and this value would miss it. So `read.From`, `read.Db` and the helpers, called on
+another compute's `read` inside this one, throw.
 
 ### Writes
 
@@ -158,3 +176,9 @@ too, but more broadly: a write to any invoice, in any tenant, evicts it.
 
 The same goes for any context-dependent filter, such as soft delete toggled per context:
 whatever changes what a compute reads must be part of the query key.
+
+A filter that reads static state is refused too, for the same reason: a static tenant accessor
+(`HasQueryFilter(i => i.TenantId == TenantContext.Current)`) gives a different value on each
+call, and `DateTime.Now` a different one as time passes, but the cached value is served
+whatever it is now. Put the value in the query key in the same way; for time, put a rounded
+date in the key, such as today's, and filter by that.
