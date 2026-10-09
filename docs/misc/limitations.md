@@ -20,6 +20,11 @@ no longer than the entry's duration.
 - **A crash between commit and invalidation loses the invalidation.** Nothing replays it after
   a restart. See
   [Transactions](/guides/transactions#what-s-not-covered).
+- **A FusionCache 2.9 race can lose an invalidation on one server.** An invalidation that lands
+  in the same microseconds as a read checking that dependency can be overwritten by the check,
+  and the stale value is then served on that server until the dependency is invalidated again.
+  The window opens when a server first checks a dependency, and again about once an hour after
+  that. It's a FusionCache bug; Sluice has no workaround.
 - **Computes must read committed data from the primary database**, not inside your own open
   transaction or from a replica that may lag behind. See
   [Computes and transactions](/guides/transactions#computes-and-transactions).
@@ -34,6 +39,10 @@ no longer than the entry's duration.
 - **Renaming a source or query, or changing a `format`, changes its cache keys.** During a
   rolling deploy, old and new servers don't evict each other's entries. See
   [Renaming changes the cache keys](/guides/sources-and-queries#renaming-changes-the-cache-keys).
+- **Moving or renaming an EF entity class changes its dependencies' names**, which are the
+  class's full name (`Shop.Domain.Order`). During a rolling deploy, old and new servers don't
+  evict each other's cached reads of that type until those entries expire. See
+  [What a query records](/guides/ef-core#what-a-query-records).
 - **A caller waiting on another caller's compute can't cancel the wait.** See
   [Cancellation](/guides/invalidation#cancellation).
 - **FusionCache's factory timeouts and its per-key `DefaultEntryOptionsProvider` don't apply**
@@ -62,22 +71,32 @@ no longer than the entry's duration.
   [Database cascades](/guides/ef-core#database-cascades).
 - **Cascades the model doesn't know about** (triggers, a database that differs from the model)
   aren't seen at all. See [Database cascades](/guides/ef-core#database-cascades).
-- **A row saved from an object you built yourself** misses its real old parent when its foreign
-  key differs from the stored one. See
+- **Without a row version, updating or deleting a row evicts its `Children` lists under every
+  parent**, since the parent EF loaded may not be the one the row leaves. Map a row version
+  (`xmin` on PostgreSQL, `rowversion` on SQL Server) to keep that exact. See
+  [Row versions](/guides/ef-core#row-versions).
+- **A row saved from an object you built yourself**, of a type with a row version, misses its
+  real old parent when its foreign key differs from the stored one. See
   [Rows saved without loading them](/guides/ef-core#rows-saved-without-loading-them).
 - **Two entity types splitting one table and sharing a column**: saving one doesn't evict the
   other's readers. See [Model shapes](/guides/ef-core#model-shapes).
-- **Broad eviction, by design**: a plain query is evicted by any write to any table it reads, a
-  `Children` list by a change to any row in it, and every read of a table by an `ExecuteUpdate`
-  or `ExecuteDelete` on it. See [What a query records](/guides/ef-core#what-a-query-records) and
-  [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes).
+- **Two classes mapped to the same table aren't linked.** Dependencies belong to entity
+  types (classes), not tables. A second class over the same table, such as a read model in
+  another context, is a separate type: a write through either doesn't evict reads through the
+  other, both ways. To link them, have each one's reads also record the other's
+  `AllDependencies()` with `read.From`, or invalidate by hand. See
+  [What a query records](/guides/ef-core#what-a-query-records).
+- **Broad eviction, by design**: a plain query is evicted by any write to any type it reads, a
+  `Children` list by a change to any row in it, and every read of a type by an `ExecuteUpdate`
+  or `ExecuteDelete` on its table. See
+  [What a query records](/guides/ef-core#what-a-query-records) and [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes).
 - **Commits Sluice doesn't see**: a raw `DbTransaction` committed outside EF, and some
   `TransactionScope` setups. See [Transactions](/guides/transactions#ef-core).
 - **Interceptors that change entities in `SavingChanges`** must come before `UseSluice`. See
   [Interceptor order](/guides/ef-core#interceptor-order).
-- **Relational providers only, and no `UseInternalServiceProvider`.** Computes need the context
-  registered with a factory (`AddDbContextFactory` or `AddPooledDbContextFactory`). See
-  [Setup](/guides/ef-core#setup).
+- **Relational providers only, and no `UseInternalServiceProvider`.** Computes take the context
+  from a DI scope of their own, so it must be registered as a scoped service (every EF
+  registration does that). See [Setup](/guides/ef-core#setup).
 - **Tested on PostgreSQL only.** Key folding assumes PostgreSQL's comparison rules, and doesn't
   fold accent- or culture-sensitive collations. See [Key folding](/guides/ef-core#key-folding).
 - **Composite primary keys can't be read with `read.Entity`**, and `read.Children` takes a
@@ -85,16 +104,19 @@ no longer than the entry's duration.
 - **Views, keyless types, functions and SQL-query mappings** can't be read inside a compute
   except in a fused fetch. See [What's refused](/guides/ef-core#what-s-refused).
 
-## Strict reads
+## What a compute can't read
 
 - **Some reads go unchecked inside a compute**, such as `Find` of an entity a captured outside
   context already tracks, or Dapper on a context's connection. See
   [What isn't checked](/guides/strict-reads#what-isn-t-checked).
 - **Some reads only work in a fused fetch**: raw SQL, views, keyless types and your own
   database functions. See [The declared route](/guides/strict-reads#the-declared-route).
-- **Query filters that read the context's state are refused inside a compute.** Put what they
-  read in the query key and filter by it yourself. See
+- **Query filters that read the context's state need the compute to set it**, from the query
+  key, with `read.Db<AppDb>(db => db.TenantId = tenantId)`; Sluice can't check what the
+  configure sets. Filters that read it through a service the context holds are refused. See
   [Tenants](/guides/strict-reads#tenants-and-other-context-state).
+- **Invalidation isn't per tenant.** A write in one tenant evicts other tenants' cached reads
+  of the same table, unless they read through `read.Children` on a tenant foreign key.
 - **Entities that load lazily or hold their context can't be returned by a query in a
   compute.** Select the values you need. See
   [What throws inside a compute](/guides/strict-reads#what-throws-inside-a-compute).

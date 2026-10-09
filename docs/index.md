@@ -15,7 +15,7 @@ features:
   - title: Name each thing that can change, once
     details: A Source names something a cached value can depend on, such as one user's greeting. Reads record it and writes clear it from the same declaration, so the two sides can't disagree on a name.
   - title: Cached values record what they read
-    details: read.From(dependency, fetch) records what it reads and fetches it in one call. With EF Core, you write ordinary queries, and Sluice records the tables each one reads.
+    details: read.From(dependency, fetch) records what it reads and fetches it in one call. With EF Core, you write ordinary queries, and Sluice records the entity types each one reads.
   - title: Clearing waits for the commit
     details: With EF Core, a save or bulk update clears what it changed once it commits, with no Sluice code. With anything else, you call InvalidateAsync after your write commits.
 ---

@@ -84,16 +84,16 @@ public static class ActiveCompute
     }
 
     /// <summary>
-    /// Whether <paramref name="reads"/>' compute holds this very instance of <paramref name="resource"/> (compared by
-    /// reference, so an equal one doesn't count).
+    /// The <typeparamref name="T"/> that <paramref name="reads"/>' compute holds, or null if it hasn't made one. Unlike
+    /// <see cref="Hold{T}"/>, it makes nothing, so a check can ask without opening anything.
     /// </summary>
+    /// <typeparam name="T">The resource; the compute holds one of each type.</typeparam>
     /// <param name="reads">The compute's reads.</param>
-    /// <param name="resource">The resource.</param>
-    public static bool Holds(SluiceReads reads, IAsyncDisposable resource)
+    public static T? Held<T>(SluiceReads reads)
+        where T : class, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(reads);
-        ArgumentNullException.ThrowIfNull(resource);
-        return reads.Holds(resource);
+        return reads.Held<T>();
     }
 
     /// <summary>

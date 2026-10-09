@@ -15,8 +15,8 @@ keys to clear.
 
 [FusionCache](https://github.com/ZiggyCreatures/FusionCache) does the actual caching: in
 memory, in Redis, and keeping several servers in sync. Sluice adds the "what did this read?"
-part. With EF Core you write ordinary queries: Sluice records the tables each one reads, and
-saving your changes clears the right entries by itself. With any other data source, you tell
+part. With EF Core you write ordinary queries: Sluice records the entity types each one reads,
+and saving your changes clears the right entries by itself. With any other data source, you tell
 Sluice what changed after you write it.
 
 ## The rules
@@ -41,6 +41,9 @@ Clearing waits until the write has committed.
 dotnet add package Meridian.Sluice
 dotnet add package Meridian.Sluice.EntityFrameworkCore   # only if you use EF Core
 ```
+
+The two share a version number, and the EF Core package needs exactly its own version of
+`Meridian.Sluice`, so upgrade them together.
 
 ## Three steps in
 
@@ -153,21 +156,24 @@ builder.Services.AddDbContextFactory<AppDb>(
 );
 ```
 
-`UseSluice` connects the context to Sluice. Register it with `AddDbContextFactory` (or
-`AddPooledDbContextFactory`): that also registers `AppDb` for the rest of your code, and lets
-each compute have a context of its own.
+`UseSluice` connects the context to Sluice. Register it however you like (`AddDbContext`,
+`AddDbContextFactory` or a pool): each compute takes an `AppDb` of its own from a DI scope it
+opens for itself.
 
 ### Reading
 
 Inside a compute, `read.Db<AppDb>()` gives you that context. Query it as you would any context:
 filters, projections, `Include`, navigations, joins, subqueries, many-to-many, `Find`, compiled
-queries. Sluice records every table each query reads, and a write to any of them evicts the
-value. The compute's context is fresh, tracks nothing by default, and isn't in your request's
-transaction, so it reads what's committed and nothing else.
+queries. Sluice records every entity type each query reads, and a write to any of them evicts
+the value. The compute's context is fresh, tracks nothing by default, and isn't in your request's
+transaction, so it reads what's committed and nothing else. An entity type is a class in your
+EF model, not a table: a second class mapped to the same table, such as a read model in
+another context, isn't linked to it, so a write through one doesn't evict reads through the
+other. See [Limitations](https://maxanstey-meridian.github.io/sluice/misc/limitations#ef-core).
 
-A plain query depends on whole tables: renaming any user evicts every dashboard that read the
-users table. Sluice logs each cached query that does this the first time it runs, at
-`Information`. When that's too broad, narrow a query to the rows it reads:
+A plain query depends on every row of each type it reads: renaming any user evicts every
+dashboard that read users. Sluice logs each cached query that does this the first time it runs,
+at `Information`. When that's too broad, narrow a query to the rows it reads:
 
 ```csharp
 // One row, by key.
@@ -197,9 +203,9 @@ await db.SaveChangesAsync(ct);
 Once a save commits, Sluice clears the cached reads of every row it inserted, updated or
 deleted, and of the lists those rows were in or moved between. `ExecuteUpdate` and
 `ExecuteDelete` work too: Sluice can't tell which rows they changed, so once they commit, every
-cached read of the table they wrote is evicted. One more case is broad: when a delete makes the
-database delete rows EF never loaded, or set their foreign key to null (`ON DELETE CASCADE` or
-`SET NULL`), Sluice clears every cached read of those types.
+cached read of the types in the table they wrote is evicted. One more case is broad: when a
+delete makes the database delete rows EF never loaded, or set their foreign key to null
+(`ON DELETE CASCADE` or `SET NULL`), Sluice clears every cached read of those types.
 [Database cascades](https://maxanstey-meridian.github.io/sluice/guides/ef-core#database-cascades)
 has the details.
 
@@ -214,11 +220,18 @@ for data written outside your app. For an EF set it's one line:
 Inside a compute, a few things throw, because Sluice couldn't tell what they read: raw SQL
 (`FromSql`, `SqlQuery`), views, keyless types and database functions of your own. Read those in
 the fetch of `read.From(dependency, fetch)`, with a `Source` you declare and invalidate
-yourself. A query on any context other than `read.Db`'s throws too: that context may hold your
-request's unsaved edits or uncommitted rows, which mustn't be cached for everyone. So does a
-query filter that reads the context's state or other state that can change, such as a tenant id.
-[Strict reads](https://maxanstey-meridian.github.io/sluice/guides/strict-reads) has the full
-list, and what Sluice can't check.
+yourself, or with the EF sets' dependencies (`[.. db.Orders.AllDependencies()]`), so EF writes
+to those types evict it with no code of yours. A query on any context other than `read.Db`'s
+throws too: that context may hold your request's unsaved edits or uncommitted rows, which
+mustn't be cached for everyone. So does a query filter that reads state that can change, such
+as a static tenant accessor, or the context's own tenant id unless the compute set it from the
+key with `read.Db<AppDb>(db => db.TenantId = tenantId)`.
+
+One thing doesn't throw, and isn't tracked either: raw ADO.NET or Dapper on `read.Db`'s
+connection (`computeDb.Database.GetDbConnection()`) outside a `read.From` fetch. Sluice only
+sees EF commands, so such a read records nothing. Run it in a fetch as above.
+[What a compute can't read](https://maxanstey-meridian.github.io/sluice/guides/strict-reads)
+has the full list, and what else Sluice can't check.
 
 ## Good to know
 
@@ -251,8 +264,8 @@ start.
   everything
 - [EF Core](https://maxanstey-meridian.github.io/sluice/guides/ef-core): what each query records,
   foreign keys, database cascades, owned and inherited types, pooled contexts, and bulk updates
-- [Strict reads](https://maxanstey-meridian.github.io/sluice/guides/strict-reads): what a compute
-  can't read, how to read views and raw SQL anyway, and what Sluice can't check
+- [What a compute can't read](https://maxanstey-meridian.github.io/sluice/guides/strict-reads):
+  the full list, how to read views and raw SQL anyway, and what Sluice can't check
 - [Transactions](https://maxanstey-meridian.github.io/sluice/guides/transactions): EF
   transactions, `TransactionScope` and retries all clear the cache after the commit, not before
 - [Several servers](https://maxanstey-meridian.github.io/sluice/guides/configuration): sharing

@@ -32,16 +32,6 @@ public sealed class ComputeScopeTests
 
     private sealed class Third : Held;
 
-    // Equal to every other one, so only a by-reference check tells them apart.
-    private sealed class Lookalike : IAsyncDisposable
-    {
-        public override bool Equals(object? obj) => obj is Lookalike;
-
-        public override int GetHashCode() => 0;
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-    }
-
     [Fact]
     public async Task A_compute_runs_outside_the_caller_s_ambient_transaction_and_the_caller_gets_it_back()
     {
@@ -81,7 +71,7 @@ public sealed class ComputeScopeTests
                 escaped = read;
                 first = ActiveCompute.Hold(read, _ => new Held());
                 second = ActiveCompute.Hold(read, _ => new Held());
-                heldInside = ActiveCompute.Holds(read, first) && !first.Disposed;
+                heldInside = ActiveCompute.Held<Held>(read) == first && !first.Disposed;
                 return Task.FromResult(true);
             }
         );
@@ -120,27 +110,31 @@ public sealed class ComputeScopeTests
     }
 
     [Fact]
-    public async Task A_compute_holds_only_the_very_instance_it_was_given()
+    public async Task Held_returns_what_the_compute_holds_and_makes_nothing()
     {
         await using var node = new SluiceNode();
-        var holdsItsOwn = false;
-        var holdsALookalike = true;
+        Held? before = new();
+        Held? own = null;
+        Held? after = null;
+        Second? other = new();
 
         await node.Cache.GetOrSetAsync(
             _query,
-            "lookalike",
+            "peek",
             (read, _) =>
             {
                 read.From(_rows.For(1));
-                var own = ActiveCompute.Hold(read, _ => new Lookalike());
-                holdsItsOwn = ActiveCompute.Holds(read, own);
-                holdsALookalike = ActiveCompute.Holds(read, new Lookalike());
+                before = ActiveCompute.Held<Held>(read);
+                own = ActiveCompute.Hold(read, _ => new Held());
+                after = ActiveCompute.Held<Held>(read);
+                other = ActiveCompute.Held<Second>(read);
                 return Task.FromResult(true);
             }
         );
 
-        holdsItsOwn.Should().BeTrue();
-        holdsALookalike.Should().BeFalse();
+        before.Should().BeNull();
+        after.Should().BeSameAs(own);
+        other.Should().BeNull("Held makes nothing");
     }
 
     [Theory]

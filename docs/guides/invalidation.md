@@ -80,7 +80,9 @@ thousands, record the source's `All` instead. See [Performance](/misc/performanc
 
 - **It must record something.** A compute that records no dependency makes the call throw
   `InvalidOperationException`, and nothing is cached: nothing could ever invalidate it. For a
-  value with no dependencies, use FusionCache directly.
+  value with no dependencies, use a FusionCache of your own: register one with
+  `services.AddFusionCache()` and inject `IFusionCache`. Sluice's cache is a named one, so it
+  isn't registered as `IFusionCache`.
 - **No nesting.** Calling `GetOrSetAsync` from inside a compute, or inside a fused fetch, throws.
   If the inner value were already cached, the outer compute couldn't learn what it read. Read
   the underlying data in the outer compute instead.

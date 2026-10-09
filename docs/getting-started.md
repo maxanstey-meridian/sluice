@@ -14,7 +14,8 @@ dotnet add package Meridian.Sluice.EntityFrameworkCore
 
 Sluice targets .NET 10 and runs on FusionCache 2.9, which it brings in. The EF Core package
 needs EF Core 10.0.12 or later on a relational provider. It's tested on PostgreSQL, and the
-playground uses SQLite.
+playground uses SQLite. The two packages share a version number, and the EF Core package
+depends on exactly its own version of `Meridian.Sluice`, so upgrade them together.
 
 Leave out `Meridian.Sluice.EntityFrameworkCore` if you don't use EF Core. Everything on this
 page except the `AppDb` model, the `AddDbContextFactory` and `UseSluice` registration, the
@@ -129,14 +130,14 @@ builder.Services.AddDbContextFactory<AppDb>(
 creates a FusionCache of its own. To configure it (durations, Redis, several servers), pass a
 callback to `AddSluice`; see [Configuration](/guides/configuration).
 
-`AddDbContextFactory` registers `AppDb` for your own code, and a factory Sluice uses to give
-each cached value's computation a context of its own.
+`AddDbContextFactory` registers `AppDb` for your own code (`AddDbContext` works too). Each
+cached value's computation takes an `AppDb` of its own from a DI scope it opens for itself.
 
 `UseSluice` does two things. Each time `SaveChanges` (or `ExecuteUpdate`, or `ExecuteDelete`)
 commits, it evicts what the write changed. And while a cached value is being built, it records
-the tables each query reads, and makes queries it can't track throw
-([strict reads](/guides/strict-reads)). It needs `AddSluice` and logging registered; ASP.NET
-Core and the Generic Host register logging for you.
+the entity types each query reads, and makes queries it can't track throw (see
+[What a compute can't read](/guides/strict-reads)). It needs `AddSluice` and logging
+registered; ASP.NET Core and the Generic Host register logging for you.
 
 Every caller gets the same cached object, EF entities included. Don't modify one, or turn on
 FusionCache's auto-clone to give each caller a copy; see
@@ -217,16 +218,16 @@ and records what it reads:
 
 | Read | Records |
 |---|---|
-| `read.Db<AppDb>()` | nothing yet: it's the compute's own `AppDb`, made from the factory and disposed when the compute ends |
-| `computeDb.Users.SingleAsync(…)` | the users table |
-| `computeDb.Flags.Where(…)…` | the flags table |
+| `read.Db<AppDb>()` | nothing yet: it's the compute's own `AppDb`, made in the compute's own DI scope and disposed when the compute ends |
+| `computeDb.Users.SingleAsync(…)` | every `User` row |
+| `computeDb.Flags.Where(…)…` | every `Flag` row |
 | `read.From(Dashboards.Greeting.For(userId), fetch)` | that user's greeting, then runs `fetch` |
 
 Recording happens as the compute runs, so it records what was actually read. Bob isn't an admin,
 so his compute never reaches the greeting, and his dashboard doesn't depend on one.
 
-A plain query depends on the whole table: renaming any user evicts both dashboards. To depend
-on one row, start the query from `read.Entity(computeDb.Users, userId)` instead; see
+A plain query depends on every row of its type: renaming any user evicts both dashboards. To
+depend on one row, start the query from `read.Entity(computeDb.Users, userId)` instead; see
 [Narrowing to rows](/guides/ef-core#narrowing-to-rows).
 
 Query the context `read.Db` gives you, not one you injected: the compute's own context holds
@@ -253,7 +254,7 @@ public async Task<bool> ToggleDarkMode(CancellationToken ct)
 }
 ```
 
-Both dashboards read the flags table, so both are evicted, and the next read of each recomputes.
+Both dashboards read the `Flag` type, so both are evicted, and the next read of each recomputes.
 
 Sluice can't see the greeting service's writes, so after one, tell it what changed:
 
@@ -296,5 +297,5 @@ that dashboard has been computed. The database is a SQLite file, recreated on ea
 - [Sources and Queries](/guides/sources-and-queries): key types, typed ids, names, durations
 - [Reading and Invalidating](/guides/invalidation): the generic path in full
 - [EF Core](/guides/ef-core): what a query records, the helpers, what a write invalidates
-- [Strict Reads](/guides/strict-reads): what a compute can't read, and why
+- [What a compute can't read](/guides/strict-reads): what throws inside a compute, and why
 - [Configuration](/guides/configuration): FusionCache options and multi-node setups

@@ -57,7 +57,7 @@ include leasing the compute's own context from a pooled factory:
 | | | 28.1 µs (`read.Entity`) |
 
 The save pays for capturing what changed and invalidating it. A plain query pays for reading its tag and recording
-the tables it names; working out what a query reads happens once, when EF compiles it. A miss through `read.Entity`
+the entity types it names; working out what a query reads happens once, when EF compiles it. A miss through `read.Entity`
 costs about 13 µs more than the same miss through a plain query.
 
 ## Not measured

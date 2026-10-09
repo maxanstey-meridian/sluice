@@ -296,7 +296,9 @@ public sealed class SluiceCache
                 new InvalidOperationException(
                     "The compute recorded no dependencies, so nothing could ever invalidate its value. Record what it "
                         + "reads with read.From(...); with EF Core, query a context from read.Db<TContext>(), "
-                        + "configured with UseSluice. For values with no tracked dependencies, use IFusionCache directly."
+                        + "configured with UseSluice. For a value with nothing to depend on, cache it in a FusionCache of "
+                        + "your own: register one with services.AddFusionCache() and inject IFusionCache (Sluice's cache "
+                        + "is a named one, not registered as IFusionCache)."
                 )
             );
         }

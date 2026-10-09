@@ -1,7 +1,7 @@
-# Strict Reads
+# What a compute can't read
 
 Sluice only evicts a cached value when something it recorded changes. Every EF query on the
-compute's own context records the tables it reads (see
+compute's own context records the entity types it reads (see
 [What a query records](/guides/ef-core#what-a-query-records)). A read Sluice couldn't attribute
 would record nothing, so no write would ever evict the value built from it. It would sit there
 out of date, silently, until it expired.
@@ -25,9 +25,9 @@ compute:
   kind of query root EF adds that Sluice doesn't know how to follow;
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
   `ToSqlQuery`. No tracked write ever invalidates them;
-- a query filter that reads the context's state, such as a tenant id held on the context, or
-  other state that can change, such as a static tenant accessor, a captured service or
-  `DateTime.Now`. See
+- a query filter that reads the context's state, such as a tenant id held on the context,
+  unless the compute set it with `read.Db<AppDb>(configure)`, or other state that can change,
+  such as a static tenant accessor, a captured service or `DateTime.Now`. See
   [Tenants](#tenants-and-other-context-state);
 - entities that load lazily or hold their context: lazy-loading proxies, an injected lazy
   loader or `DbContext`, or an owned value that holds one. A cached one would read related rows
@@ -52,7 +52,8 @@ which depends on the reason:
 |---|---|
 | raw SQL, a function, a table-valued function, a temporal query or another query root Sluice doesn't know | read it in a fused fetch: [the declared route](#the-declared-route) |
 | a type not mapped to a table | read it in a fused fetch |
-| a query filter that reads the context's state or other state that can change | put the tenant (or whatever it reads) in the query key, filter by it yourself and add `IgnoreQueryFilters()`: [Tenants](#tenants-and-other-context-state) |
+| a query filter that reads the context's state | put the tenant in the query key and set it on the compute's context with `read.Db<AppDb>(db => db.TenantId = tenantId)`: [Tenants](#tenants-and-other-context-state) |
+| a query filter that reads other state that can change | put whatever it reads in the query key, filter by it yourself, and ignore just the filters the message names, by name (`IgnoreQueryFilters(["Tenant"])`), so the others still apply. An unnamed filter can only be ignored with `IgnoreQueryFilters()`, which drops every filter, so name it first unless it's the only one: [Tenants](#tenants-and-other-context-state) |
 | entities that load lazily or hold their context | select the values you need (`Select(o => new { o.Id, o.Total })`), not the entities |
 | an `Include` path that isn't a constant | include by a lambda (`Include(o => o.Lines)`) or a constant path (`Include("Lines")`) |
 | `IgnoreQueryFilters` names that aren't constants | name the filters by constants |
@@ -117,6 +118,24 @@ await db.SaveChangesAsync(ct);
 await cache.InvalidateAsync(Reports.StoreSales.For(order.StoreId));
 ```
 
+When what the fetch reads is stored in EF entity types, such as a view over orders and stores
+or a Dapper query of their tables, declare those types' dependencies instead, and there's
+nothing to invalidate yourself:
+
+```csharp
+var sales = await read.From(
+    [.. db.Orders.AllDependencies(), .. db.Stores.AllDependencies()],
+    ct => db.StoreSales.Where(row => row.StoreId == storeId).ToListAsync(ct)
+);
+```
+
+Declared this way, the value depends on every row of each type and every list of its rows, as
+a plain query of the type does. So once any save, `ExecuteUpdate` or `ExecuteDelete` of an order
+or a store commits on a `UseSluice` context, the value is evicted. It's broad: any order evicts
+it, not only that store's, and so does a write to any type a delete of orders or stores
+[cascades into](/guides/ef-core#database-cascades), such as order lines. Writes Sluice can't see
+still need [invalidating by hand](/guides/ef-core#writes-sluice-can-t-see).
+
 Inside a fetch, writes still throw, nesting still throws, and so do reads inside a transaction.
 A query in a fetch on your own context can track, so add `AsNoTracking()` yourself.
 `read.From(dependency)` without a fetch allows nothing extra.
@@ -127,7 +146,9 @@ A query in a fetch on your own context can track, so add `AsNoTracking()` yourse
   and calls `Find` on an entity it already tracks, or reads `Local` or a navigation that's
   already loaded, no command runs, so nothing sees it: the context hands back what it holds,
   unsaved edits included. Query `read.Db`'s context instead.
-- **Raw ADO.NET or Dapper on a context's connection.** They aren't EF commands.
+- **Raw ADO.NET or Dapper on a context's connection**, `read.Db`'s included. They aren't EF
+  commands, so outside a fetch they record nothing. Run them in a
+  [fused fetch](#the-declared-route).
 - **A context without `UseSluice`.** Its queries aren't seen at all. A compute that reads only
   through one records nothing, and throws for that instead.
 - **Work started under `ExecutionContext.SuppressFlow`.** It can't see the compute, so every
@@ -143,11 +164,10 @@ A query in a fetch on your own context can track, so add `AsNoTracking()` yourse
 
 ## Tenants and other context state
 
-A query filter that reads a field on the context (`HasQueryFilter(i => i.TenantId == _tenantId)`)
-gives each context different rows, but a cached value is served to every context. The compute's
-own context comes from the factory, so it doesn't have your request's tenant anyway. So a query
-that gets such a filter throws inside a compute. Put the tenant in the query key and filter by it
-yourself:
+A query filter that reads a field or property on the context
+(`HasQueryFilter(i => i.TenantId == TenantId)`) gives each context different rows, but a cached
+value is served to every caller with its key. So inside a compute it only runs on a context the
+compute set up itself, from the key: pass a configure to the compute's first `read.Db`.
 
 ```csharp
 public static readonly Query<TenantId, IReadOnlyList<InvoiceSummary>> TenantInvoices = new(
@@ -163,28 +183,77 @@ public ValueTask<IReadOnlyList<InvoiceSummary>> GetInvoices(
         TenantInvoices,
         tenantId,
         async Task<IReadOnlyList<InvoiceSummary>> (read, ct) =>
-            await read.Children(read.Db<AppDb>().Invoices, invoice => invoice.TenantId, tenantId)
-                .IgnoreQueryFilters()
-                .Select(invoice => new InvoiceSummary(invoice.Id, invoice.Total))
+            await read.Db<AppDb>(db => db.TenantId = tenantId)
+                .Invoices.Select(invoice => new InvoiceSummary(invoice.Id, invoice.Total))
                 .ToListAsync(ct),
         ct
     );
 ```
 
-Here `TenantId` is a foreign key to a tenants table, so `Children` records one dependency per
-tenant. Without such a key, `read.Db<AppDb>().Invoices.IgnoreQueryFilters().Where(...)` works
-too, but more broadly: a write to any invoice, in any tenant, evicts it.
+The configure runs once, when the compute's context is made, before anything can query it.
+Later calls in the compute take no configure (`read.Db<AppDb>()`) and get the same context; a
+configure on a later call throws, since queries may already have run without it. Without a
+configure, a query whose filters read the context's state throws, saying so.
 
-The same goes for any context-dependent filter, such as soft delete toggled per context:
-whatever changes what a compute reads must be part of the query key.
+Sluice takes three things on trust here, as it takes a fused fetch's dependencies:
+
+- **The configure sets every value the filters read.** Sluice can't see what it sets. One that
+  only sets a timeout leaves whatever the context's constructor put there.
+- **The values come from the key.** `db.TenantId = tenantId`, where `tenantId` is the key, is
+  right; `db.TenantId = tenantProvider.TenantId` reads the request, not the key.
+- **The constructor's own value doesn't matter.** The compute's context is made in a DI scope
+  of the compute's own, so it can take scoped services, but it runs on the flow of whichever
+  caller computes first. A tenant provider over `IHttpContextAccessor` gives that caller's
+  tenant, and the configure must overwrite it.
+
+What Sluice does check: the filter must read the state where it's stored, a field or
+auto-property of the context holding a plain value (a string, number, `Guid`, enum or a struct
+of those). A filter that reads it through a tenant service the context holds
+(`i.TenantId == _tenants.TenantId`), a property with a body or a method is refused even on a
+configured context, since the configure can't set it. Copy the value into a field in the
+constructor, and filter by that.
+
+The configure can also point the context at a tenant's own database before its first query,
+for database-per-tenant:
+
+```csharp
+read.Db<AppDb>(db => db.Database.SetConnectionString(tenants.ConnectionStringOf(tenantId)))
+```
+
+Dependencies are per entity type and row, not per tenant or database, so a write in one tenant
+evicts other tenants' cached reads of the same type (or, through `read.Entity`, the same key).
+That's safe, just broader than it needs to be.
+
+With a pooled context, what the configure set stays on the context for its next use; see
+[Pooling and factories](/guides/ef-core#pooling-and-factories).
+
+When the tenant id is a foreign key to a tenants table, read through `read.Children` to narrow
+that: `read.Children(read.Db<AppDb>(db => db.TenantId = tenantId).Invoices, invoice =>
+invoice.TenantId, tenantId)` records one dependency on that tenant's invoices, so only their
+writes evict it, and the filter still applies.
+
+You can also filter by hand instead: ignore the tenant filter by name
+(`IgnoreQueryFilters(["Tenant"])`) and add your own `Where`, with the tenant in the key. Forget
+the `Where` once, though, and one tenant's rows are served to another; the filter doesn't
+forget. Don't reach for `IgnoreQueryFilters()` without names: it drops every query filter in
+the query, on every type it reads, so soft-deleted rows would land in the cached value. An
+unnamed filter (`HasQueryFilter(i => …)`) can only be ignored that way, so name it unless it's
+the only filter the query applies:
+
+```csharp
+// In OnModelCreating. Named filters can be ignored one at a time.
+model.Entity<Invoice>().HasQueryFilter("Tenant", invoice => invoice.TenantId == TenantId);
+model.Entity<Invoice>().HasQueryFilter("SoftDelete", invoice => !invoice.IsDeleted);
+```
 
 A filter that reads anything outside the rows that can change is refused too, for the same
 reason: a static tenant accessor (`HasQueryFilter(i => i.TenantId == TenantContext.Current)`), a
 method or field of a service captured where the filter was configured, a database function that
 reads the connection's settings (`current_setting`) or the clock, and `DateTime.Now`. Each can
 give a different value on each call, but the cached value is served whatever it is now. Put the
-value in the query key in the same way; for time, put a rounded date in the key, such as
-today's, and filter by that. What a filter may read besides the rows: constants, `static
+value in the query key, ignore that filter by name and filter by it yourself (the message names
+each refused filter and what to pass); for time, put a rounded date in the key, such as today's,
+and filter by that. What a filter may read besides the rows: constants, `static
 readonly` fields and static `{ get; } = …` properties holding a plain value (a number, string,
 date, `Guid` or enum), and plain local values captured where the filter was written. Calling a
 method, or constructing a value of your own type (`new UserId(5)`), is refused even when it

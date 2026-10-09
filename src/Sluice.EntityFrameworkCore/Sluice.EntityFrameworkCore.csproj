@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <PackageId>Meridian.Sluice.EntityFrameworkCore</PackageId>
-        <Description>EF Core integration for Sluice: ordinary queries inside a compute record the tables they read, helpers narrow them to rows, and saves and bulk updates invalidate what they wrote once they commit.</Description>
+        <Description>EF Core integration for Sluice: ordinary queries inside a compute record the entity types they read, helpers narrow them to rows, and saves and bulk updates invalidate what they wrote once they commit.</Description>
         <PackageTags>cache;caching;fusioncache;invalidation;efcore;entity-framework-core</PackageTags>
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
@@ -22,6 +22,20 @@
     <ItemGroup>
         <ProjectReference Include="..\Sluice\Sluice.csproj" />
     </ItemGroup>
+
+    <!--
+        Pack the core dependency as exactly this version ([0.3.0]) rather than NuGet's default of >= 0.3.0: this package
+        calls core members outside its supported API (Sluice.Infrastructure), so it only works with the core it was built
+        against. NuGet has no version range for a ProjectReference (NuGet/Home#5556); this rewrites the version its pack
+        targets read, as the MCP C# SDK does.
+    -->
+    <Target Name="PinCoreToExactVersion" AfterTargets="_GetProjectReferenceVersions">
+        <ItemGroup>
+            <_ProjectReferencesWithVersions Update="@(_ProjectReferencesWithVersions)">
+                <ProjectVersion>[%(_ProjectReferencesWithVersions.ProjectVersion)]</ProjectVersion>
+            </_ProjectReferencesWithVersions>
+        </ItemGroup>
+    </Target>
 
     <!-- KeyFolding's unit tests. -->
     <ItemGroup>

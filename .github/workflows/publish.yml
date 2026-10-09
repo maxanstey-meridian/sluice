@@ -37,6 +37,14 @@ jobs:
           dotnet pack src/Sluice/Sluice.csproj -c Release --no-build --no-restore -o ./nupkgs
           dotnet pack src/Sluice.EntityFrameworkCore/Sluice.EntityFrameworkCore.csproj -c Release --no-build --no-restore -o ./nupkgs
 
+      # The pin rewrites a NuGet pack internal (see Sluice.EntityFrameworkCore.csproj); fail if an SDK change drops it.
+      - name: Check the EF package pins the core to exactly this version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          unzip -p "nupkgs/Meridian.Sluice.EntityFrameworkCore.$version.nupkg" '*.nuspec' \
+            | grep -F "id=\"Meridian.Sluice\" version=\"[$version]\""
+
       - name: Restore the packed packages into a clean consumer
         shell: bash
         run: |

@@ -13,11 +13,13 @@ namespace Sluice.EntityFrameworkCore.Tests;
 public sealed class WriteDerivationTests : IAsyncLifetime
 {
     private readonly SluiceNode _node = new();
+    private readonly PostgresFixture _postgres;
     private readonly ShopDb _reader;
     private readonly ShopDb _db;
 
     public WriteDerivationTests(PostgresFixture postgres)
     {
+        _postgres = postgres;
         _reader = postgres.CreateDb();
         _db = postgres.CreateDb(_node);
     }
@@ -79,46 +81,271 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         (await bobRead.WasEvicted()).Should().BeFalse();
     }
 
+    private async Task<Shipment> AddShipment(Customer customer, int? couponId = null)
+    {
+        var shipment = new Shipment { CustomerId = customer.Id, CouponId = couponId };
+        _db.Shipments.Add(shipment);
+        await _db.SaveChangesAsync();
+        return shipment;
+    }
+
+    private Task<CachedRead> ReadShipmentsOf(int customerId) =>
+        CachedRead.Of(
+            _node.Cache,
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().Shipments, s => s.CustomerId, customerId)
+                    .ToListAsync(ct)
+        );
+
     [Fact]
-    public async Task Adding_editing_or_deleting_a_child_evicts_Children_readers_of_its_parent_only()
+    public async Task With_a_row_version_adding_editing_or_deleting_a_child_evicts_Children_readers_of_its_parent_only()
     {
         var ada = await AddCustomer("Ada");
         var bob = await AddCustomer("Bob");
-        var adaOrders = await ReadOrdersOf(ada.Id);
-        var bobOrders = await ReadOrdersOf(bob.Id);
+        var adaShipments = await ReadShipmentsOf(ada.Id);
+        var bobShipments = await ReadShipmentsOf(bob.Id);
 
-        var tea = await AddOrder(ada, "Tea");
-        (await adaOrders.WasEvicted()).Should().BeTrue("an order was added");
-        (await bobOrders.WasEvicted()).Should().BeFalse();
+        var parcel = await AddShipment(ada);
+        (await adaShipments.WasEvicted()).Should().BeTrue("a shipment was added");
+        (await bobShipments.WasEvicted()).Should().BeFalse();
 
-        tea.Item = "Green tea";
+        parcel.Note = "Fragile";
         await _db.SaveChangesAsync();
-        (await adaOrders.WasEvicted()).Should().BeTrue("an order was edited");
-        (await bobOrders.WasEvicted()).Should().BeFalse();
+        (await adaShipments.WasEvicted()).Should().BeTrue("a shipment was edited");
+        (await bobShipments.WasEvicted()).Should().BeFalse();
 
-        _db.Orders.Remove(tea);
+        _db.Shipments.Remove(parcel);
         await _db.SaveChangesAsync();
-        (await adaOrders.WasEvicted()).Should().BeTrue("an order was deleted");
-        (await bobOrders.WasEvicted()).Should().BeFalse();
+        (await adaShipments.WasEvicted()).Should().BeTrue("a shipment was deleted");
+        (await bobShipments.WasEvicted()).Should().BeFalse();
     }
 
     [Fact]
-    public async Task Re_parenting_a_child_evicts_Children_readers_of_both_parents()
+    public async Task With_a_row_version_re_parenting_a_child_evicts_Children_readers_of_both_parents_only()
     {
         var ada = await AddCustomer("Ada");
         var bob = await AddCustomer("Bob");
         var cy = await AddCustomer("Cy");
-        var tea = await AddOrder(ada, "Tea");
-        var adaOrders = await ReadOrdersOf(ada.Id);
-        var bobOrders = await ReadOrdersOf(bob.Id);
-        var cyOrders = await ReadOrdersOf(cy.Id);
+        var parcel = await AddShipment(ada);
+        var adaShipments = await ReadShipmentsOf(ada.Id);
+        var bobShipments = await ReadShipmentsOf(bob.Id);
+        var cyShipments = await ReadShipmentsOf(cy.Id);
 
-        tea.CustomerId = bob.Id;
+        parcel.CustomerId = bob.Id;
         await _db.SaveChangesAsync();
 
-        (await adaOrders.WasEvicted()).Should().BeTrue("the order left Ada");
-        (await bobOrders.WasEvicted()).Should().BeTrue("the order joined Bob");
-        (await cyOrders.WasEvicted()).Should().BeFalse();
+        (await adaShipments.WasEvicted()).Should().BeTrue("the shipment left Ada");
+        (await bobShipments.WasEvicted()).Should().BeTrue("the shipment joined Bob");
+        (await cyShipments.WasEvicted()).Should().BeFalse();
+    }
+
+    // Without a row version, the parent EF loaded may not be the one the row leaves, so an update or delete evicts the
+    // lists under every parent; an insert has no parent before, and its parent after is the one it writes.
+    [Fact]
+    public async Task Without_a_row_version_editing_re_parenting_or_deleting_a_child_evicts_every_Children_reader_of_its_foreign_key_and_logs_once()
+    {
+        var ada = await AddCustomer("Ada");
+        var bob = await AddCustomer("Bob");
+        var cy = await AddCustomer("Cy");
+        var adaOrders = await ReadOrdersOf(ada.Id);
+        var cyOrders = await ReadOrdersOf(cy.Id);
+
+        var tea = await AddOrder(ada, "Tea");
+        (await adaOrders.WasEvicted()).Should().BeTrue("an order was added");
+        (await cyOrders.WasEvicted()).Should().BeFalse("an insert evicts its own parent only");
+
+        foreach (
+            var (change, save) in new (string, Action)[]
+            {
+                ("edited", () => tea.Item = "Green tea"),
+                ("moved to Bob", () => tea.CustomerId = bob.Id),
+                ("deleted", () => _db.Orders.Remove(tea)),
+            }
+        )
+        {
+            save();
+            await _db.SaveChangesAsync();
+            (await cyOrders.WasEvicted())
+                .Should()
+                .BeTrue(
+                    "an order was {0}, and the parent it had may not be the one EF loaded",
+                    change
+                );
+        }
+
+        _node
+            .Logs.GetSnapshot()
+            .Where(record => record.Id.Id == 3)
+            .Select(record => record.Message)
+            .Should()
+            .ContainSingle()
+            .Which.Should()
+            .Contain("Order's foreign keys")
+            .And.Contain("xmin");
+    }
+
+    [Fact]
+    public async Task A_type_with_a_row_version_or_a_foreign_key_that_is_a_concurrency_token_logs_nothing()
+    {
+        var ada = await AddCustomer("Ada");
+        var parcel = await AddShipment(ada);
+        var booking = new Booking { CustomerId = ada.Id };
+        _db.Bookings.Add(booking);
+        await _db.SaveChangesAsync();
+
+        parcel.Note = "Fragile";
+        booking.Note = "Window seat";
+        await _db.SaveChangesAsync();
+        _db.RemoveRange(parcel, booking);
+        await _db.SaveChangesAsync();
+
+        _node.Logs.GetSnapshot().Should().NotContain(record => record.Id.Id == 3);
+    }
+
+    // EF's UPDATE or DELETE matches the row version EF loaded, so a row another writer changed since fails the save,
+    // and the parent EF loaded is the one the row had whenever a save succeeds.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task With_a_row_version_saving_a_row_another_writer_re_parented_since_it_was_loaded_fails(
+        bool delete
+    )
+    {
+        var ada = await AddCustomer("Ada");
+        var cy = await AddCustomer("Cy");
+        var parcel = await AddShipment(ada);
+        await using (var other = _postgres.CreateDb(_node))
+        {
+            (await other.Shipments.SingleAsync(s => s.Id == parcel.Id)).CustomerId = cy.Id;
+            await other.SaveChangesAsync();
+        }
+
+        if (delete)
+        {
+            _db.Shipments.Remove(parcel);
+        }
+        else
+        {
+            parcel.Note = "Fragile";
+        }
+
+        var save = () => _db.SaveChangesAsync();
+
+        await save.Should().ThrowAsync<DbUpdateConcurrencyException>();
+        (await _reader.Shipments.SingleAsync(s => s.Id == parcel.Id))
+            .Should()
+            .BeEquivalentTo(new { CustomerId = cy.Id, Note = "" }, "the save changed nothing");
+    }
+
+    // A change to a row owned in a table of its own writes only that table, so EF doesn't check the owner's row version.
+    [Fact]
+    public async Task With_a_row_version_changing_an_owned_row_of_an_owner_another_writer_re_parented_evicts_Children_readers_of_its_real_parent()
+    {
+        var ada = await AddCustomer("Ada");
+        var cy = await AddCustomer("Cy");
+        var parcel = await AddShipment(ada);
+        await using (var other = _postgres.CreateDb(_node))
+        {
+            (await other.Shipments.SingleAsync(s => s.Id == parcel.Id)).CustomerId = cy.Id;
+            await other.SaveChangesAsync();
+        }
+
+        var cyShipments = await ReadShipmentsOf(cy.Id);
+
+        parcel.Legs.Add(new Leg { Place = "Depot" });
+        await _db.SaveChangesAsync();
+
+        (await _reader.Shipments.SingleAsync(s => s.Id == parcel.Id))
+            .Legs.Should()
+            .ContainSingle("the save didn't check the shipment's row version");
+        (await cyShipments.WasEvicted()).Should().BeTrue("the shipment changed in Cy's list");
+    }
+
+    // The foreign key is itself a concurrency token, so EF's UPDATE or DELETE matches the parent it loaded.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_foreign_key_that_is_a_concurrency_token_evicts_Children_readers_of_its_parent_only_and_a_stale_save_fails(
+        bool delete
+    )
+    {
+        var ada = await AddCustomer("Ada");
+        var bob = await AddCustomer("Bob");
+        Task<CachedRead> ReadBookingsOf(int customerId) =>
+            CachedRead.Of(
+                _node.Cache,
+                (read, ct) =>
+                    read.Children(read.Db<ShopDb>().Bookings, b => b.CustomerId, customerId)
+                        .ToListAsync(ct)
+            );
+        var booking = new Booking { CustomerId = ada.Id };
+        var stale = new Booking { CustomerId = ada.Id };
+        _db.Bookings.AddRange(booking, stale);
+        await _db.SaveChangesAsync();
+        var adaBookings = await ReadBookingsOf(ada.Id);
+        var bobBookings = await ReadBookingsOf(bob.Id);
+
+        void Change(Booking row)
+        {
+            if (delete)
+            {
+                _db.Bookings.Remove(row);
+            }
+            else
+            {
+                row.Note = "Window seat";
+            }
+        }
+
+        Change(booking);
+        await _db.SaveChangesAsync();
+        (await adaBookings.WasEvicted()).Should().BeTrue("Ada's booking changed");
+        (await bobBookings.WasEvicted()).Should().BeFalse();
+
+        await _reader
+            .Bookings.Where(b => b.Id == stale.Id)
+            .ExecuteUpdateAsync(set => set.SetProperty(b => b.CustomerId, bob.Id));
+        Change(stale);
+        var save = () => _db.SaveChangesAsync();
+        await save.Should().ThrowAsync<DbUpdateConcurrencyException>();
+    }
+
+    // Context A loads the order under Ada; writer B moves it to Bob, and Bob's list is cached again, holding it. A's
+    // UPDATE or DELETE matches the row by key alone, so it succeeds, though the parent A loaded is no longer Ada.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Saving_a_row_another_writer_re_parented_since_it_was_loaded_evicts_Children_readers_of_its_real_parent(
+        bool delete
+    )
+    {
+        var ada = await AddCustomer("Ada");
+        var bob = await AddCustomer("Bob");
+        var tea = await AddOrder(ada, "Tea");
+        await using (var other = _postgres.CreateDb(_node))
+        {
+            (await other.Orders.SingleAsync(o => o.Id == tea.Id)).CustomerId = bob.Id;
+            await other.SaveChangesAsync();
+        }
+
+        var bobOrders = await ReadOrdersOf(bob.Id);
+        _db.Entry(tea).Property(o => o.CustomerId).OriginalValue.Should().Be(ada.Id);
+
+        if (delete)
+        {
+            _db.Orders.Remove(tea);
+        }
+        else
+        {
+            tea.Item = "Green tea";
+        }
+
+        await _db.SaveChangesAsync();
+
+        (await _reader.Orders.Where(o => o.Id == tea.Id).Select(o => o.Item).ToListAsync())
+            .Should()
+            .Equal(delete ? [] : ["Green tea"], "EF's save matched the row by its key alone");
+        (await bobOrders.WasEvicted()).Should().BeTrue("the order changed in Bob's list");
     }
 
     [Fact]
@@ -253,38 +480,33 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         }
     }
 
+    // With a row version, so the save is exact: a null key has no parent before or after.
     [Fact]
     public async Task Setting_a_nullable_foreign_key_to_or_from_null_evicts_Children_readers_of_its_principal()
     {
         var ada = await AddCustomer("Ada");
-        var tea = await AddOrder(ada, "Tea");
-        var coupon = new Coupon();
-        var other = new Coupon();
-        _db.Coupons.AddRange(coupon, other);
-        var line = new OrderLine { OrderId = tea.Id, LineNumber = 1 };
-        _db.OrderLines.Add(line);
-        await _db.SaveChangesAsync();
-        var couponLines = await CachedRead.Of(
-            _node.Cache,
-            (read, ct) =>
-                read.Children(read.Db<ShopDb>().OrderLines, l => l.CouponId, coupon.Id)
-                    .ToListAsync(ct)
-        );
-        var otherLines = await CachedRead.Of(
-            _node.Cache,
-            (read, ct) =>
-                read.Children(read.Db<ShopDb>().OrderLines, l => l.CouponId, other.Id)
-                    .ToListAsync(ct)
-        );
+        var coupon = await AddCoupon();
+        var other = await AddCoupon();
+        var parcel = await AddShipment(ada);
+        Task<CachedRead> ReadShipmentsWith(int couponId) =>
+            CachedRead.Of(
+                _node.Cache,
+                (read, ct) =>
+                    read.Children(read.Db<ShopDb>().Shipments, s => s.CouponId, couponId)
+                        .ToListAsync(ct)
+            );
+        var couponShipments = await ReadShipmentsWith(coupon.Id);
+        var otherShipments = await ReadShipmentsWith(other.Id);
 
-        line.CouponId = coupon.Id;
+        parcel.CouponId = coupon.Id;
         await _db.SaveChangesAsync();
-        (await couponLines.WasEvicted()).Should().BeTrue("the line gained the coupon");
+        (await couponShipments.WasEvicted()).Should().BeTrue("the shipment gained the coupon");
+        (await otherShipments.WasEvicted()).Should().BeFalse();
 
-        line.CouponId = null;
+        parcel.CouponId = null;
         await _db.SaveChangesAsync();
-        (await couponLines.WasEvicted()).Should().BeTrue("the line lost the coupon");
-        (await otherLines.WasEvicted()).Should().BeFalse();
+        (await couponShipments.WasEvicted()).Should().BeTrue("the shipment lost the coupon");
+        (await otherShipments.WasEvicted()).Should().BeFalse();
     }
 
     [Fact]
@@ -321,6 +543,35 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         await _db.SaveChangesAsync();
         (await southBins.WasEvicted()).Should().BeTrue("the database deleted the bin");
         (await _reader.Bins.AnyAsync(b => b.Id == bin.Id)).Should().BeFalse();
+    }
+
+    // The database cascades by the code the warehouse holds when the delete runs, not the one EF loaded: unlike a primary
+    // key, an alternate key can change.
+    [Fact]
+    public async Task Deleting_a_principal_whose_alternate_key_another_writer_changed_evicts_Children_readers_of_the_key_it_held()
+    {
+        var renamed = $"M-{Guid.NewGuid():N}";
+        var north = new Warehouse { Code = $"N-{Guid.NewGuid():N}" };
+        _db.Warehouses.Add(north);
+        await _db.SaveChangesAsync();
+        await _reader.Database.ExecuteSqlAsync(
+            $"""update "Warehouses" set "Code" = {renamed} where "Id" = {north.Id}"""
+        );
+        _reader.Bins.Add(new Bin { WarehouseCode = renamed });
+        await _reader.SaveChangesAsync();
+        var renamedBins = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().Bins, b => b.WarehouseCode, renamed).ToListAsync(ct)
+        );
+
+        _db.Warehouses.Remove(north);
+        await _db.SaveChangesAsync();
+
+        (await _reader.Bins.AnyAsync(b => b.WarehouseCode == renamed))
+            .Should()
+            .BeFalse("the database deleted the bin with its warehouse");
+        (await renamedBins.WasEvicted()).Should().BeTrue();
     }
 
     [Fact]
@@ -959,5 +1210,45 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         await _db.SaveChangesAsync();
 
         (await adaRead.WasEvicted()).Should().BeTrue("the edit was detected and saved");
+    }
+
+    // A token in one table doesn't guard the columns of another: a table-per-type row is split across two.
+    [Fact]
+    public void Only_a_row_stored_in_one_table_with_a_token_the_database_changes_on_every_write_has_a_row_version()
+    {
+        using var vessels = new VesselDb(
+            new DbContextOptionsBuilder<VesselDb>().UseNpgsql("Host=unused").Options
+        );
+        bool HasRowVersion(DbContext db, Type type) =>
+            ModelSources.HasRowVersion(db.Model.FindEntityType(type)!);
+
+        HasRowVersion(vessels, typeof(Vessel)).Should().BeTrue();
+        HasRowVersion(vessels, typeof(Tanker))
+            .Should()
+            .BeFalse("its own columns are in a table its row version isn't");
+        HasRowVersion(_db, typeof(Shipment)).Should().BeTrue();
+        HasRowVersion(_db, typeof(Booking)).Should().BeFalse("only the app changes its token");
+        HasRowVersion(_db, typeof(Order)).Should().BeFalse("it has no token");
+    }
+
+    private class Vessel
+    {
+        public int Id { get; set; }
+        public uint Version { get; set; }
+    }
+
+    private sealed class Tanker : Vessel
+    {
+        public int Tanks { get; set; }
+    }
+
+    private sealed class VesselDb(DbContextOptions<VesselDb> options) : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder model)
+        {
+            model.Entity<Vessel>().UseTptMappingStrategy();
+            model.Entity<Vessel>().Property(vessel => vessel.Version).IsRowVersion();
+            model.Entity<Tanker>();
+        }
     }
 }

@@ -27,7 +27,7 @@ export default defineConfig({
           { text: "Sources and Queries", link: "/guides/sources-and-queries" },
           { text: "Reading and Invalidating", link: "/guides/invalidation" },
           { text: "EF Core", link: "/guides/ef-core" },
-          { text: "Strict Reads", link: "/guides/strict-reads" },
+          { text: "What a compute can't read", link: "/guides/strict-reads" },
           { text: "Transactions", link: "/guides/transactions" },
           { text: "Configuration", link: "/guides/configuration" },
         ],

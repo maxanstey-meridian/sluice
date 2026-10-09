@@ -56,7 +56,7 @@ public sealed class ComputeGuardTests
 
         await call.Should()
             .ThrowAsync<InvalidOperationException>()
-            .WithMessage("*use IFusionCache directly*");
+            .WithMessage("*register one with services.AddFusionCache() and inject IFusionCache*");
         (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
     }
 

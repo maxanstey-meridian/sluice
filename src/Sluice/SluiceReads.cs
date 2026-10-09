@@ -125,41 +125,39 @@ public sealed class SluiceReads
                 );
             }
 
-            _held ??= [];
-            foreach (var (type, resource) in _held)
+            if (Find<T>() is { } held)
             {
-                if (type == typeof(T))
-                {
-                    return (T)resource;
-                }
+                return held;
             }
 
             var created = create(_services);
-            _held.Add((typeof(T), created));
+            (_held ??= []).Add((typeof(T), created));
             return created;
         }
     }
 
-    // By reference: a resource that overrides Equals mustn't pass for the compute's own.
-    internal bool Holds(IAsyncDisposable resource)
+    // The T the compute holds, if it has made one. Makes nothing.
+    internal T? Held<T>()
+        where T : class, IAsyncDisposable
     {
         lock (_lock)
         {
-            if (_held is null)
-            {
-                return false;
-            }
-
-            foreach (var (_, held) in _held)
-            {
-                if (ReferenceEquals(held, resource))
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            return Find<T>();
         }
+    }
+
+    private T? Find<T>()
+        where T : class, IAsyncDisposable
+    {
+        foreach (var (type, resource) in _held ?? [])
+        {
+            if (type == typeof(T))
+            {
+                return (T)resource;
+            }
+        }
+
+        return null;
     }
 
     // Once the compute has closed, so nothing is added after. Disposes every resource, newest first, even when one

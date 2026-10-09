@@ -9,7 +9,7 @@
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
     </PropertyGroup>
 
-    <!-- One version for both packages: the EF package depends on the core at >= this version. -->
+    <!-- One version for both packages: the EF package depends on the core at exactly this version. -->
     <PropertyGroup>
         <Version>0.3.0</Version>
         <Authors>Max Anstey</Authors>

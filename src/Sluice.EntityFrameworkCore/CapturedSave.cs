@@ -7,12 +7,14 @@ namespace Sluice.EntityFrameworkCore;
 /// <summary>
 /// The rows one save writes, captured before it runs. Original foreign key values are read then, because accepting
 /// the save overwrites them; keys and current values are read after it, because generated keys are temporary until
-/// the save runs. A changed owned row counts as its owner modified.
+/// the save runs. A changed owned row counts as its owner modified. An original value is what EF loaded, so it's only
+/// used where EF's <c>UPDATE</c> or <c>DELETE</c> checks the database still holds it.
 /// </summary>
 internal sealed class CapturedSave
 {
     private readonly List<(EntityEntry Entry, EntityState State)> _changes = [];
     private readonly List<Dependency> _originals = [];
+    private readonly HashSet<IEntityType> _unversioned = [];
 
     private CapturedSave(ContextTransaction transaction) => Transaction = transaction;
 
@@ -21,6 +23,12 @@ internal sealed class CapturedSave
     /// completes reads its transaction then.
     /// </summary>
     internal ContextTransaction Transaction { get; }
+
+    /// <summary>
+    /// The types of the rows this save updates or deletes whose foreign keys it invalidates whole, because they have no
+    /// row version (<see cref="ModelSources.HasRowVersion"/>).
+    /// </summary>
+    internal IReadOnlyCollection<IEntityType> Unversioned => _unversioned;
 
     /// <summary>Captures what <paramref name="context"/> is about to save, without changing what EF saves.</summary>
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
@@ -72,10 +80,10 @@ internal sealed class CapturedSave
     }
 
     /// <summary>
-    /// Everything the save may have changed: each row's key, and its foreign keys before and after. A deleted row
-    /// also invalidates every foreign key that points at it, and the whole of every type the model lets the
-    /// database delete or set to null with it (<see cref="ModelSources.Cascades"/>), since EF may not have loaded
-    /// those rows.
+    /// Everything the save may have changed: each row's key, and its foreign keys before and after, or whole when the
+    /// one before is unknown. A deleted row also invalidates every foreign key that points at it, and the whole of
+    /// every type the model lets the database delete or set to null with it (<see cref="ModelSources.Cascades"/>),
+    /// since EF may not have loaded those rows.
     /// </summary>
     internal List<Dependency> Dependencies()
     {
@@ -108,11 +116,19 @@ internal sealed class CapturedSave
 
             if (state is EntityState.Deleted)
             {
+                // The key it was known by is the one EF loaded: a primary key can't change, an alternate one can.
                 foreach (var foreignKey in entityType.GetReferencingForeignKeys())
                 {
-                    if (KeyOf(entry, foreignKey.PrincipalKey.Properties, Current) is { } principal)
+                    var foreignKeySource = ModelSources.ForeignKey(foreignKey);
+                    if (!Checked(entityType, written: true, foreignKey.PrincipalKey.Properties))
                     {
-                        dependencies.Add(ModelSources.ForeignKey(foreignKey).For(principal));
+                        dependencies.Add(foreignKeySource.All);
+                    }
+                    else if (
+                        KeyOf(entry, foreignKey.PrincipalKey.Properties, Current) is { } principal
+                    )
+                    {
+                        dependencies.Add(foreignKeySource.For(principal));
                     }
                 }
 
@@ -139,10 +155,22 @@ internal sealed class CapturedSave
             return;
         }
 
-        foreach (var foreignKey in entry.Metadata.GetForeignKeys())
+        // Whether EF writes the row itself: an owner saved for its owned row's sake is left unchanged by the tracker, so
+        // EF checks none of its values.
+        var entityType = entry.Metadata;
+        var written = entry.State is EntityState.Modified or EntityState.Deleted;
+        foreach (var foreignKey in entityType.GetForeignKeys())
         {
             var source = ModelSources.ForeignKey(foreignKey);
-            if (OriginalIsUnknown(entry, foreignKey))
+            if (!Checked(entityType, written, foreignKey.Properties))
+            {
+                _originals.Add(source.All);
+                if (!ModelSources.HasRowVersion(entityType))
+                {
+                    _unversioned.Add(entityType);
+                }
+            }
+            else if (OriginalIsUnknown(entry, foreignKey))
             {
                 _originals.Add(source.All);
             }
@@ -152,6 +180,19 @@ internal sealed class CapturedSave
             }
         }
     }
+
+    // Whether the database holds the original values of the properties when a save that succeeds runs. A primary key
+    // can't change. EF's UPDATE or DELETE of a row it writes matches the originals of its concurrency tokens, and with
+    // a row version the row is unchanged since it was loaded, or the save fails. Any other value is what EF loaded,
+    // which another writer may have changed since, re-parenting the row without the save noticing.
+    private static bool Checked(
+        IEntityType entityType,
+        bool written,
+        IReadOnlyList<IProperty> properties
+    ) =>
+        properties.All(property =>
+            property.IsPrimaryKey() || (written && property.IsConcurrencyToken)
+        ) || (written && ModelSources.HasRowVersion(entityType));
 
     // A row saved without being loaded (attached, removed or updated from an object the context didn't query) has
     // no original values from the database, so the parent it had is unknown. Two signs point to one, and both can

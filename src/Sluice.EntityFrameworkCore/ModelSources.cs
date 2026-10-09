@@ -18,6 +18,7 @@ internal static class ModelSources
     private const string SourceAnnotation = "Sluice:Source";
     private const string CascadeAnnotation = "Sluice:Cascades";
     private const string TablePatternAnnotation = "Sluice:TablePattern";
+    private const string RowVersionAnnotation = "Sluice:RowVersion";
 
     /// <summary>
     /// The source of <paramref name="entityType"/>'s rows, keyed by primary key; a composite key is passed as an
@@ -76,6 +77,29 @@ internal static class ModelSources
         entityType.GetOrAddRuntimeAnnotationValue(
             CascadeAnnotation,
             static entityType => BuildCascades(entityType!),
+            entityType
+        );
+
+    /// <summary>
+    /// Whether EF's <c>UPDATE</c> or <c>DELETE</c> of a row of <paramref name="entityType"/> fails unless the row is
+    /// unchanged since it was loaded: the row is stored in one table, which has a concurrency token the database changes
+    /// on every write (<c>rowversion</c>, PostgreSQL's <c>xmin</c>), so every column EF loaded is what it still holds. A
+    /// token only the app changes doesn't count: a bulk write, raw SQL or another service may not change it. Nor does
+    /// a row split across tables (table-per-type, entity splitting), whose token is in one of them. Built once per type.
+    /// </summary>
+    internal static bool HasRowVersion(IEntityType entityType) =>
+        entityType.GetOrAddRuntimeAnnotationValue(
+            RowVersionAnnotation,
+            static entityType =>
+                entityType!
+                    .GetProperties()
+                    .Any(property =>
+                        property.IsConcurrencyToken
+                        && property.ValueGenerated
+                            is ValueGenerated.OnAddOrUpdate
+                                or ValueGenerated.OnUpdate
+                    )
+                && entityType.GetTableMappings().Count() == 1,
             entityType
         );
 

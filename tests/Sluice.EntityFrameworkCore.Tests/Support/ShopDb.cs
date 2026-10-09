@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -52,6 +53,37 @@ public sealed class OrderLine
 public sealed class Coupon
 {
     public int Id { get; set; }
+}
+
+/// <summary>
+/// Has PostgreSQL's <c>xmin</c> as its row version, a concurrency token the database changes on every write, so EF
+/// fails a save of one unless the row is unchanged since it was loaded. Its coupon key is nullable, set to null when the
+/// coupon is deleted. Owns legs, stored in a table of their own.
+/// </summary>
+public sealed class Shipment
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+    public int? CouponId { get; set; }
+    public string Note { get; set; } = "";
+    public uint Version { get; set; }
+    public List<Leg> Legs { get; set; } = [];
+}
+
+public sealed class Leg
+{
+    public string Place { get; set; } = "";
+}
+
+/// <summary>Has no row version, but its customer key is itself a concurrency token, which only the app changes.</summary>
+public sealed class Booking
+{
+    public int Id { get; set; }
+
+    [ConcurrencyCheck]
+    public int CustomerId { get; set; }
+
+    public string Note { get; set; } = "";
 }
 
 public readonly record struct UserId(int Value);
@@ -397,6 +429,27 @@ public sealed class Account
     public int TenantId { get; set; }
 }
 
+/// <summary>
+/// Has two named query filters, as a multi-tenant app with soft delete would: <c>Tenant</c> on the context's tenant,
+/// and <c>SoftDelete</c> on its own column.
+/// </summary>
+public sealed class Issue
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public bool IsDeleted { get; set; }
+}
+
+/// <summary>Auto-includes its issue, and points at an account, each of which has a query filter on the tenant.</summary>
+public sealed class Watch
+{
+    public int Id { get; set; }
+    public int? IssueId { get; set; }
+    public Issue? Issue { get; set; }
+    public int? AccountId { get; set; }
+    public Account? Account { get; set; }
+}
+
 /// <summary>The current tenant, held in shared state as an app's ambient accessor would hold it.</summary>
 public static class TenantAccessor
 {
@@ -511,6 +564,8 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Note> Notes => Set<Note>();
     public DbSet<OrderLine> OrderLines => Set<OrderLine>();
     public DbSet<Coupon> Coupons => Set<Coupon>();
+    public DbSet<Shipment> Shipments => Set<Shipment>();
+    public DbSet<Booking> Bookings => Set<Booking>();
     public DbSet<User> Users => Set<User>();
     public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<Price> Prices => Set<Price>();
@@ -536,6 +591,8 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Ticket> Tickets => Set<Ticket>();
     public DbSet<Memo> Memos => Set<Memo>();
     public DbSet<Account> Accounts => Set<Account>();
+    public DbSet<Issue> Issues => Set<Issue>();
+    public DbSet<Watch> Watches => Set<Watch>();
     public DbSet<Receipt> Receipts => Set<Receipt>();
     public DbSet<Rating> Ratings => Set<Rating>();
     public DbSet<Delivery> Deliveries => Set<Delivery>();
@@ -553,8 +610,14 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Kennel> Kennels => Set<Kennel>();
     public DbSet<Pet> Pets => Set<Pet>();
 
-    /// <summary>The tenant <see cref="Account"/>'s query filter reads.</summary>
-    public int TenantId { get; init; }
+    /// <summary>The tenant the query filters of <see cref="Account"/> and <see cref="Issue"/> read.</summary>
+    public int TenantId { get; set; }
+
+    // Context state read.Db's configure can't set: it keeps what the constructor gave it.
+    private readonly int _fixedTenant = -1;
+
+    /// <summary>Context state set only by an object initializer, which read.Db's configure can't set either.</summary>
+    public int SeededTenant { get; init; } = -1;
 
     /// <summary>A database function of the app's, which could read any table.</summary>
     [DbFunction("customer_name")]
@@ -627,6 +690,16 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .WithMany()
             .HasForeignKey(order => order.CouponId)
             .OnDelete(DeleteBehavior.SetNull);
+        model.Entity<Shipment>().HasOne<Customer>().WithMany().HasForeignKey(s => s.CustomerId);
+        model
+            .Entity<Shipment>()
+            .HasOne<Coupon>()
+            .WithMany()
+            .HasForeignKey(s => s.CouponId)
+            .OnDelete(DeleteBehavior.SetNull);
+        model.Entity<Shipment>().Property(s => s.Version).IsRowVersion();
+        model.Entity<Shipment>().OwnsMany(s => s.Legs);
+        model.Entity<Booking>().HasOne<Customer>().WithMany().HasForeignKey(b => b.CustomerId);
         model.Entity<OrderLine>().HasKey(line => new { line.OrderId, line.LineNumber });
         model.Entity<OrderLine>().HasOne<Order>().WithMany().HasForeignKey(line => line.OrderId);
         model
@@ -701,6 +774,9 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Ticket>().HasQueryFilter("customer", ticket => ticket.Customer!.Name != "");
         model.Entity<Memo>().HasQueryFilter(memo => Customers.Any(c => c.Id == memo.CustomerId));
         model.Entity<Account>().HasQueryFilter(account => account.TenantId == TenantId);
+        model.Entity<Issue>().HasQueryFilter("Tenant", issue => issue.TenantId == TenantId);
+        model.Entity<Issue>().HasQueryFilter("SoftDelete", issue => !issue.IsDeleted);
+        model.Entity<Watch>().Navigation(watch => watch.Issue).AutoInclude();
         var tenants = new TenantSource();
         var scope = (Tenant: 0, Source: tenants);
         var code = "open";
@@ -730,6 +806,12 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .Entity<Ledger>()
             .HasQueryFilter("lambda", ledger => ledger.TenantId == TenantAccessor.Map(id => id));
         model.Entity<Ledger>().HasQueryFilter("struct", ledger => ledger.TenantId == scope.Tenant);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("readonly field", ledger => ledger.TenantId != _fixedTenant);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("init property", ledger => ledger.TenantId != SeededTenant);
         model
             .Entity<Ledger>()
             .HasQueryFilter(

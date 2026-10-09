@@ -8,7 +8,8 @@ var connectionString = $"Data Source={Path.Combine(AppContext.BaseDirectory, "pl
 
 builder.Services.AddSluice();
 
-// The factory also registers AppDb itself, for DashboardActions' writes; computes get their own context from it.
+// The factory also registers AppDb itself, scoped: DashboardActions' writes use it, and each compute takes its own
+// from a scope of its own.
 builder.Services.AddDbContextFactory<AppDb>(
     (services, options) => options.UseSqlite(connectionString).UseSluice(services)
 );

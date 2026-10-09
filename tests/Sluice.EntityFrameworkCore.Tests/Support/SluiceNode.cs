@@ -18,9 +18,11 @@ public sealed class SluiceNode : IAsyncDisposable
     /// The app's other registrations, such as a pooled context. One that registers <see cref="ShopDb"/> or its
     /// factory replaces the default factory.
     /// </param>
+    /// <param name="validateScopes">Whether the provider refuses scoped services from the root, as in Development.</param>
     public SluiceNode(
         Action<IFusionCacheBuilder>? configure = null,
-        Action<IServiceCollection>? services = null
+        Action<IServiceCollection>? services = null,
+        bool validateScopes = false
     )
     {
         var collection = new ServiceCollection().AddFakeLogging().AddSluice(configure);
@@ -38,7 +40,9 @@ public sealed class SluiceNode : IAsyncDisposable
             );
         }
 
-        _provider = collection.BuildServiceProvider();
+        _provider = collection.BuildServiceProvider(
+            new ServiceProviderOptions { ValidateScopes = validateScopes }
+        );
         Cache = _provider.GetRequiredService<SluiceCache>();
     }
 

@@ -76,8 +76,9 @@ Keys go through the property's value converter to the value the database stores,
 (decimal scale, string case and trailing spaces, dates to the microsecond), so values the
 database treats as equal give one tag.
 
-`read.Db<TContext>()` makes the compute's own context from the registered
-`IDbContextFactory<TContext>`, with no-tracking queries, and disposes it when the compute ends.
+`read.Db<TContext>()` takes the compute's own context from a DI scope the compute opens for
+itself, with no-tracking queries, runs its configure if it has one, and disposes the scope, and
+the context with it, when the compute ends.
 
 Recording what a query reads is one EF interceptor for the whole process:
 
@@ -106,11 +107,14 @@ A second interceptor, one per `SluiceCache`, handles writes. For a save:
 
 1. **`SavingChanges`**: reads the changed entries through `ChangeTracker.Entries()`, which detects
    changes the way EF's own save does, and snapshots their foreign keys' original values. EF
-   overwrites those when it accepts the save.
+   overwrites those when it accepts the save. An original is what EF loaded, so it's only used
+   where EF's `UPDATE` or `DELETE` checks the database still holds it: a key, a concurrency
+   token, or any column of a row with a row version. Otherwise the foreign key is invalidated
+   whole.
 2. **`SavedChanges`**: builds the dependencies, now that generated keys are real. Each row gives
-   its key and its foreign keys before and after; a deleted row also gives every foreign key that
-   points at it, and the whole of every type the model lets the database cascade into or set to
-   null (worked out once per type); an owned row gives its owner.
+   its key and its foreign keys before and after (or whole); a deleted row also gives every
+   foreign key that points at it, and the whole of every type the model lets the database cascade
+   into or set to null (worked out once per type); an owned row gives its owner.
 3. **Publish**, depending on the transaction EF used, read the way EF's batch executor reads it:
    - none: invalidate now;
    - an EF transaction: hold the dependencies against the `DbTransaction`, and invalidate on
@@ -119,7 +123,8 @@ A second interceptor, one per `SluiceCache`, handles writes. For a save:
 
 An `ExecuteUpdate` or `ExecuteDelete` publishes the same way, once it has run: EF drops query tags
 from these statements, so the tables it wrote are found by their quoted names in its SQL, and
-every read of them is invalidated (for a delete, what it cascades into too).
+every read of the entity types stored in them is invalidated (for a delete, what it cascades
+into too). One that reports it changed no rows publishes nothing.
 
 A failed, cancelled or conflicting save publishes the same way: never drop, because
 over-invalidating is safe. After a commit, a failure to invalidate is logged and never thrown.

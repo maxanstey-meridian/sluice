@@ -87,6 +87,69 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
         (await adaRead.WasEvicted()).Should().BeFalse("no customer changed");
     }
 
+    // Npgsql reports the rows the statement itself changed, and the database cascades from each row a delete deletes,
+    // so a delete of none cascades to none.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task A_bulk_write_that_changed_no_rows_evicts_nothing_and_one_that_changed_a_row_evicts(
+        bool delete,
+        bool sync
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        db.Orders.Add(new Order { CustomerId = ada, Item = "Tea" });
+        await db.SaveChangesAsync();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var everyone = await CachedRead.Of(
+            node.Cache,
+            (read, ct) => read.Db<ShopDb>().Customers.ToListAsync(ct)
+        );
+        var orders = await CachedRead.OrdersOf(node.Cache, ada);
+        Task<int> Write(IQueryable<Customer> rows) =>
+            delete
+                ? Delete(rows, sync)
+                : Update(rows, set => set.SetProperty(c => c.Name, "Ada Lovelace"), sync);
+
+        (await Write(db.Customers.Where(c => c.Id == -1))).Should().Be(0, "no customer matched");
+        (await adaRead.WasEvicted()).Should().BeFalse("no row changed");
+        (await everyone.WasEvicted()).Should().BeFalse("no row changed");
+        (await orders.WasEvicted()).Should().BeFalse("no row changed, so nothing cascaded");
+
+        (await Write(db.Customers.Where(c => c.Id == ada))).Should().Be(1);
+        (await adaRead.WasEvicted()).Should().BeTrue();
+        (await everyone.WasEvicted()).Should().BeTrue();
+        (await orders.WasEvicted()).Should().Be(delete, "deleting Ada deletes her orders");
+    }
+
+    [Fact]
+    public async Task A_bulk_write_that_changed_no_rows_in_a_transaction_evicts_nothing_at_its_commit()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        var everyone = await CachedRead.Of(
+            node.Cache,
+            (read, ct) => read.Db<ShopDb>().Customers.ToListAsync(ct)
+        );
+
+        await using (var transaction = await db.Database.BeginTransactionAsync())
+        {
+            await db
+                .Customers.Where(c => c.Id == -1)
+                .ExecuteUpdateAsync(set => set.SetProperty(c => c.Name, "Nobody"));
+            await db.Customers.Where(c => c.Id == -1).ExecuteDeleteAsync();
+            await transaction.CommitAsync();
+        }
+
+        (await everyone.WasEvicted()).Should().BeFalse("no row changed");
+        (await db.NameOf(ada)).Should().Be("Ada");
+    }
+
     [Fact]
     public async Task Sync_ExecuteUpdate_and_ExecuteDelete_evict_without_going_through_async_code()
     {
@@ -313,12 +376,12 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
         bool names
     ) => ModelSources.NamePattern(table).IsMatch(sql).Should().Be(names);
 
-    private static Task Update<T>(
+    private static Task<int> Update<T>(
         IQueryable<T> rows,
         Action<UpdateSettersBuilder<T>> set,
         bool sync
     ) => sync ? Task.FromResult(rows.ExecuteUpdate(set)) : rows.ExecuteUpdateAsync(set);
 
-    private static Task Delete<T>(IQueryable<T> rows, bool sync) =>
+    private static Task<int> Delete<T>(IQueryable<T> rows, bool sync) =>
         sync ? Task.FromResult(rows.ExecuteDelete()) : rows.ExecuteDeleteAsync();
 }

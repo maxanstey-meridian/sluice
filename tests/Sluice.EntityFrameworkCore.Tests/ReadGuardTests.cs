@@ -130,7 +130,7 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             new DbContextOptionsBuilder<ShopDb>().UseNpgsql(postgres.ConnectionString).Options
         );
         await using var withoutSluice = new SluiceNode(services: services =>
-            services.AddSingleton<IDbContextFactory<ShopDb>>(made)
+            services.AddScoped(_ => made.CreateDbContext())
         );
 
         var entity = () =>
@@ -149,7 +149,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await factory.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
         made.Context!.Invoking(context => context.Model)
             .Should()
-            .Throw<ObjectDisposedException>("read.Db disposes the context it refused");
+            .Throw<ObjectDisposedException>(
+                "the compute's scope disposes the context read.Db refused"
+            );
         await plain
             .Should()
             .ThrowAsync<InvalidOperationException>()
@@ -157,10 +159,17 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
     }
 
     [Fact]
-    public async Task Read_Db_without_a_registered_factory_throws_saying_how_to_register_one()
+    public async Task Read_Db_without_the_context_registered_throws_saying_how_to_register_it()
     {
+        // A factory alone isn't enough: read.Db takes the context itself from the compute's scope.
         await using var node = new SluiceNode(services: services =>
-            services.AddDbContext<ShopDb>(options => options.UseNpgsql(postgres.ConnectionString))
+            services.AddSingleton<IDbContextFactory<ShopDb>>(
+                new MadeContexts(
+                    new DbContextOptionsBuilder<ShopDb>()
+                        .UseNpgsql(postgres.ConnectionString)
+                        .Options
+                )
+            )
         );
 
         var read = () =>
@@ -168,7 +177,25 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
 
         await read.Should()
             .ThrowAsync<InvalidOperationException>()
-            .WithMessage("*IDbContextFactory<ShopDb>*AddDbContextFactory<ShopDb>*");
+            .WithMessage("*none is registered*AddDbContext<ShopDb>*");
+    }
+
+    [Fact]
+    public async Task Read_Db_takes_a_context_registered_with_AddDbContext()
+    {
+        await using var node = new SluiceNode(services: services =>
+            services.AddDbContext<ShopDb>(
+                (provider, options) =>
+                    options.UseNpgsql(postgres.ConnectionString).UseSluice(provider)
+            )
+        );
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        await db.Rename(ada, "Ada Lovelace");
+
+        (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
     [Fact]

@@ -81,6 +81,12 @@ On several servers, add FusionCache's distributed cache and backplane, here both
 invalidation on one server then reaches the others:
 
 ```csharp
+using Microsoft.Extensions.Caching.StackExchangeRedis;
+using Sluice;
+using ZiggyCreatures.Caching.Fusion;
+using ZiggyCreatures.Caching.Fusion.Backplane.StackExchangeRedis;
+using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
+
 // Give up on a Redis call after one second, not StackExchange.Redis's default of five.
 var redis = "localhost:6379,asyncTimeout=1000,syncTimeout=1000";
 
@@ -197,6 +203,9 @@ FusionCache's auto-clone, which hands each caller its own copy. It copies throug
 serialiser, so it needs one, and every cached value must survive a round trip through it:
 
 ```csharp
+using ZiggyCreatures.Caching.Fusion;
+using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
+
 builder.Services.AddSluice(cache =>
     cache
         .WithSerializer(new FusionCacheSystemTextJsonSerializer())

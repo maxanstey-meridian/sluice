@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data.Common;
 using System.Runtime.CompilerServices;
 using System.Transactions;
@@ -37,6 +38,9 @@ internal sealed partial class SluiceInterceptor
     // rollback raises no event, and committed nothing.
     private readonly ConditionalWeakTable<DbTransaction, List<Dependency>> _pending = new();
 
+    // Each entity type that has logged invalidating its foreign keys whole, so each logs once per cache.
+    private readonly ConcurrentDictionary<string, bool> _loggedUnversioned = new();
+
     private SluiceInterceptor(SluiceCache cache, ILogger<SluiceInterceptor> logger)
     {
         _cache = cache;
@@ -63,7 +67,7 @@ internal sealed partial class SluiceInterceptor
         if (eventData.Context is { } context)
         {
             PublishLeftover(context);
-            _saves.AddOrUpdate(context, CapturedSave.Capture(context));
+            _saves.AddOrUpdate(context, Capture(context));
         }
 
         return result;
@@ -78,7 +82,7 @@ internal sealed partial class SluiceInterceptor
         if (eventData.Context is { } context)
         {
             await PublishLeftoverAsync(context).ConfigureAwait(false);
-            _saves.AddOrUpdate(context, CapturedSave.Capture(context));
+            _saves.AddOrUpdate(context, Capture(context));
         }
 
         return result;
@@ -141,10 +145,16 @@ internal sealed partial class SluiceInterceptor
     }
 
     // A bulk write is one statement. Whether it failed or was cancelled before or after the database ran it, publishing
-    // is safe; EF reports a cancellation through CommandCanceled, not CommandFailed.
+    // is safe; EF reports a cancellation through CommandCanceled, not CommandFailed. One that ran reports how many rows
+    // it changed (ExecuteUpdate and ExecuteDelete return it): none changed nothing, and cascaded to nothing, since the
+    // database cascades from each row it deletes, so it publishes nothing, and leaves nothing for a transaction.
     public int NonQueryExecuted(DbCommand command, CommandExecutedEventData eventData, int result)
     {
-        Complete(BulkWrite(command, eventData));
+        if (result != 0)
+        {
+            Complete(BulkWrite(command, eventData));
+        }
+
         return result;
     }
 
@@ -155,7 +165,11 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
-        await CompleteAsync(BulkWrite(command, eventData)).ConfigureAwait(false);
+        if (result != 0)
+        {
+            await CompleteAsync(BulkWrite(command, eventData)).ConfigureAwait(false);
+        }
+
         return result;
     }
 
@@ -316,6 +330,20 @@ internal sealed partial class SluiceInterceptor
         return false;
     }
 
+    private CapturedSave Capture(DbContext context)
+    {
+        var save = CapturedSave.Capture(context);
+        foreach (var entityType in save.Unversioned)
+        {
+            if (_loggedUnversioned.TryAdd(entityType.Name, true))
+            {
+                LogUnversioned(entityType.ShortName());
+            }
+        }
+
+        return save;
+    }
+
     // A save still held when its context saves again never completed: this save runs inside it (an interceptor saving
     // again), or a concurrency conflict or a throwing interceptor ended it without an event. Its transaction may have
     // ended since, or be the one the next save runs in, so it publishes now, and again from the transaction it began
@@ -437,6 +465,14 @@ internal sealed partial class SluiceInterceptor
         Message = "Sluice couldn't invalidate the cached values that depend on an EF write; they stay cached until their duration ends. Dependencies: {DependencyCount}"
     )]
     private partial void LogPublishFailed(Exception exception, int? dependencyCount);
+
+    // So that losing Children precision is a choice, not a surprise: a busy type evicts every such list on every write.
+    [LoggerMessage(
+        EventId = 3,
+        Level = LogLevel.Information,
+        Message = "Sluice evicts every read.Children list of {EntityType}'s foreign keys, under every parent, each time it saves an update or delete of one, because {EntityType} has no concurrency token the database changes on every write: the parent a row had when it was loaded may not be the one it leaves. To evict only its parents' lists, map one: on PostgreSQL, xmin as a row version; on SQL Server, a rowversion column."
+    )]
+    private partial void LogUnversioned(string entityType);
 
     // A write that ended on a context, with how to derive what it may have changed.
     private readonly record struct Write(DbContext Context, Func<List<Dependency>> Derive);

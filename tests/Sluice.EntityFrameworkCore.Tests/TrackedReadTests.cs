@@ -24,8 +24,9 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     // The remedies the analysis's reasons end with.
     private const string Declare =
         "*Run it in the fetch of read.From(dependency, fetch)*invalidate that source when its data changes*";
-    private const string FilterYourself =
-        "*Call IgnoreQueryFilters(), filter by that value yourself, and put it in the cache key*";
+    private const string Configure =
+        "*Set it from the cache key when the compute first asks for the context, with read.Db<ShopDb>(db => …). Or "
+        + """ignore the filter by its name (IgnoreQueryFilters(["Tenant"]) for one named Tenant*""";
     private const string SelectValues = "*Select the values you need instead*";
     private const string ForeignContext = "*didn't get from read.Db<TContext>()*";
     private const string Rename = """update "Customers" set "Name" = 'Cy' where "Id" = -1""";
@@ -111,7 +112,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ),
         ["query filter reading the context"] = (
             (db, ct) => db.Accounts.ToListAsync(ct),
-            "*Account's query filter reads the context's state" + FilterYourself
+            "*Account's query filter reads the context's state (ShopDb.TenantId)*" + Configure
         ),
         ["lazily loading entities"] = (
             (db, ct) => db.Reviews.ToListAsync(ct),
@@ -175,49 +176,104 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ),
         ["query filter reading a static property"] = (
             (db, ct) => LedgersFilteredBy(db, "accessor").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (TenantAccessor.Current)" + FilterYourself
+            """*Ledger's query filter "accessor" reads shared state (TenantAccessor.Current)"""
+                + IgnoreJust("accessor")
         ),
         ["query filter calling a static method"] = (
             (db, ct) => LedgersFilteredBy(db, "method").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (TenantAccessor.Read())" + FilterYourself
+            """*Ledger's query filter "method" reads shared state (TenantAccessor.Read())"""
+                + IgnoreJust("method")
         ),
         ["query filter reading the clock"] = (
             (db, ct) => LedgersFilteredBy(db, "clock").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (DateTime.UtcNow)" + FilterYourself
+            """*Ledger's query filter "clock" reads shared state (DateTime.UtcNow)"""
+                + IgnoreJust("clock")
         ),
         ["query filter reading an object it captured"] = (
             (db, ct) => LedgersFilteredBy(db, "captured").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (the captured tenants.Current)"
-                + FilterYourself
+            """*Ledger's query filter "captured" reads shared state (the captured tenants.Current)"""
+                + IgnoreJust("captured")
         ),
         ["query filter reading a static field that isn't readonly"] = (
             (db, ct) => LedgersFilteredBy(db, "static field").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (TenantAccessor.Fallback)" + FilterYourself
+            """*Ledger's query filter "static field" reads shared state (TenantAccessor.Fallback)"""
+                + IgnoreJust("static field")
         ),
         ["query filter reading a readonly static AsyncLocal"] = (
             (db, ct) => LedgersFilteredBy(db, "async local").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (TenantAccessor.Flow.Value)" + FilterYourself
+            """*Ledger's query filter "async local" reads shared state (TenantAccessor.Flow.Value)"""
+                + IgnoreJust("async local")
         ),
         ["query filter reading an object it makes"] = (
             (db, ct) => LedgersFilteredBy(db, "new object").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (TenantSource.Current)" + FilterYourself
+            """*Ledger's query filter "new object" reads shared state (TenantSource.Current)"""
+                + IgnoreJust("new object")
         ),
         ["query filter reading a captured struct holding an object"] = (
             (db, ct) => LedgersFilteredBy(db, "struct").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (the captured scope.Item1)" + FilterYourself
+            """*Ledger's query filter "struct" reads shared state (the captured scope.Item1)"""
+                + IgnoreJust("struct")
+        ),
+        ["query filter reading a readonly field of the context"] = (
+            (db, ct) => LedgersFilteredBy(db, "readonly field").ToListAsync(ct),
+            """*Ledger's query filter "readonly field" reads the context's state through ShopDb._fixedTenant, """
+                + "which read.Db's configure can't set*settable field or auto-property*"
+                + """Or ignore just that filter with IgnoreQueryFilters(["readonly field"])*"""
+        ),
+        ["query filter reading an init-only property of the context"] = (
+            (db, ct) => LedgersFilteredBy(db, "init property").ToListAsync(ct),
+            """*Ledger's query filter "init property" reads the context's state through ShopDb.SeededTenant, """
+                + "which read.Db's configure can't set*settable field or auto-property*"
+                + """Or ignore just that filter with IgnoreQueryFilters(["init property"])*"""
         ),
         ["query filter calling a built-in database function given no column"] = (
             (db, ct) => LedgersFilteredBy(db, "database function").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (the database function current_setting)"
-                + FilterYourself
+            """*Ledger's query filter "database function" reads shared state (the database function current_setting)"""
+                + IgnoreJust("database function")
         ),
         ["query filter calling a method of the object configuring it"] = (
             (db, ct) => LedgersFilteredBy(db, "instance method").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (LedgerFilters.Tenant())" + FilterYourself
+            """*Ledger's query filter "instance method" reads shared state (LedgerFilters.Tenant())"""
+                + IgnoreJust("instance method")
         ),
         ["query filter reading a field of the object configuring it"] = (
             (db, ct) => LedgersFilteredBy(db, "field").ToListAsync(ct),
-            "*Ledger's query filter reads shared state (LedgerFilters.TenantId)" + FilterYourself
+            """*Ledger's query filter "field" reads shared state (LedgerFilters.TenantId)"""
+                + IgnoreJust("field")
+        ),
+        ["two named query filters reading shared state"] = (
+            (db, ct) => LedgersFilteredBy(db, "accessor", "clock").ToListAsync(ct),
+            "*2 query filters read state that can differ between calls*"
+                + """Ledger's query filter "accessor" reads shared state (TenantAccessor.Current); """
+                + """Ledger's query filter "clock" reads shared state (DateTime.UtcNow). """
+                + """Ignore just those filters with IgnoreQueryFilters(["accessor", "clock"]), so any other """
+                + "filters still apply, then filter by what they read yourself, and put it in the cache key*"
+        ),
+        ["named query filter reading the context"] = (
+            (db, ct) => db.Issues.ToListAsync(ct),
+            """*Issue's query filter "Tenant" reads the context's state (ShopDb.TenantId)*"""
+                + Configure
+        ),
+        ["named query filter reading the context on a type reached through a navigation"] = (
+            (db, ct) =>
+                db.Watches.IgnoreAutoIncludes().Select(w => w.Issue!.IsDeleted).ToListAsync(ct),
+            """*Issue's query filter "Tenant" reads the context's state (ShopDb.TenantId)*"""
+                + Configure
+        ),
+        ["named query filter reading the context on a type it auto-includes"] = (
+            (db, ct) => db.Watches.ToListAsync(ct),
+            """*Issue's query filter "Tenant" reads the context's state (ShopDb.TenantId)*"""
+                + Configure
+        ),
+        ["anonymous query filter reading the context on a type it includes"] = (
+            (db, ct) => db.Watches.IgnoreAutoIncludes().Include(w => w.Account).ToListAsync(ct),
+            "*Account's query filter reads the context's state (ShopDb.TenantId)*" + Configure
+        ),
+        ["named and anonymous query filters reading the context"] = (
+            (db, ct) => db.Watches.Include(w => w.Account).ToListAsync(ct),
+            "*: Account's query filter reads the context's state (ShopDb.TenantId); "
+                + """Issue's query filter "Tenant" reads the context's state (ShopDb.TenantId). The compute's*"""
+                + Configure
         ),
         ["save"] = (
             (db, ct) =>
@@ -355,7 +411,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             db => [db.Orders.Dependency(-1)]
         ),
         ["query filter reading only what can't change between calls"] = (
-            (r, ct) => LedgersFilteredBy(r.Db<ShopDb>(), null).ToListAsync(ct),
+            (r, ct) => LedgersFilteredBy(r.Db<ShopDb>()).ToListAsync(ct),
             db => [db.Ledgers.Dependency(-1)],
             db => [db.Coupons.Dependency(-1)]
         ),
@@ -584,15 +640,20 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     private static IQueryable<string> CustomerNames<T>(IQueryable<T> rows)
         where T : IHasCustomer => rows.Select(row => row.Customer!.Name);
 
-    // Ledgers under the plain query filter and the one named, if any: Ledger's other filters each read shared state.
-    private static IQueryable<Ledger> LedgersFilteredBy(ShopDb db, string? filter) =>
+    // Ledgers under the plain query filter and those named: Ledger's other filters each read shared state.
+    private static IQueryable<Ledger> LedgersFilteredBy(ShopDb db, params string[] filters) =>
         db.Ledgers.IgnoreQueryFilters([
             .. db
                 .Model.FindEntityType(typeof(Ledger))!
                 .GetDeclaredQueryFilters()
                 .Select(declared => declared.Key!)
-                .Where(key => key != "plain" && key != filter),
+                .Where(key => key != "plain" && !filters.Contains(key)),
         ]);
+
+    // The remedy for one named filter the analysis refuses: ignore just that one.
+    private static string IgnoreJust(string filter) =>
+        $"""*. Ignore just that filter with IgnoreQueryFilters(["{filter}"]), so any other filters still apply, """
+        + "then filter by that value yourself, and put it in the cache key*";
 
     // EF's own scalar path, which sequence-based key generation uses.
     private static IRelationalCommand SelectOne(ShopDb db) =>
@@ -883,8 +944,8 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             .ToString()
             .Should()
             .Match(
-                "*Sluice can't track: Ledger's query filter reads shared state (TenantAccessor.Map())"
-                    + FilterYourself
+                """*Sluice can't track: Ledger's query filter "lambda" reads shared state (TenantAccessor.Map())"""
+                    + IgnoreJust("lambda")
             );
     }
 
@@ -978,6 +1039,48 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             .Equal([1, 2, 1, 1], "the open filter, on the ticket's own column, still applies");
     }
 
+    // A multi-tenant app with soft delete, as the refusal of its tenant filter says to read it: ignoring just that
+    // filter keeps soft delete, which IgnoreQueryFilters() without names would drop.
+    [Fact]
+    public async Task A_query_that_ignores_just_the_refused_named_filter_keeps_the_others_and_is_evicted_by_a_write()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var tenant = Random.Shared.Next(1_000, int.MaxValue);
+        var open = new Issue { TenantId = tenant };
+        db.Issues.AddRange(
+            open,
+            new Issue { TenantId = tenant },
+            new Issue { TenantId = tenant, IsDeleted = true },
+            new Issue { TenantId = tenant + 1 }
+        );
+        await db.SaveChangesAsync();
+        var count = 0;
+
+        IQueryable<int> IssuesOf(ShopDb context) =>
+            context
+                .Issues.IgnoreQueryFilters(["Tenant"])
+                .Where(issue => issue.TenantId == tenant)
+                .Select(issue => issue.Id);
+
+        var cached = await CachedRead.Of(
+            node.Cache,
+            async (read, ct) => count = await IssuesOf(read.Db<ShopDb>()).CountAsync(ct)
+        );
+
+        count.Should().Be(2, "the deleted issue and the other tenant's are left out");
+        IssuesOf(db).ToQueryString().Should().Contain("\"IsDeleted\"", "SoftDelete still applies");
+        (await db.Issues.IgnoreQueryFilters().CountAsync(issue => issue.TenantId == tenant))
+            .Should()
+            .Be(3, "IgnoreQueryFilters() without names drops SoftDelete too");
+
+        open.IsDeleted = true;
+        await db.SaveChangesAsync();
+
+        (await cached.WasEvicted()).Should().BeTrue();
+        count.Should().Be(1);
+    }
+
     [Fact]
     public async Task A_read_helper_does_not_load_auto_included_navigations()
     {
@@ -1056,6 +1159,43 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         (await totals.WasEvicted()).Should().BeFalse("the fetch's value was cached");
         await node.Cache.InvalidateAsync(_totals.All);
         (await totals.WasEvicted()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_fused_fetch_declared_with_sets_AllDependencies_is_evicted_by_EF_writes_to_those_types()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+
+        // The declared route for a view, as the docs show it: no invalidation by hand.
+        var totals = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+            {
+                var computeDb = read.Db<ShopDb>();
+                return read.From(
+                    [
+                        .. computeDb.Customers.AllDependencies(),
+                        .. computeDb.Orders.AllDependencies(),
+                    ],
+                    fetchCt => computeDb.CustomerTotals.ToListAsync(fetchCt)
+                );
+            }
+        );
+
+        db.Tags.Add(new Tag { Name = Guid.NewGuid().ToString() });
+        await db.SaveChangesAsync();
+        (await totals.WasEvicted()).Should().BeFalse("a write to another type doesn't evict it");
+
+        db.Orders.Add(new Order { CustomerId = ada, Item = "Tea" });
+        await db.SaveChangesAsync();
+        (await totals.WasEvicted()).Should().BeTrue("a save of an order evicts it");
+
+        await db
+            .Customers.Where(c => c.Id == ada)
+            .ExecuteUpdateAsync(set => set.SetProperty(c => c.Name, "Ada Lovelace"));
+        (await totals.WasEvicted()).Should().BeTrue("a bulk update of customers evicts it");
     }
 
     [Fact]

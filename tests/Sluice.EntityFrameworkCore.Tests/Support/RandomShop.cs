@@ -8,7 +8,15 @@ namespace Sluice.EntityFrameworkCore.Tests.Support;
 /// The highest key of each table a random workload writes. Taken before the workload starts, the workload's rows are
 /// the ones above it: tests in the Postgres collection run one at a time, so nothing else adds rows meanwhile.
 /// </summary>
-public sealed record Keys(int Customer, int Order, int Coupon, int Note, int Vehicle, int Trailer)
+public sealed record Keys(
+    int Customer,
+    int Order,
+    int Coupon,
+    int Note,
+    int Vehicle,
+    int Trailer,
+    int Shipment
+)
 {
     public static async Task<Keys> Of(ShopDb db) =>
         new(
@@ -17,7 +25,8 @@ public sealed record Keys(int Customer, int Order, int Coupon, int Note, int Veh
             await db.Coupons.MaxAsync(row => (int?)row.Id) ?? 0,
             await db.Notes.MaxAsync(row => (int?)row.Id) ?? 0,
             await db.Vehicles.MaxAsync(row => (int?)row.Id) ?? 0,
-            await db.Trailers.MaxAsync(row => (int?)row.Id) ?? 0
+            await db.Trailers.MaxAsync(row => (int?)row.Id) ?? 0,
+            await db.Shipments.MaxAsync(row => (int?)row.Id) ?? 0
         );
 
     /// <summary>Each table's higher key, so keys a workload has used stay covered after their rows are deleted.</summary>
@@ -28,7 +37,8 @@ public sealed record Keys(int Customer, int Order, int Coupon, int Note, int Veh
             Math.Max(Coupon, other.Coupon),
             Math.Max(Note, other.Note),
             Math.Max(Vehicle, other.Vehicle),
-            Math.Max(Trailer, other.Trailer)
+            Math.Max(Trailer, other.Trailer),
+            Math.Max(Shipment, other.Shipment)
         );
 }
 
@@ -302,6 +312,21 @@ public static class ShopViews
             );
             views.Add(
                 new(
+                    $"shipments of customer {id}",
+                    async (db, read, ct) =>
+                        Text(
+                            (
+                                await read.Children(db.Shipments, s => s.CustomerId, id)
+                                    .OrderBy(s => s.Id)
+                                    .ToListAsync(ct)
+                            ).Select(s =>
+                                $"{s.Id} {s.Note} {s.CouponId} {string.Join(",", s.Legs.Select(l => l.Place))}"
+                            )
+                        )
+                )
+            );
+            views.Add(
+                new(
                     $"coupons of customer {id}",
                     async (db, read, ct) =>
                         Text(
@@ -378,6 +403,18 @@ public static class ShopViews
                             await read.Children(db.Orders, o => o.CouponId, id)
                                 .OrderBy(o => o.Id)
                                 .Select(o => o.Id)
+                                .ToListAsync(ct)
+                        )
+                )
+            );
+            views.Add(
+                new(
+                    $"shipments with coupon {id}",
+                    async (db, read, ct) =>
+                        Text(
+                            await read.Children(db.Shipments, s => s.CouponId, id)
+                                .OrderBy(s => s.Id)
+                                .Select(s => new { s.Id, s.CustomerId })
                                 .ToListAsync(ct)
                         )
                 )
@@ -473,6 +510,19 @@ public static class ShopViews
             );
         }
 
+        foreach (var id in Between(first.Shipment, last.Shipment))
+        {
+            views.Add(
+                new(
+                    $"shipment {id}",
+                    async (db, read, ct) =>
+                        await read.Entity(db.Shipments, id).SingleOrDefaultAsync(ct) is { } s
+                            ? $"{s.CustomerId} {s.Note} {s.CouponId} {s.Legs.Count}"
+                            : "none"
+                )
+            );
+        }
+
         return views;
     }
 
@@ -488,7 +538,8 @@ public static class ShopViews
 /// Makes random changes to the shop's rows through a context with <c>UseSluice</c>, the ways an app would: tracked
 /// inserts, edits and deletes, deletes of rows it never loaded, <c>Update</c> of a detached row, several changes in
 /// one save, saves in a transaction that commits or rolls back, and bulk statements that edit, re-parent and delete
-/// rows, alone or in a transaction. It reads the rows it may pick from the database before each change, through the
+/// rows, alone or in a transaction. Shipments have a row version, so concurrent writers' saves of the same one fail
+/// rather than overwrite each other, and Sluice evicts their parents' lists exactly. It reads the rows it may pick from the database before each change, through the
 /// same context, so it sees its own uncommitted rows inside a transaction.
 /// </summary>
 public sealed class RandomWriter(ShopDb db, Keys first, Random random)
@@ -640,6 +691,13 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         Offer(2, any(state.Trucks), () => AddTrailer(state));
         Offer(1, any(state.Trailers) && any(state.Trucks), () => MoveTrailer(state));
         Offer(1, any(state.Trailers), () => DeleteTrailer(Pick(state.Trailers)));
+        Offer(3, any(state.Customers), () => AddShipment(state));
+        Offer(
+            3,
+            any(state.Shipments) && any(state.Customers),
+            () => EditShipment(state, Pick(state.Shipments))
+        );
+        Offer(1, any(state.Shipments), () => DeleteShipment(Pick(state.Shipments)));
         Offer(bulk ? 3 : 0, any(state.Customers), () => BulkEditOrders(Pick(state.Customers)));
         Offer(bulk ? 3 : 0, state.Customers.Length > 1, () => BulkMoveOrders(state));
         Offer(bulk ? 2 : 0, any(state.Customers), () => BulkDeleteCustomer(Pick(state.Customers)));
@@ -919,6 +977,44 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         return $"delete trailer {id}";
     }
 
+    private Task<string> AddShipment(State state)
+    {
+        var shipment = new Shipment
+        {
+            CustomerId = Pick(state.Customers),
+            CouponId = MaybeCoupon(state),
+        };
+        db.Shipments.Add(shipment);
+        return Task.FromResult($"add a shipment for customer {shipment.CustomerId}");
+    }
+
+    private async Task<string> EditShipment(State state, int id)
+    {
+        var shipment = await db.Shipments.SingleAsync(s => s.Id == id);
+        switch (random.Next(4))
+        {
+            case 0:
+                shipment.Note = Pick(_names);
+                return $"edit shipment {id}";
+            case 1:
+                shipment.CustomerId = Pick(state.Customers);
+                return $"move shipment {id} to customer {shipment.CustomerId}";
+            case 2:
+                shipment.CouponId = MaybeCoupon(state);
+                return $"set shipment {id}'s coupon to {shipment.CouponId?.ToString(CultureInfo.InvariantCulture) ?? "none"}";
+            default:
+                // Writes only the legs' table, so EF doesn't check the shipment's row version.
+                shipment.Legs.Add(new Leg { Place = Pick(_names) });
+                return $"add a leg to shipment {id}";
+        }
+    }
+
+    private async Task<string> DeleteShipment(int id)
+    {
+        db.Shipments.Remove(await db.Shipments.SingleAsync(s => s.Id == id));
+        return $"delete shipment {id}";
+    }
+
     private async Task<string> BulkEditOrders(int customer)
     {
         var item = Item();
@@ -968,7 +1064,8 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         int[] Notes,
         int[] Vehicles,
         int[] Trucks,
-        int[] Trailers
+        int[] Trailers,
+        int[] Shipments
     )
     {
         public static async Task<State> Of(ShopDb db, Keys first)
@@ -1002,7 +1099,11 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
                     .OfType<Truck>()
                     .Select(t => t.Id)
                     .ToArrayAsync(),
-                await db.Trailers.Where(t => t.Id > first.Trailer).Select(t => t.Id).ToArrayAsync()
+                await db.Trailers.Where(t => t.Id > first.Trailer).Select(t => t.Id).ToArrayAsync(),
+                await db
+                    .Shipments.Where(s => s.Id > first.Shipment)
+                    .Select(s => s.Id)
+                    .ToArrayAsync()
             );
         }
     }
