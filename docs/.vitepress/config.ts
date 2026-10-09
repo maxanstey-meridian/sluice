@@ -36,6 +36,7 @@ export default defineConfig({
         text: "Misc",
         items: [
           { text: "How It Works", link: "/misc/how-it-works" },
+          { text: "Performance", link: "/misc/performance" },
           { text: "Limitations", link: "/misc/limitations" },
         ],
       },

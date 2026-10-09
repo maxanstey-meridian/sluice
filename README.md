@@ -203,6 +203,17 @@ start.
   the cache through Redis, and a startup check for settings that would let cleared values come
   back
 
+## How it's tested
+
+- The EF Core tests run on a real PostgreSQL in Docker, not an in-memory fake.
+- A random workload makes saves, moves, deletes, deletes of rows it never loaded, bulk updates, batches and
+  transactions across cascades, set-null keys, inheritance, composite keys and a many-to-many join. After every
+  write, it checks each cached read against the same read run fresh. A concurrent version runs four writers and four
+  readers at once, and checks once they've finished. `SLUICE_RANDOM_SEEDS=50 dotnet test` runs more of both.
+- Benchmarks against FusionCache on its own are in
+  [Performance](https://maxanstey-meridian.github.io/sluice/misc/performance). In short: a hit costs about 0.2 µs per
+  dependency, so keep each value's dependencies to tens rather than thousands.
+
 ## Documentation
 
 [Getting Started](https://maxanstey-meridian.github.io/sluice/getting-started) ·
@@ -210,6 +221,7 @@ start.
 [EF Core](https://maxanstey-meridian.github.io/sluice/guides/ef-core) ·
 [Configuration](https://maxanstey-meridian.github.io/sluice/guides/configuration) ·
 [How It Works](https://maxanstey-meridian.github.io/sluice/misc/how-it-works) ·
+[Performance](https://maxanstey-meridian.github.io/sluice/misc/performance) ·
 [Limitations](https://maxanstey-meridian.github.io/sluice/misc/limitations)
 (what Sluice deliberately doesn't do)
 

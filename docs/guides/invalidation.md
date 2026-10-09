@@ -73,6 +73,9 @@ read.From(Billing.Invoice.All);
 read.From(invoiceIds.Select(Billing.Invoice.For));
 ```
 
+Every hit checks each dependency the value recorded, at about 0.2 µs each: a hundred cost about 23 µs a hit. For
+thousands, record the source's `All` instead. See [Performance](/misc/performance).
+
 ### Rules for a compute
 
 - **It must record something.** A compute that records no dependency makes the call throw

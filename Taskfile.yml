@@ -12,3 +12,6 @@ tasks:
   format:
     cmds:
       - dotnet csharpier format .
+  bench:
+    cmds:
+      - dotnet run -c Release --project benchmarks/Sluice.Benchmarks -- --filter '*'

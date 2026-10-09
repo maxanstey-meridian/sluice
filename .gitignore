@@ -17,3 +17,5 @@ obj/
 docs/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+
+BenchmarkDotNet.Artifacts/
