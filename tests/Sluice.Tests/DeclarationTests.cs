@@ -231,4 +231,28 @@ public sealed class DeclarationTests
 
         otherKey.Should().NotThrow();
     }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("statement:v2")]
+    [InlineData("__fc")]
+    public void A_keyless_query_name_is_checked_as_a_keyed_one_is(string name)
+    {
+        var declare = () => new Query<string>(name);
+
+        declare.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void A_keyless_and_a_keyed_query_cannot_share_a_name()
+    {
+        _ = new Query<int, string>("decl-keyed-and-keyless");
+
+        var keyless = () => new Query<string>("decl-keyed-and-keyless");
+
+        keyless
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage("*already declared as Query<System.Int32, System.String>*");
+    }
 }

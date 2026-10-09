@@ -4,8 +4,8 @@ namespace Sluice.EntityFrameworkCore.Tests;
 
 /// <summary>
 /// Random writes over related types (cascades, set-null keys, a self-referencing cascade, table-per-type inheritance,
-/// composite keys and a many-to-many join), checked against the one thing that matters: every cached read equals the
-/// same read run fresh. Set <c>SLUICE_RANDOM_SEEDS</c> to run more seeds than the default.
+/// composite keys and a many-to-many join), including bulk statements nobody invalidates by hand, checked against the
+/// one thing that matters: every cached read, helper or plain query, equals the same read run fresh. Set <c>SLUICE_RANDOM_SEEDS</c> to run more seeds than the default.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 public sealed class RandomWorkloadTests(PostgresFixture postgres)
@@ -37,10 +37,9 @@ public sealed class RandomWorkloadTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var oracle = new SluiceNode();
         await using var writer = postgres.CreateDb(node);
-        await using var reader = postgres.CreateDb(node);
         var first = await Keys.Of(writer);
         var last = first;
-        var workload = new RandomWriter(writer, node.Cache, first, new Random(seed));
+        var workload = new RandomWriter(writer, first, new Random(seed));
         var log = new List<string>();
 
         for (var step = 1; step <= Steps; step++)
@@ -48,7 +47,7 @@ public sealed class RandomWorkloadTests(PostgresFixture postgres)
             log.Add($"{step}: {await workload.Step()}");
             last = last.Max(await Keys.Of(writer));
 
-            var stale = await Stale(node, oracle, reader, ShopViews.Of(first, last), step);
+            var stale = await Stale(node, oracle, ShopViews.Of(first, last), step);
             stale
                 .Should()
                 .BeEmpty($"seed {seed} served stale reads after:\n{string.Join("\n", log)}");
@@ -82,7 +81,7 @@ public sealed class RandomWorkloadTests(PostgresFixture postgres)
             .Select(async i =>
             {
                 await using var db = postgres.CreateDb(node);
-                var workload = new RandomWriter(db, node.Cache, first, new Random(seed * 100 + i));
+                var workload = new RandomWriter(db, first, new Random(seed * 100 + i));
                 var log = new List<string>();
                 for (var step = 0; step < ConcurrentSteps; step++)
                 {
@@ -107,11 +106,7 @@ public sealed class RandomWorkloadTests(PostgresFixture postgres)
                     for (var read = 0; read < 20; read++)
                     {
                         var view = views[random.Next(views.Count)];
-                        await node.Cache.GetOrSetAsync(
-                            _view,
-                            view.Name,
-                            (reads, ct) => view.Read(reads, db, ct)
-                        );
+                        await node.Cache.GetOrSetAsync(_view, view.Name, view.Run);
                     }
                 }
 
@@ -133,7 +128,7 @@ public sealed class RandomWorkloadTests(PostgresFixture postgres)
             await Keys.Of(checker),
             (keys, seen) => keys.Max(seen)
         );
-        var stale = await Stale(node, oracle, checker, ShopViews.Of(first, last), 0);
+        var stale = await Stale(node, oracle, ShopViews.Of(first, last), 0);
         stale.Should().BeEmpty($"seed {seed} served stale reads once its writes had settled");
         log.Count(line => line.StartsWith("refused", StringComparison.Ordinal))
             .Should()
@@ -145,11 +140,10 @@ public sealed class RandomWorkloadTests(PostgresFixture postgres)
     }
 
     // Reads each view through the node's cache, caching it if it isn't, and fresh, through a cache that has never
-    // seen the key. A mismatch is a cached value no write evicted though its data changed.
+    // seen the key; each compute queries a context of its own. A mismatch is a cached value no write evicted though its data changed.
     private static async Task<List<string>> Stale(
         SluiceNode node,
         SluiceNode oracle,
-        ShopDb reader,
         IReadOnlyList<ShopView> views,
         int check
     )
@@ -157,16 +151,8 @@ public sealed class RandomWorkloadTests(PostgresFixture postgres)
         var stale = new List<string>();
         foreach (var view in views)
         {
-            var cached = await node.Cache.GetOrSetAsync(
-                _view,
-                view.Name,
-                (read, ct) => view.Read(read, reader, ct)
-            );
-            var fresh = await oracle.Cache.GetOrSetAsync(
-                _view,
-                $"{view.Name} #{check}",
-                (read, ct) => view.Read(read, reader, ct)
-            );
+            var cached = await node.Cache.GetOrSetAsync(_view, view.Name, view.Run);
+            var fresh = await oracle.Cache.GetOrSetAsync(_view, $"{view.Name} #{check}", view.Run);
             if (cached != fresh)
             {
                 stale.Add($"{view.Name}: cached {cached}, actually {fresh}");

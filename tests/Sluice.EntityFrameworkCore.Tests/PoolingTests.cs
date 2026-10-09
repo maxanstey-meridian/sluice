@@ -32,8 +32,10 @@ public sealed class PoolingTests(PostgresFixture postgres)
         {
             switch (registration)
             {
+                // Computes get their context from a factory, which EF configures alongside the pool.
                 case Registration.DbContextPool:
                     services.AddDbContextPool<ShopDb>(Configure, poolSize: 1);
+                    services.AddDbContextFactory<ShopDb>(Configure);
                     break;
                 case Registration.PooledDbContextFactory:
                     services.AddPooledDbContextFactory<ShopDb>(Configure, poolSize: 1);
@@ -47,8 +49,8 @@ public sealed class PoolingTests(PostgresFixture postgres)
         var cache = node.Cache;
         await using var reader = postgres.CreateDb(node);
         var (ada, bob) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(cache, reader, ada);
-        var bobRead = await CachedRead.Customer(cache, reader, bob);
+        var adaRead = await CachedRead.Customer(cache, ada);
+        var bobRead = await CachedRead.Customer(cache, bob);
 
         // A leased context, and what returns it to the pool.
         (ShopDb Db, IAsyncDisposable Return) Lease()

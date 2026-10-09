@@ -10,9 +10,10 @@ benchmarks are in [`benchmarks/`](https://github.com/maxanstey-meridian/sluice/t
   on every hit, so this is the cost of tagging itself. Sluice adds about 15% on top.
 - **Keep each value's dependencies to tens, not thousands.** A value built from 1,000 rows read one by one, each
   recorded with its own `Invoice.For(id)`, costs about 0.24 ms per hit: as much as a database query. Read such a list
-  with one `read.Children` or `read.All`, or record the source's `All`, so the value has one dependency.
-- **With EF Core, a save costs about 4 µs more, and a cache miss read through a helper about 14 µs more.** Against a
-  database across a network, where a query takes hundreds of microseconds, that's noise.
+  with one query or one `read.Children`, or record the source's `All`, so the value has one dependency.
+- **With EF Core, a save costs about 4 µs more, and a cache miss about 3 µs more with a plain query, or 15 µs more
+  through a read helper.** Against a database across a network, where a query takes hundreds of microseconds, that's
+  noise.
 
 ## Cache hits
 
@@ -46,15 +47,18 @@ two itself. With Redis, each tag is also a Redis write and a backplane message; 
 
 ## EF Core
 
-On in-memory SQLite, the fastest database there is, so Sluice's share is as large as it gets:
+On in-memory SQLite, the fastest database there is, so Sluice's share is as large as it gets. Sluice's misses
+include leasing the compute's own context from a pooled factory:
 
 | | Without Sluice | With Sluice |
 |---|---:|---:|
-| Save one changed row | 10.0 µs | 13.9 µs |
-| Cache miss that reads one row | 13.0 µs (FusionCache and a plain query) | 27.3 µs (`read.Entity`) |
+| Save one changed row | 9.8 µs | 13.9 µs |
+| Cache miss that reads one row | 12.8 µs (FusionCache and a plain query) | 15.4 µs (a plain query on `read.Db`) |
+| | | 28.1 µs (`read.Entity`) |
 
-The save pays for capturing what changed and invalidating it. The read pays for the strict-read checks and the
-dependency.
+The save pays for capturing what changed and invalidating it. A plain query pays for reading its tag and recording
+the tables it names; working out what a query reads happens once, when EF compiles it. `read.Entity` pays more, since
+it builds a new query expression on every call, which EF has to look up in its query cache.
 
 ## Not measured
 

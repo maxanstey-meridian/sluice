@@ -19,7 +19,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         await db.SaveChangesAsync();
 
         Task<Price> ReadOne(SluiceReads read, CancellationToken ct) =>
-            read.Entity(db.Prices, 1m).SingleAsync(ct);
+            read.Entity(read.Db<ShopDb>().Prices, 1m).SingleAsync(ct);
 
         (await node.Cache.GetOrSetAsync(_price, 1m, ReadOne)).Label.Should().Be("one");
         (await CachedRead.IsEvictedBy(ReadOne, db.Prices.Dependency(1.00m))).Should().BeTrue();
@@ -35,7 +35,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         await db.SaveChangesAsync();
 
         Task<Tag> ReadWidget(SluiceReads read, CancellationToken ct) =>
-            read.Entity(db.Tags, "WIDGET").SingleAsync(ct);
+            read.Entity(read.Db<ShopDb>().Tags, "WIDGET").SingleAsync(ct);
 
         (await node.Cache.GetOrSetAsync(_tag, "WIDGET", ReadWidget)).Name.Should().Be("Widget");
         (await CachedRead.IsEvictedBy(ReadWidget, db.Tags.Dependency("widget"))).Should().BeTrue();
@@ -51,7 +51,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         await db.SaveChangesAsync();
 
         Task<Product> ReadTea(SluiceReads read, CancellationToken ct) =>
-            read.Entity(db.Products, new Sku("TEA-1")).SingleAsync(ct);
+            read.Entity(read.Db<ShopDb>().Products, new Sku("TEA-1")).SingleAsync(ct);
 
         (await node.Cache.GetOrSetAsync(_product, "TEA-1", ReadTea)).Name.Should().Be("Tea");
         (await CachedRead.IsEvictedBy(ReadTea, db.Products.Dependency(new Sku("tea-1"))))

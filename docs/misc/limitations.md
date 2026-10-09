@@ -7,8 +7,8 @@ no longer than the entry's duration.
 ## Writes Sluice can't see
 
 - **Anything that writes without a `UseSluice` context must invalidate by hand**: another
-  service, a cron job, SQL run by hand, a database trigger, a second context without
-  `UseSluice`, `ExecuteUpdate`, `ExecuteDelete` and raw SQL. Otherwise the old value stays
+  service, a cron job, SQL run by hand, a database trigger, a context without `UseSluice`, and
+  `ExecuteSql`. Otherwise the old value stays
   cached until it expires, so keep durations short for data written outside your app. See
   [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see).
 - **On the generic path, every write is yours to report**, after it commits. Before the commit,
@@ -59,8 +59,8 @@ no longer than the entry's duration.
 ## EF Core
 
 - **A database cascade evicts whole types.** When a delete makes the database delete rows of
-  other types, or set their foreign key to null, every `Entity` and `All` read of those types is
-  evicted, whichever rows it hit. See
+  other types, or set their foreign key to null, every `Entity` read and plain query of those
+  types is evicted, whichever rows it hit. See
   [Database cascades](/guides/ef-core#database-cascades).
 - **Cascades the model doesn't know about** (triggers, a database that differs from the model)
   aren't seen at all.
@@ -70,28 +70,32 @@ no longer than the entry's duration.
   [Rows saved without loading them](/guides/ef-core#rows-saved-without-loading-them).
 - **Two entity types splitting one table and sharing a column**: saving one doesn't evict the
   other's readers. See [Model shapes](/guides/ef-core#model-shapes).
-- **Broad eviction, by design**: a `Children` list is evicted by a change to any row in it, and
-  an `All` read by any write to the type. See [Writing](/guides/ef-core#writing).
+- **Broad eviction, by design**: a plain query is evicted by any write to any table it reads, a
+  `Children` list by a change to any row in it, and every read of a table by an `ExecuteUpdate`
+  or `ExecuteDelete` on it. See [What a query records](/guides/ef-core#what-a-query-records) and
+  [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes).
 - **Commits Sluice doesn't see**: a raw `DbTransaction` committed outside EF, and some
   `TransactionScope` setups. See [Transactions](/guides/transactions#ef-core).
 - **Interceptors that change entities in `SavingChanges`** must come before `UseSluice`. See
   [Interceptor order](/guides/ef-core#interceptor-order).
-- **Relational providers only, and no `UseInternalServiceProvider`.** See
+- **Relational providers only, and no `UseInternalServiceProvider`.** Computes need the context
+  registered with a factory (`AddDbContextFactory` or `AddPooledDbContextFactory`). See
   [Setup](/guides/ef-core#setup).
 - **Tested on PostgreSQL only.** Key folding assumes PostgreSQL's comparison rules, and doesn't
   fold accent- or culture-sensitive collations. See [Key folding](/guides/ef-core#key-folding).
 - **Composite primary keys can't be read with `read.Entity`**, and `read.Children` takes a
   single-column foreign key. See [Keys](/guides/ef-core#keys).
-- **Skip navigations, views, keyless types, functions and SQL-query mappings** can't be read
-  through the helpers. See [What's refused](/guides/ef-core#what-s-refused).
+- **Views, keyless types, functions and SQL-query mappings** can't be read inside a compute
+  except in a fused fetch. See [What's refused](/guides/ef-core#what-s-refused).
 
 ## Strict reads
 
-- **Some reads go unchecked inside a compute**, such as `Find` of a tracked entity or Dapper on
-  the context's connection. See [What isn't checked](/guides/strict-reads#what-isn-t-checked).
-- **Some reads only work in a fused fetch**: `FromSql`, `SqlQuery`, compiled queries,
-  navigations and lazy loading. See [The declared route](/guides/strict-reads#the-declared-route).
-- **Writes can't run inside a compute.** See
-  [Writes are refused](/guides/strict-reads#writes-are-refused).
-- **Some harmless queries are refused**, such as `order.Customer!.Id`. See
-  [A helper's query reads only its own rows](/guides/strict-reads#a-helper-s-query-reads-only-its-own-rows).
+- **Some reads go unchecked inside a compute**, such as `Find` of an entity a captured outside
+  context already tracks, or Dapper on a context's connection. See
+  [What isn't checked](/guides/strict-reads#what-isn-t-checked).
+- **Some reads only work in a fused fetch**: raw SQL, views, keyless types, your own database
+  functions, and query filters that read the context's state. See
+  [The declared route](/guides/strict-reads#the-declared-route).
+- **Entities that load lazily can't be returned by a query in a compute.** Select the values you
+  need. See [What throws inside a compute](/guides/strict-reads#what-throws-inside-a-compute).
+- **Writes can't run inside a compute.** See [Writes](/guides/strict-reads#writes).

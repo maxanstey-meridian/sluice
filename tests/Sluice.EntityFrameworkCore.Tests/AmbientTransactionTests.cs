@@ -25,7 +25,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node, enlist: false);
         var (ada, _) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         Task completed;
 
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
@@ -56,7 +56,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node, enlist: false);
         var (ada, _) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         using var transaction = new CommittableTransaction();
         await using var db = postgres.CreateDb(node);
         await db.Database.OpenConnectionAsync();
@@ -86,8 +86,8 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node, enlist: false);
         var (ada, bob) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
-        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
         Task completed;
 
         // One connection, so the scope needs no distributed transaction.
@@ -117,7 +117,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node, enlist: false);
         var (ada, _) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
 
         using (new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
         {
@@ -138,7 +138,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node, enlist: false);
         var (ada, bob) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         await using var db = postgres.CreateDb(node);
         Task completed;
 
@@ -177,7 +177,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
         );
         await using var reader = postgres.CreateDb(node, enlist: false);
         var (ada, _) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         Task completed;
 
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))

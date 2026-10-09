@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0 — breaking
+
+EF Core reads inside a compute are ordinary queries now. Sluice records the tables each one
+reads, instead of refusing everything but its helpers.
+
+- **New: `read.Db<TContext>()`.** A compute queries a context of its own, made from the
+  registered `IDbContextFactory<TContext>` and disposed when the compute ends. It tracks nothing
+  by default and isn't in the caller's transaction, so it can't cache a request's unsaved edits
+  or uncommitted rows. **Breaking:** register the context with `AddDbContextFactory` (or
+  `AddPooledDbContextFactory`), which also registers the context itself. Inside a compute, EF
+  commands on any other context throw, the read helpers included; pass them
+  `read.Db<TContext>()`'s sets.
+- **Plain EF queries work inside a compute,** with `Include`, navigations, joins, subqueries,
+  set operations, many-to-many navigations, `Find`, explicit loading and compiled queries. Each
+  query records every entity type it reads, query filters and auto-includes included, and a write
+  to any of them evicts the value. The first time each cached query reads a whole type, Sluice
+  logs it at `Information`, so you can see what to narrow.
+- **`read.Entity` and `read.Children` narrow a query** to one row or one parent's rows. Their
+  queries may now follow navigations and `Include`, which record the types they reach.
+- **Removed: `read.All`.** A plain query on `read.Db`'s context does the same.
+- **Still refused inside a compute:** raw SQL, views, keyless types, your own database functions,
+  query filters that read the context's state, entities that load lazily or hold their context,
+  writes, and reads inside a transaction. Read the first four in a fused `read.From` fetch.
+- **New: `ExecuteUpdate` and `ExecuteDelete` invalidate by themselves,** once they commit: every
+  read of the table they wrote, and for a delete what the database cascades into.
+- **New: a compute runs outside the caller's ambient transaction.**
+- **New: `Query<TValue>`,** a query with no key.
+- **`UseSluice` is safe to call twice** for one context; EF composes a pool's and a factory's
+  configuration, which used to make a save publish before its commit.
+- **Clearer errors:** `AddSluice` called twice, `UseSluice` without `AddSluice`, `read.Db`
+  without a factory or without `UseSluice`, and a compute that recorded nothing all say what to
+  do.
+
 ## 0.2.0 — breaking
 
 Sluice is rewritten from scratch as a thin layer over FusionCache. Nothing from 0.1 survives:

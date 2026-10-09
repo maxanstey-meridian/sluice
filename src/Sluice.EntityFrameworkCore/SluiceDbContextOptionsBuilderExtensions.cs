@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Sluice.EntityFrameworkCore;
 
 namespace Sluice;
@@ -7,9 +8,9 @@ namespace Sluice;
 public static class SluiceDbContextOptionsBuilderExtensions
 {
     /// <summary>
-    /// Invalidates what each <c>SaveChanges</c> wrote once its transaction has committed, and makes EF reads inside
-    /// a compute strict: only the <see cref="SluiceReadsExtensions"/> helpers' queries, or queries in the fetch of
-    /// <c>read.From(dependency, fetch)</c>, may run there.
+    /// Invalidates what each <c>SaveChanges</c>, <c>ExecuteUpdate</c> and <c>ExecuteDelete</c> wrote once its
+    /// transaction has committed, and records what each query inside a compute reads. Calling it again for the same
+    /// options does nothing.
     /// </summary>
     /// <param name="builder">The context's options.</param>
     /// <param name="services">
@@ -35,7 +36,19 @@ public static class SluiceDbContextOptionsBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(services);
 
-        return builder.AddInterceptors(SluiceInterceptor.For(services), StrictReads.Instance);
+        // EF composes every configuration registered for a context type (AddDbContext and AddDbContextFactory for the
+        // same type, say), so this can run twice for one context. Twice would capture each save twice, and the second
+        // capture would publish the first before its commit.
+        if (
+            builder
+                .Options.FindExtension<CoreOptionsExtension>()
+                ?.Interceptors?.Contains(TrackedReads.Instance) == true
+        )
+        {
+            return builder;
+        }
+
+        return builder.AddInterceptors(SluiceInterceptor.For(services), TrackedReads.Instance);
     }
 
     /// <inheritdoc cref="UseSluice(DbContextOptionsBuilder, IServiceProvider)"/>

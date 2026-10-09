@@ -1,5 +1,6 @@
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
@@ -7,6 +8,8 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class ReadGuardTests(PostgresFixture postgres)
 {
+    private static readonly Query<int, string> _name = new("ef-guard-name");
+
     [Fact]
     public async Task A_key_of_the_wrong_type_throws_naming_the_expected_type()
     {
@@ -14,13 +17,16 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
 
         var longForIntKey = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Customers, 1L).ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Entity(r.Db<ShopDb>().Customers, 1L).ToListAsync(ct)
+            );
         var rawValueForTypedId = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Users, 7).ToListAsync(ct));
+            CachedRead.Of(node.Cache, (r, ct) => r.Entity(r.Db<ShopDb>().Users, 7).ToListAsync(ct));
         var stringForIntForeignKey = () =>
             CachedRead.Of(
                 node.Cache,
-                (r, ct) => r.Children(db.Orders, o => o.CustomerId, "1").ToListAsync(ct)
+                (r, ct) => r.Children(r.Db<ShopDb>().Orders, o => o.CustomerId, "1").ToListAsync(ct)
             );
         var longForIntDependency = () => db.Customers.Dependency(1L);
 
@@ -51,7 +57,7 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         var read = () =>
             CachedRead.Of(
                 node.Cache,
-                (r, ct) => r.Children(db.OrderLines, l => l.CouponId, 1).ToListAsync(ct)
+                (r, ct) => r.Children(r.Db<ShopDb>().OrderLines, l => l.CouponId, 1).ToListAsync(ct)
             );
 
         await read.Should().NotThrowAsync();
@@ -66,17 +72,18 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         var plainProperty = () =>
             CachedRead.Of(
                 node.Cache,
-                (r, ct) => r.Children(db.Orders, o => o.Item, "Tea").ToListAsync(ct)
+                (r, ct) => r.Children(r.Db<ShopDb>().Orders, o => o.Item, "Tea").ToListAsync(ct)
             );
         var primaryKey = () =>
             CachedRead.Of(
                 node.Cache,
-                (r, ct) => r.Children(db.Orders, o => o.Id, 1).ToListAsync(ct)
+                (r, ct) => r.Children(r.Db<ShopDb>().Orders, o => o.Id, 1).ToListAsync(ct)
             );
         var memberOfNavigation = () =>
             CachedRead.Of(
                 node.Cache,
-                (r, ct) => r.Children(db.Orders, o => o.Customer!.Name, "Ada").ToListAsync(ct)
+                (r, ct) =>
+                    r.Children(r.Db<ShopDb>().Orders, o => o.Customer!.Name, "Ada").ToListAsync(ct)
             );
 
         await plainProperty
@@ -103,7 +110,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         var read = () =>
             CachedRead.Of(
                 node.Cache,
-                (r, ct) => r.Children(db.Notes, n => EF.Property<int>(n, name), 1).ToListAsync(ct)
+                (r, ct) =>
+                    r.Children(r.Db<ShopDb>().Notes, n => EF.Property<int>(n, name), 1)
+                        .ToListAsync(ct)
             );
 
         await read.Should()
@@ -113,10 +122,15 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
     }
 
     [Fact]
-    public async Task Reads_on_a_context_without_UseSluice_throw()
+    public async Task Reads_on_a_context_without_UseSluice_throw_naming_it()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb();
+        await using var withoutSluice = new SluiceNode(services: services =>
+            services.AddDbContextFactory<ShopDb>(options =>
+                options.UseNpgsql(postgres.ConnectionString)
+            )
+        );
 
         var entity = () =>
             CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Customers, 1).ToListAsync(ct));
@@ -125,11 +139,32 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
                 node.Cache,
                 (r, ct) => r.Children(db.Orders, o => o.CustomerId, 1).ToListAsync(ct)
             );
-        var all = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
+        var factory = () =>
+            CachedRead.Of(withoutSluice.Cache, (r, ct) => r.Db<ShopDb>().Customers.ToListAsync(ct));
+        var plain = () => CachedRead.Of(node.Cache, (_, ct) => db.Customers.ToListAsync(ct));
 
         await entity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
         await children.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
-        await all.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
+        await factory.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
+        await plain
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("*recorded no dependencies*read.Db<TContext>()*UseSluice*");
+    }
+
+    [Fact]
+    public async Task Read_Db_without_a_registered_factory_throws_saying_how_to_register_one()
+    {
+        await using var node = new SluiceNode(services: services =>
+            services.AddDbContext<ShopDb>(options => options.UseNpgsql(postgres.ConnectionString))
+        );
+
+        var read = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.Db<ShopDb>().Customers.ToListAsync(ct));
+
+        await read.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("*IDbContextFactory<ShopDb>*AddDbContextFactory<ShopDb>*");
     }
 
     [Fact]
@@ -139,10 +174,13 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
 
         var read = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.OrderLines, 1).ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Entity(r.Db<ShopDb>().OrderLines, 1).ToListAsync(ct)
+            );
         var dependency = () => db.OrderLines.Dependency(1);
         var readAll = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.All(db.OrderLines).ToListAsync(ct));
+            CachedRead.Of(node.Cache, (r, ct) => r.Db<ShopDb>().OrderLines.ToListAsync(ct));
 
         await read.Should().ThrowAsync<NotSupportedException>().WithMessage("*composite*");
         dependency.Should().Throw<NotSupportedException>().WithMessage("*composite*");
@@ -151,106 +189,80 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
     }
 
     [Fact]
-    public async Task Reads_throw_inside_an_EF_transaction_and_run_again_after_it_commits()
+    public async Task A_compute_reads_what_is_committed_while_the_caller_s_EF_transaction_is_open()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
-        var customer = new Customer { Name = "Ada" };
-        db.Customers.Add(customer);
-        await db.SaveChangesAsync();
-        var transaction = await db.Database.BeginTransactionAsync();
+        var (ada, _) = await db.AddCustomers();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Rename(ada, "Uncommitted");
 
-        var entity = () =>
-            CachedRead.Of(
-                node.Cache,
-                (r, ct) => r.Entity(db.Customers, customer.Id).ToListAsync(ct)
-            );
-        var children = () =>
-            CachedRead.Of(
-                node.Cache,
-                (r, ct) => r.Children(db.Orders, o => o.CustomerId, customer.Id).ToListAsync(ct)
-            );
-        var all = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
+        var name = await node.Cache.GetOrSetAsync(
+            _name,
+            ada,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().Customers, ada).Select(c => c.Name).SingleAsync(ct)
+        );
 
-        await entity
-            .Should()
-            .ThrowAsync<InvalidOperationException>()
-            .WithMessage(Messages.InTransaction);
-        await children
-            .Should()
-            .ThrowAsync<InvalidOperationException>()
-            .WithMessage(Messages.InTransaction);
-        await all.Should()
-            .ThrowAsync<InvalidOperationException>()
-            .WithMessage(Messages.InTransaction);
-
-        await transaction.CommitAsync();
-        await transaction.DisposeAsync();
-        await entity.Should().NotThrowAsync();
+        name.Should().Be("Ada");
     }
 
     [Fact]
-    public async Task Reads_throw_inside_an_enlisted_transaction()
+    public async Task A_compute_reads_what_is_committed_inside_an_enlisted_transaction_or_a_TransactionScope()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
-        using var transaction = new CommittableTransaction();
+        var (ada, bob) = await db.AddCustomers();
+        using var enlisted = new CommittableTransaction();
         await db.Database.OpenConnectionAsync();
-        db.Database.EnlistTransaction(transaction);
+        db.Database.EnlistTransaction(enlisted);
+        await db.Rename(ada, "Uncommitted");
 
-        var read = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
+        Task<string> NameOf(int id) =>
+            node
+                .Cache.GetOrSetAsync(
+                    _name,
+                    id,
+                    (read, ct) =>
+                        read.Entity(read.Db<ShopDb>().Customers, id)
+                            .Select(c => c.Name)
+                            .SingleAsync(ct)
+                )
+                .AsTask();
 
-        await read.Should()
-            .ThrowAsync<InvalidOperationException>()
-            .WithMessage(Messages.InTransaction);
+        (await NameOf(ada)).Should().Be("Ada");
+        using (new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+        {
+            (await NameOf(bob)).Should().Be("Bob", "the compute's connection doesn't enlist");
+            Transaction
+                .Current.Should()
+                .NotBeNull("the caller's scope is back once the compute ends");
+        }
     }
 
     [Fact]
-    public async Task Reads_throw_inside_a_TransactionScope()
-    {
-        await using var node = new SluiceNode();
-        await using var db = postgres.CreateDb(node);
-        using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
-
-        var read = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
-
-        await read.Should()
-            .ThrowAsync<InvalidOperationException>()
-            .WithMessage(Messages.InTransaction);
-    }
-
-    [Fact]
-    public async Task Reads_run_inside_a_TransactionScope_when_the_connection_does_not_enlist()
-    {
-        await using var node = new SluiceNode();
-        await using var db = postgres.CreateDb(node, enlist: false);
-        using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
-
-        var read = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
-
-        await read.Should().NotThrowAsync();
-    }
-
-    [Fact]
-    public async Task Reads_and_dependencies_of_types_not_mapped_to_a_table_throw()
+    public async Task Helper_reads_and_dependencies_of_types_not_mapped_to_a_table_throw()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
 
-        var keylessView = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.All(db.CustomerTotals).ToListAsync(ct));
         var tableReadThroughAView = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Suppliers, 1).ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Entity(r.Db<ShopDb>().Suppliers, 1).ToListAsync(ct)
+            );
         var noTable = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Unstored, 1).ToListAsync(ct));
-        var sqlQuery = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.All(db.TopCustomers).ToListAsync(ct));
-        var function = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.All(db.RecentOrders).ToListAsync(ct));
-        var rootOfAView = () =>
-            CachedRead.Of(node.Cache, (r, ct) => r.All(db.Promotions).ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Entity(r.Db<ShopDb>().Unstored, 1).ToListAsync(ct)
+            );
+        var keyless = () =>
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) =>
+                    r.Children(r.Db<ShopDb>().CustomerTotals, t => t.CustomerId, 1).ToListAsync(ct)
+            );
 
-        await keylessView.Should().ThrowAsync<NotSupportedException>().WithMessage("*keyless*");
         await tableReadThroughAView
             .Should()
             .ThrowAsync<NotSupportedException>()
@@ -259,17 +271,7 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             .Should()
             .ThrowAsync<NotSupportedException>()
             .WithMessage("Unstored isn't mapped to a table*");
-        await sqlQuery.Should().ThrowAsync<NotSupportedException>().WithMessage("*SQL query*");
-        await function
-            .Should()
-            .ThrowAsync<NotSupportedException>()
-            .WithMessage("*function 'recent_orders'*");
-        await rootOfAView
-            .Should()
-            .ThrowAsync<NotSupportedException>()
-            .WithMessage(
-                "Promotion has the derived type LivePromotion, which is mapped to the view 'live_promotions'*"
-            );
+        await keyless.Should().ThrowAsync<NotSupportedException>().WithMessage("*keyless*");
         db.Invoking(d => d.CustomerTotals.AllDependencies())
             .Should()
             .Throw<NotSupportedException>();

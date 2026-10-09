@@ -17,6 +17,7 @@ public static class SluiceServiceCollectionExtensions
     /// overriding any conflicting value set here.
     /// </param>
     /// <returns><paramref name="services"/>, for chaining.</returns>
+    /// <exception cref="InvalidOperationException">Sluice is already registered.</exception>
     /// <remarks>
     /// The entry lifetimes configured here are checked against the tag-data lifetimes when <see cref="SluiceCache"/>
     /// is first resolved, which throws <see cref="InvalidOperationException"/> if an entry could outlive the tag data
@@ -28,6 +29,13 @@ public static class SluiceServiceCollectionExtensions
     )
     {
         ArgumentNullException.ThrowIfNull(services);
+        if (services.Any(service => service.ServiceType == typeof(SluiceCache)))
+        {
+            throw new InvalidOperationException(
+                "AddSluice was called more than once. Call it once, and pass all of Sluice's FusionCache "
+                    + "configuration to that call."
+            );
+        }
 
         var builder = services.AddFusionCache(SluiceCache.CacheName);
         configure?.Invoke(builder);
@@ -51,6 +59,7 @@ public static class SluiceServiceCollectionExtensions
                 .GetCache(SluiceCache.CacheName);
             return new SluiceCache(
                 cache,
+                provider,
                 tagOptions
                     ?? throw new UnreachableException(
                         "FusionCache built the Sluice cache without running Sluice's options action."

@@ -7,7 +7,9 @@ var builder = WebApplication.CreateBuilder(args);
 var connectionString = $"Data Source={Path.Combine(AppContext.BaseDirectory, "playground.db")}";
 
 builder.Services.AddSluice();
-builder.Services.AddDbContext<AppDb>(
+
+// The factory also registers AppDb itself, for the writes below; computes get their own context from it.
+builder.Services.AddDbContextFactory<AppDb>(
     (services, options) => options.UseSqlite(connectionString).UseSluice(services)
 );
 builder.Services.AddSingleton<GreetingApi>();

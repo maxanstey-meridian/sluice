@@ -19,9 +19,11 @@ public sealed class DashboardActions(
             {
                 computes.Add(userId);
 
-                // EF Core: each read records the row it reads.
-                var user = await read.Entity(db.Users, userId).SingleAsync(ct);
-                var darkMode = await read.Entity(db.Flags, FlagId.DarkMode)
+                // EF Core: query the compute's own context. Each query records what it reads.
+                var db = read.Db<AppDb>();
+                var user = await db.Users.SingleAsync(u => u.Id == userId, ct);
+                var darkMode = await db
+                    .Flags.Where(flag => flag.Id == FlagId.DarkMode)
                     .Select(flag => flag.Enabled)
                     .SingleAsync(ct);
 

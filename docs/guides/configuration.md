@@ -8,10 +8,16 @@ each server's memory cache in sync), the serialiser, fail-safe (serving the last
 when a compute fails), timeouts and auto-clone.
 
 ```csharp
+using ZiggyCreatures.Caching.Fusion;
+
 builder.Services.AddSluice(cache =>
     cache.WithDefaultEntryOptions(options => options.Duration = TimeSpan.FromMinutes(5))
 );
 ```
+
+The builder's methods are FusionCache's extension methods, so they need
+`using ZiggyCreatures.Caching.Fusion;`. Call `AddSluice` once, with all of this; a second call
+throws.
 
 ## What Sluice sets
 
@@ -23,7 +29,7 @@ configuration, overriding anything that conflicts:
 | key prefix | the cache name | Sluice's keys, tags and clears can't touch another FusionCache on the same Redis |
 | `DisableTagging` | `false` | invalidation is tagging |
 | `RemoveByTagBehavior` | `Remove` | under `Expire`, fail-safe would serve a value that was just invalidated |
-| `FactorySoftTimeout`, `FactoryHardTimeout` | infinite, per call | a timed-out compute would keep using the caller's `DbContext` after the caller moved on |
+| `FactorySoftTimeout`, `FactoryHardTimeout` | infinite, per call | a timed-out compute would keep running, and using what it holds, after the caller moved on |
 | `AllowTimedOutFactoryBackgroundCompletion`, `EagerRefreshThreshold` | off, per call | both store a value marked as built when its compute *finished*, so an invalidation that landed while it ran could be missed |
 | `ClearAsync` | without fail-safe | a cleared value is never served as a fallback |
 
@@ -48,6 +54,23 @@ FusionCache `DefaultEntryOptionsProvider` (options picked per key) doesn't apply
 The EF package needs logging registered: a failure to invalidate after a commit is logged, not
 thrown. ASP.NET Core and the Generic Host register it. Elsewhere, call
 `services.AddLogging()`.
+
+The EF package also logs, at `Information`, the first time each cached query reads whole types
+(see [What a query records](/guides/ef-core#what-a-query-records)). Its category is
+`Sluice.EntityFrameworkCore`.
+
+FusionCache logs several lines at `Information` for every cache call. To keep them out of your
+logs, raise its category in `appsettings.json`:
+
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "ZiggyCreatures": "Warning"
+    }
+  }
+}
+```
 
 ## Multi-node
 

@@ -45,14 +45,22 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
             ada,
             async (read, ct) =>
             {
-                var byProperty = await read.Children(db.Orders, o => o.CustomerId, ada)
+                var byProperty = await read.Children(
+                        read.Db<ShopDb>().Orders,
+                        o => o.CustomerId,
+                        ada
+                    )
                     .Select(o => o.Item)
                     .ToListAsync(ct);
-                var byNavigation = await read.Children(db.Orders, o => o.Customer, ada)
+                var byNavigation = await read.Children(
+                        read.Db<ShopDb>().Orders,
+                        o => o.Customer,
+                        ada
+                    )
                     .Select(o => o.Item)
                     .ToListAsync(ct);
                 var byShadowKey = await read.Children(
-                        db.Notes,
+                        read.Db<ShopDb>().Notes,
                         n => EF.Property<int>(n, "CustomerId"),
                         ada
                     )
@@ -73,11 +81,12 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
         var (ada, bob) = await AddCustomersWithOrdersAndNotes(db);
 
         Task ByProperty(SluiceReads read, CancellationToken ct) =>
-            read.Children(db.Orders, o => o.CustomerId, ada).ToListAsync(ct);
+            read.Children(read.Db<ShopDb>().Orders, o => o.CustomerId, ada).ToListAsync(ct);
         Task ByNavigation(SluiceReads read, CancellationToken ct) =>
-            read.Children(db.Orders, o => o.Customer, ada).ToListAsync(ct);
+            read.Children(read.Db<ShopDb>().Orders, o => o.Customer, ada).ToListAsync(ct);
         Task ByShadowKey(SluiceReads read, CancellationToken ct) =>
-            read.Children(db.Notes, n => EF.Property<int>(n, "CustomerId"), ada).ToListAsync(ct);
+            read.Children(read.Db<ShopDb>().Notes, n => EF.Property<int>(n, "CustomerId"), ada)
+                .ToListAsync(ct);
 
         (await CachedRead.IsEvictedBy(ByProperty, _ordersByCustomer.For(ada))).Should().BeTrue();
         (await CachedRead.IsEvictedBy(ByProperty, _ordersByCustomer.For(bob))).Should().BeFalse();
@@ -95,9 +104,10 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
         var (ada, _) = await AddCustomersWithOrdersAndNotes(db);
 
         Task Orders(SluiceReads read, CancellationToken ct) =>
-            read.Children(db.Orders, o => o.CustomerId, ada).ToListAsync(ct);
+            read.Children(read.Db<ShopDb>().Orders, o => o.CustomerId, ada).ToListAsync(ct);
         Task Notes(SluiceReads read, CancellationToken ct) =>
-            read.Children(db.Notes, n => EF.Property<int>(n, "CustomerId"), ada).ToListAsync(ct);
+            read.Children(read.Db<ShopDb>().Notes, n => EF.Property<int>(n, "CustomerId"), ada)
+                .ToListAsync(ct);
 
         (await CachedRead.IsEvictedBy(Orders, db.Orders.AllDependencies())).Should().BeTrue();
         (await CachedRead.IsEvictedBy(Notes, db.Notes.AllDependencies())).Should().BeTrue();

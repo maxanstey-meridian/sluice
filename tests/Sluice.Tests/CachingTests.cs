@@ -57,4 +57,29 @@ public sealed class CachingTests
         summary.Runs("a").Should().Be(1);
         report.Runs("a").Should().Be(1);
     }
+
+    [Fact]
+    public async Task A_keyless_query_caches_one_value_until_what_it_read_changes()
+    {
+        await using var node = new SluiceNode();
+        var everything = new Query<string>("caching-everything");
+        var runs = 0;
+
+        Task<string> Get() =>
+            node
+                .Cache.GetOrSetAsync(
+                    everything,
+                    (read, _) =>
+                    {
+                        read.From(_rows.All);
+                        return Task.FromResult($"all#{++runs}");
+                    }
+                )
+                .AsTask();
+
+        (await Get()).Should().Be("all#1");
+        (await Get()).Should().Be("all#1");
+        await node.Cache.InvalidateAsync(_rows.For(7));
+        (await Get()).Should().Be("all#2");
+    }
 }

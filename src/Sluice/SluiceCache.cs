@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Transactions;
 using Sluice.Infrastructure;
 using ZiggyCreatures.Caching.Fusion;
 
@@ -12,12 +14,18 @@ public sealed class SluiceCache
     internal const string CacheName = "sluice";
 
     private readonly IFusionCache _cache;
+    private readonly IServiceProvider _services;
     private readonly FusionCacheEntryOptions _entryOptions;
     private readonly FusionCacheEntryOptions _tagOptions;
 
-    internal SluiceCache(IFusionCache cache, FusionCacheEntryOptions tagOptions)
+    internal SluiceCache(
+        IFusionCache cache,
+        IServiceProvider services,
+        FusionCacheEntryOptions tagOptions
+    )
     {
         _cache = cache;
+        _services = services;
         _tagOptions = tagOptions;
 
         // Per-call pins: every one of these would let a compute outlive its caller or stamp its entry at
@@ -41,7 +49,10 @@ public sealed class SluiceCache
     /// </summary>
     /// <param name="query">The query whose entry to read.</param>
     /// <param name="key">The query key.</param>
-    /// <param name="compute">Computes the value on a miss, recording what it reads through <c>read.From</c>.</param>
+    /// <param name="compute">
+    /// Computes the value on a miss, recording what it reads through <c>read.From</c>. It runs outside any ambient
+    /// transaction, so it reads what's committed.
+    /// </param>
     /// <param name="ct">
     /// Passed to <paramref name="compute"/>, so cancelling cancels the compute; the call returns once the compute
     /// has ended. Waiting on another caller's compute for the same key can't be cancelled.
@@ -54,7 +65,12 @@ public sealed class SluiceCache
     /// The compute was cancelled, or <paramref name="ct"/> was already cancelled, in which case no cached value is
     /// returned and nothing is computed.
     /// </exception>
-    public async ValueTask<TValue> GetOrSetAsync<TKey, TValue>(
+    [SuppressMessage(
+        "ApiDesign",
+        "RS0026:Do not add multiple public overloads with optional parameters",
+        Justification = "The overloads differ in their query type, so a call can't bind to the wrong one."
+    )]
+    public ValueTask<TValue> GetOrSetAsync<TKey, TValue>(
         Query<TKey, TValue> query,
         TKey key,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,
@@ -64,20 +80,54 @@ public sealed class SluiceCache
     {
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(compute);
+        ThrowIfNested(query.Name);
+        return GetOrSetAsync(query.Name, query.EntryKey(key), query.Duration, compute, ct);
+    }
 
-        // On a hit the outer compute couldn't learn the inner value's dependencies, so they'd be lost. That holds
-        // inside a fused fetch too, so this ignores whether the call is in one.
-        if (ActiveCompute.Violate(query.Name, static (name, _) => Nested(name)) is { } nested)
-        {
-            throw nested;
-        }
+    /// <summary>
+    /// Returns the cached value of a query with no key, or runs <paramref name="compute"/> and caches its result,
+    /// tagged with every dependency it recorded through <c>read.From</c>.
+    /// </summary>
+    /// <param name="query">The query whose entry to read.</param>
+    /// <param name="compute">
+    /// Computes the value on a miss, recording what it reads through <c>read.From</c>. It runs outside any ambient
+    /// transaction, so it reads what's committed.
+    /// </param>
+    /// <param name="ct">
+    /// Passed to <paramref name="compute"/>, so cancelling cancels the compute; the call returns once the compute
+    /// has ended. Waiting on another caller's compute can't be cancelled.
+    /// </param>
+    /// <inheritdoc cref="GetOrSetAsync{TKey, TValue}(Query{TKey, TValue}, TKey, Func{SluiceReads, CancellationToken, Task{TValue}}, CancellationToken)" path="/exception"/>
+    [SuppressMessage(
+        "ApiDesign",
+        "RS0026:Do not add multiple public overloads with optional parameters",
+        Justification = "The overloads differ in their query type, so a call can't bind to the wrong one."
+    )]
+    public ValueTask<TValue> GetOrSetAsync<TValue>(
+        Query<TValue> query,
+        Func<SluiceReads, CancellationToken, Task<TValue>> compute,
+        CancellationToken ct = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(compute);
+        ThrowIfNested(query.Name);
+        return GetOrSetAsync(query.Name, query.Name, query.Duration, compute, ct);
+    }
 
+    private async ValueTask<TValue> GetOrSetAsync<TValue>(
+        string name,
+        string entryKey,
+        TimeSpan? duration,
+        Func<SluiceReads, CancellationToken, Task<TValue>> compute,
+        CancellationToken ct
+    )
+    {
         // An already-cancelled caller gets neither a hit nor a compute.
         ct.ThrowIfCancellationRequested();
 
-        var entryKey = query.EntryKey(key);
-        var options = OptionsFor(query);
-        var reads = new SluiceReads(ct);
+        var options = OptionsFor(name, duration);
+        var reads = new SluiceReads(name, _services, ct);
 
         // The caller's token goes to the compute, not to FusionCache: on a cancelled token FusionCache throws
         // without awaiting its factory, so the caller would resume while the compute still uses its resources.
@@ -141,24 +191,33 @@ public sealed class SluiceCache
     public ValueTask ClearAsync(CancellationToken ct = default) =>
         _cache.ClearAsync(allowFailSafe: false, token: ct);
 
-    private FusionCacheEntryOptions OptionsFor<TKey, TValue>(Query<TKey, TValue> query)
-        where TKey : notnull
+    private FusionCacheEntryOptions OptionsFor(string name, TimeSpan? duration)
     {
-        if (query.Duration is not { } duration)
+        if (duration is not { } value)
         {
             return _entryOptions;
         }
 
-        var options = _entryOptions.Duplicate(duration);
-        EntryLifetime.EnsureWithin(options, _tagOptions, $"Query '{query.Name}'");
+        var options = _entryOptions.Duplicate(value);
+        EntryLifetime.EnsureWithin(options, _tagOptions, $"Query '{name}'");
         return options;
     }
 
-    private static InvalidOperationException Nested(string queryName) =>
-        new(
-            $"SluiceCache.GetOrSetAsync for query '{queryName}' was called from inside another compute. "
-                + "Read the underlying data directly in the outer compute and record its dependencies there."
-        );
+    // On a hit the outer compute couldn't learn the inner value's dependencies, so they'd be lost. That holds inside a
+    // fused fetch too, so this ignores whether the call is in one.
+    private static void ThrowIfNested(string queryName)
+    {
+        if (ActiveCompute.Current is { } outer)
+        {
+            throw ActiveCompute.Violate(
+                outer,
+                new InvalidOperationException(
+                    $"SluiceCache.GetOrSetAsync for query '{queryName}' was called from inside another compute. "
+                        + "Read the underlying data directly in the outer compute and record its dependencies there."
+                )
+            );
+        }
+    }
 
     private static async Task<TValue> ComputeAsync<TValue>(
         SluiceReads reads,
@@ -171,25 +230,40 @@ public sealed class SluiceCache
 
         TValue value = default!;
         string[] tags;
-        try
+
+        // A cached value is served to every caller, so it mustn't see a transaction's uncommitted rows. Connections the
+        // compute opens don't enlist in the caller's ambient transaction.
+        using (
+            Transaction.Current is null
+                ? null
+                : new TransactionScope(
+                    TransactionScopeOption.Suppress,
+                    TransactionScopeAsyncFlowOption.Enabled
+                )
+        )
         {
-            value = await compute(reads, ct).ConfigureAwait(false);
-        }
-        catch (Exception) when (reads.HasViolation)
-        {
-            // The guard violation is rethrown once GetOrSetAsync returns.
-        }
-        finally
-        {
-            tags = reads.Close();
+            try
+            {
+                value = await compute(reads, ct).ConfigureAwait(false);
+            }
+            catch (Exception) when (reads.HasViolation)
+            {
+                // The guard violation is rethrown once GetOrSetAsync returns.
+            }
+            finally
+            {
+                tags = reads.Close();
+                await reads.ReleaseAsync().ConfigureAwait(false);
+            }
         }
 
         if (tags.Length == 0)
         {
             reads.Violate(
                 new InvalidOperationException(
-                    "The compute recorded no dependencies, so nothing could ever invalidate its value. "
-                        + "Record what it reads with read.From(...), or use IFusionCache directly for values with no tracked dependencies."
+                    "The compute recorded no dependencies, so nothing could ever invalidate its value. Record what it "
+                        + "reads with read.From(...); with EF Core, query a context from read.Db<TContext>(), "
+                        + "configured with UseSluice. For values with no tracked dependencies, use IFusionCache directly."
                 )
             );
         }

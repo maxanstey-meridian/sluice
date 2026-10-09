@@ -16,6 +16,13 @@ public sealed class PostgresFixture : IAsyncLifetime
         "postgres:17-alpine"
     ).Build();
 
+    /// <summary>The started fixture, which a node's own <see cref="ShopDb"/> factory connects to.</summary>
+    public static PostgresFixture Running =>
+        _running
+        ?? throw new InvalidOperationException("No test in the Postgres collection is running.");
+
+    private static PostgresFixture? _running;
+
     public string ConnectionString => _server.GetConnectionString();
 
     /// <summary>
@@ -57,6 +64,7 @@ public sealed class PostgresFixture : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await _server.StartAsync();
+        _running = this;
         await using var db = CreateDb();
         await db.Database.EnsureCreatedAsync();
         await db.Database.ExecuteSqlRawAsync(

@@ -1,19 +1,26 @@
 # EF Core
 
 With `Sluice.EntityFrameworkCore`, you don't declare sources for your entities: Sluice works
-them out from the EF model. Reads go through three helpers on `read`, and saves invalidate what
-they changed by themselves once they commit. Underneath it's the same API as everywhere else:
-the helpers record ordinary dependencies, and saves call `SluiceCache.InvalidateAsync`.
+them out from the EF model. Inside a compute you query a context of the compute's own with
+ordinary LINQ, and Sluice records every table each query reads. Saves and bulk updates
+invalidate what they changed by themselves once they commit. Underneath it's the same API as
+everywhere else: queries record ordinary dependencies, and writes call
+`SluiceCache.InvalidateAsync`.
 
 ## Setup
 
 ```csharp
 builder.Services.AddSluice();
-builder.Services.AddDbContext<ShopDb>(
+builder.Services.AddDbContextFactory<ShopDb>(
     (services, options) => options.UseNpgsql(connectionString).UseSluice(services)
 );
 ```
 
+- Register the context with `AddDbContextFactory` or `AddPooledDbContextFactory`. Each compute
+  gets a context of its own from the factory (see [Reading](#reading)), and the factory also
+  registers `ShopDb` itself, so the rest of your code injects it as before. If you register the
+  context with `AddDbContext` or `AddDbContextPool` too, `UseSluice` runs once per context
+  either way.
 - `UseSluice` needs `SluiceCache` (`AddSluice`) and logging registered. ASP.NET Core and the
   Generic Host register logging; a bare `ServiceCollection` needs `AddLogging()`. Without
   either, `UseSluice` throws `InvalidOperationException`.
@@ -24,7 +31,7 @@ builder.Services.AddDbContext<ShopDb>(
 - Building options by hand works too: `UseSluice` has a generic overload, so
   `new DbContextOptionsBuilder<ShopDb>().UseNpgsql(connectionString).UseSluice(services).Options`
   is a `DbContextOptions<ShopDb>`.
-- A context that calls `UseInternalServiceProvider` can't use Sluice. Strict reads need an
+- A context that calls `UseInternalServiceProvider` can't use Sluice. Recording reads needs an
   interceptor shared by every context, and EF refuses one on such a context.
 
 ### Interceptor order
@@ -35,7 +42,7 @@ changes entities at that point, such as soft delete, auditing or an outbox, or S
 those changes:
 
 ```csharp
-builder.Services.AddDbContext<ShopDb>(
+builder.Services.AddDbContextFactory<ShopDb>(
     (services, options) =>
         options
             .UseNpgsql(connectionString)
@@ -45,92 +52,143 @@ builder.Services.AddDbContext<ShopDb>(
 ```
 
 Interceptors added in the context's `OnConfiguring` always run after those in the
-`AddDbContext` options, so after Sluice. Add such interceptors where you call `UseSluice`
+registration's options, so after Sluice. Add such interceptors where you call `UseSluice`
 instead. The same goes for a query expression interceptor of your own: one added after
 `UseSluice`, or in `OnConfiguring`, rewrites queries after Sluice has
-[checked them](/guides/strict-reads).
+[worked out what they read](#what-a-query-records).
 
 ### Pooling and factories
 
 `AddDbContextPool((services, options) => ...)`, `AddPooledDbContextFactory` and
-`AddDbContextFactory` all work. Each use of a pooled context invalidates what it commits, and
-nothing an earlier use left uncommitted. Contexts sharing a transaction need nothing more, as
+`AddDbContextFactory` all work for writes. Each use of a pooled context invalidates what it
+commits, and nothing an earlier use left uncommitted. `read.Db` needs one of the two factories;
+with `AddDbContextPool`, register a factory beside it. Contexts sharing a transaction need nothing more, as
 long as each uses `UseSluice` with the same `SluiceCache`.
 See [Contexts sharing a transaction](/guides/transactions#contexts-sharing-a-transaction).
 
 ## Reading
 
-Inside a compute:
+Inside a compute, `read.Db<ShopDb>()` gives you the compute's own context. Query it with
+ordinary LINQ:
+
+```csharp
+var db = read.Db<ShopDb>();
+
+var customer = await db.Customers
+    .Include(customer => customer.Address)
+    .SingleOrDefaultAsync(customer => customer.Id == customerId, ct);
+
+var orders = await db.Orders
+    .Where(order => order.CustomerId == customerId)
+    .OrderByDescending(order => order.PlacedAt)
+    .Select(order => new OrderSummary(order.Id, order.Total, order.Coupon!.Code))
+    .ToListAsync(ct);
+```
+
+The context is made from your factory the first time the compute asks for it, and the same one
+comes back for every call in that compute. It's disposed when the compute ends. It holds nothing
+from outside the compute, so it can't hand back your request's tracked entities or their unsaved
+edits. Its queries don't track unless you ask (`AsTracking()`), and it isn't in your request's
+transaction, so it reads what's committed.
+
+### What a query records
+
+Each query records every table it reads, and a write to any of them evicts the value. Sluice
+works that out from the query when EF compiles it, so everything EF can express counts:
+
+- the sets it starts from, and those it joins, unions or reads in a subquery;
+- every navigation it follows, in a filter, a projection or an `Include`, by property, through
+  `EF.Property`, through a cast or an interface, or by name;
+- many-to-many navigations, which read the join table too;
+- what EF adds by itself: [auto-included](https://learn.microsoft.com/ef/core/querying/related-data/eager#model-configuration-for-auto-including-navigations)
+  navigations, unless you call `IgnoreAutoIncludes()`, and each type's query filters, unless you
+  call `IgnoreQueryFilters()`;
+- `Find`, explicit loading (`Entry(order).Reference(o => o.Customer).LoadAsync()`) and compiled
+  queries.
+
+Owned types and JSON columns are stored in their owner's row, so they count as the owner.
+
+A query records the whole of each table, so in the example above, a change to *any* customer
+or order evicts the value. That's always correct, just broad. When it's too broad, narrow it.
+So you can see which queries do this, Sluice logs each one the first time it runs, at
+`Information`, naming the query and the types it reads whole.
+
+### Narrowing to rows
+
+Two helpers on `read` start a query that depends on fewer rows:
 
 ```csharp
 var customer = await read.Entity(db.Customers, customerId).SingleOrDefaultAsync(ct);
 
 var orders = await read.Children(db.Orders, order => order.CustomerId, customerId)
     .OrderByDescending(order => order.PlacedAt)
-    .Select(order => new OrderSummary(order.Id, order.Total))
+    .Select(order => new OrderSummary(order.Id, order.Total, order.Coupon!.Code))
     .ToListAsync(ct);
-
-var countries = await read.All(db.Countries).ToListAsync(ct);
 ```
 
-| Helper | Reads | Evicted by a write to |
+| Query | Reads | Evicted by a write to |
 |---|---|---|
-| `read.Entity(set, key)` | the row with that primary key | that row |
-| `read.Children(set, fk, key)` | the rows whose foreign key is `key` | any of those rows, or a row joining or leaving the set |
-| `read.All(set)` | every row | any row of the type |
+| `db.Customers…` | whatever it filters | any customer |
+| `read.Entity(db.Customers, key)` | the row with that primary key | that row |
+| `read.Children(db.Orders, fk, key)` | the rows whose foreign key is `key` | any of those rows, or a row joining or leaving the set |
 
-Each returns an `IQueryable<T>` you can filter, order, page and project. Finish it with
-`Single`, `SingleOrDefault`, `ToList` and so on as usual. A read that finds nothing still
-depends on what it looked for, so inserting the row later evicts the cached "not found".
+Each returns an `IQueryable<T>` you can filter, order, page and project, on the context
+`read.Db` gave you. Only the helper's own type is narrowed: the `Coupon` navigation in the second
+query still depends on every coupon. A read that finds nothing still depends on what it looked
+for, so inserting the row later evicts the cached "not found". The helpers never track and don't
+load auto-included navigations.
 
 ### Keys
 
 - Pass the key as the exact .NET type the model uses: the primary key's type for `Entity`, the
   foreign key property's for `Children` (nullable or not). A typed id with a value converter is
   passed as the typed id. Any other type, such as `1L` for an `int` key, throws
-  `ArgumentException` naming the type expected.
+  `ArgumentException` naming the type expected. The compiler can't check these keys: the type
+  comes from the EF model.
 - `Entity` doesn't support composite primary keys: it throws `NotSupportedException`. Use
-  `Children` or `All`, or a [fused fetch](/guides/strict-reads#the-declared-route).
+  `Children`, or a plain query.
 - `Children`'s foreign key can be the property (`o => o.CustomerId`), a shadow property named
   by a constant (`o => EF.Property<CustomerId>(o, "CustomerId")`), or a reference navigation to
   the parent (`o => o.Customer`). All three record the same dependency.
 
 ### What's refused
 
-- **Types not mapped to a table**: keyless types, and types mapped with `ToView`, `ToFunction`
-  or `ToSqlQuery`. No tracked write ever invalidates them, so the helpers throw
-  `NotSupportedException`. Read them through a
-  [fused fetch](/guides/strict-reads#the-declared-route) with a source you declare, and
-  invalidate that by hand. An abstract TPC base type is readable when every concrete type under
-  it has a table.
-- **A context without `UseSluice`**: the helpers throw `InvalidOperationException`, since the
-  strict-read checks wouldn't run there.
-- **Reading inside a transaction**, inside a compute. See [Transactions](/guides/transactions).
-- **Reading beyond the helper's own rows**: joins, navigations, `Include` and more. See
-  [Strict Reads](/guides/strict-reads).
-- **Skip navigations** (many-to-many without the join entity in your query). Read the join
-  entity with `read.Children`.
+Inside a compute, these throw `InvalidOperationException`, because Sluice can't tell what they
+read or nothing would ever evict them. [Strict Reads](/guides/strict-reads) has the list, and
+how to read them anyway:
+
+- raw SQL (`FromSql`, `SqlQuery`), table-valued functions and database functions of your own;
+- types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
+  `ToSqlQuery`. No tracked write ever invalidates them. An abstract TPC base type is fine when
+  every concrete type under it has a table;
+- a query filter that reads the context's state, such as a tenant id;
+- entities that load lazily, or hold their context: select the values you need instead;
+- a query on any context other than `read.Db`'s, and reading inside a transaction. See
+  [Transactions](/guides/transactions);
+- writes.
+
+The helpers also refuse types not mapped to a table, with `NotSupportedException`, and a
+context without `UseSluice`.
 
 ### Cache projections or detached entities
 
-The helpers' queries never track. A tracked query would hand back the context's own object,
-with the caller's unsaved edits, and cache that for everyone. Cached entities aren't attached
-to any context; to edit one, load it again on your own context. Every caller also gets the same
-object, so never modify one; see
+Cached entities aren't attached to any context; to edit one, load it again on your own context.
+Every caller also gets the same object, so never modify one; see
 [Shared instances](/guides/configuration#shared-instances-and-auto-clone).
 
 ## Writing
 
 Saves through EF's change tracker just work. Once a save commits, Sluice evicts the cached
 reads of every row it inserted, updated or deleted, and of the lists those rows were in or
-moved between. One case is broader: when a delete makes the database delete rows EF never
+moved between, and every plain query of those tables. [Bulk updates](#bulk-updates-and-deletes)
+work too. One case is broader: when a delete makes the database delete rows EF never
 loaded, or set their foreign key to null (`ON DELETE CASCADE` or `SET NULL` in your model),
 Sluice can't tell which rows those were. It evicts every cached read of those types instead.
 
 In detail, once a save has committed, Sluice invalidates, for each row it added, changed or
 deleted:
 
-- the row itself: `Entity` readers of it, and `All` readers of its type;
+- the row itself: `Entity` readers of it, and every plain query of its type;
 - the parent it had before the save and the one it has after: `Children` readers of each. A
   null foreign key has no parent, so setting a key to or from null evicts just the one;
 - for a deleted row, its own children: `Children` readers of every foreign key that points at
@@ -155,7 +213,7 @@ miss rows another writer adds in between. Instead it reads each relationship's d
 from the model. For each type the database can reach that way, following `CASCADE` to any
 depth, it evicts:
 
-- every `Entity` and `All` reader of the type;
+- every `Entity` reader and plain query of the type;
 - every `Children` reader of the foreign key the database followed to reach it. For the deleted
   row's direct children, only the lists under the deleted row are evicted;
 - every `Children` reader of the type's other foreign keys too, since a deleted or nulled row
@@ -166,8 +224,8 @@ depth, it evicts:
 EF hasn't loaded, so they add nothing. Rows EF has loaded are saved, and invalidated, like any
 other edit.
 
-This is coarse on purpose: deleting one customer evicts every cached `Entity` and `All` read of
-orders and order lines, whichever customer they belong to. Cascades the model doesn't know
+This is coarse on purpose: deleting one customer evicts every cached `Entity` read and plain
+query of orders and order lines, whichever customer they belong to. Cascades the model doesn't know
 about, from a trigger or a database that differs from the model, aren't seen: invalidate what
 they touch by hand.
 
@@ -177,11 +235,11 @@ they touch by hand.
 |---|---|
 | Owned types, JSON columns | the owner, as a modified row. Readers only see owned values through it |
 | TPH, TPT and TPC | the base type's dependencies, so a read and a write of any type in the hierarchy see each other |
-| Many-to-many join rows | the join entity's foreign keys, like any row. Reading through skip navigations isn't supported |
-| Composite keys | the row's `All` and `Children` readers (there are no `Entity` reads of it) |
-| Types mapped to views | their dependencies as usual, though no helper reads them; the rest of the save is unaffected |
+| Many-to-many join rows | the join entity, like any row, so queries through the many-to-many navigation are evicted |
+| Composite keys | the row's `Children` readers and plain queries of its type (there are no `Entity` reads of it) |
+| Types mapped to views | their dependencies as usual, though nothing reads them in a compute; the rest of the save is unaffected |
 | Alternate keys | a foreign key to one is keyed by that key's value |
-| Table splitting | each type's own dependencies. Two types sharing a non-key column don't evict each other: saving one leaves the other's `Entity` and `All` readers cached |
+| Table splitting | each type's own dependencies. Two types sharing a non-key column don't evict each other: saving one leaves the other's `Entity` readers and plain queries cached |
 
 ### Key folding
 
@@ -218,32 +276,42 @@ every `Children` list of the row's foreign keys, under every parent. Let the cha
 the changes. A real foreign key that equals the sentinel, such as a seeded key 0, is treated the
 same way: still correct, just broader.
 
+### Bulk updates and deletes
+
+`ExecuteUpdate` and `ExecuteDelete` on a `UseSluice` context need no Sluice code either. Sluice
+can't tell which rows they changed, so once one commits it evicts every cached read of the
+table it wrote:
+
+| Statement | Evicts |
+|---|---|
+| `ExecuteUpdate` | every read of the type, and every `Children` list of its foreign keys, since rows may have moved between parents |
+| `ExecuteDelete` | the same, every `Children` list pointing at the type, and what the delete [cascades into](#database-cascades) |
+
+They follow the same timing as saves: inside a transaction, at its commit or rollback. EF
+doesn't tell Sluice which table a bulk statement wrote, so Sluice finds it in the statement's
+SQL. A column or alias named like another table evicts that table's reads too, which is safe.
+
 ## Writes Sluice can't see
 
 Anything that writes without a `UseSluice` context goes unseen: another service, a cron job,
-SQL run by hand, a database trigger, a second context without `UseSluice`, `ExecuteUpdate`,
-`ExecuteDelete`, `ExecuteSql` and raw ADO.NET. After each one commits, invalidate by hand, or the
-old value stays cached until it expires. Keep durations short for data written outside your
-app. From .NET, ask the EF set for its dependencies:
+SQL run by hand, a database trigger, a context without `UseSluice`, `ExecuteSql` and raw
+ADO.NET. After each one commits, invalidate by hand, or the old value stays cached until it
+expires. Keep durations short for data written outside your app. From .NET, ask the EF set for
+its dependencies:
 
 ```csharp
-await db.Orders.Where(order => order.Archived).ExecuteDeleteAsync(ct);
+await db.Database.ExecuteSqlAsync($"DELETE FROM orders WHERE archived", ct);
 await cache.InvalidateAsync(db.Orders.AllDependencies());
 ```
 
 | Dependency | Evicts |
 |---|---|
-| `set.AllDependencies()` | every `Entity`, `Children` and `All` reader of the type, and what a delete of it [cascades into](#database-cascades) |
-| `set.Dependency(key)` | `Entity` readers of that row and `All` readers of the type, but **not** `Children` readers of its parent |
+| `set.AllDependencies()` | every read of the type, and what a delete of it [cascades into](#database-cascades) |
+| `set.Dependency(key)` | `Entity` readers of that row and plain queries of the type, but **not** `Children` readers of its parent |
 
 `set.Dependency(key)` can't evict `Children` readers because Sluice can't see the row's
 foreign keys without loading it. If something reads the rows you changed through `Children`,
 use `set.AllDependencies()`.
-
-Bulk-deleting parents changes their children too, and `set.AllDependencies()` covers that: after
-an `ExecuteDelete` on customers, `db.Customers.AllDependencies()` also evicts readers of the
-orders and order lines the database deleted, exactly as a
-[tracked delete](#database-cascades) does.
 
 EF dependencies batch with declared ones:
 

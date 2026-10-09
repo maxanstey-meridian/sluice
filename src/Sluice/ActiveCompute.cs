@@ -3,9 +3,9 @@ using System.ComponentModel;
 namespace Sluice.Infrastructure;
 
 /// <summary>
-/// The ambient "a compute is running" flag: the open <see cref="SluiceReads"/> of the current flow, and whether the
-/// flow is in one of its fused fetches. For Sluice's own packages, which check reads against it; it isn't a supported
-/// API, and may change in any release.
+/// The ambient "a compute is running" flag: the open <see cref="SluiceReads"/> of the current flow, whether the flow
+/// is in one of its fused fetches, and what the compute holds until it ends. For Sluice's own packages, which check
+/// and record reads against it; it isn't a supported API, and may change in any release.
 /// </summary>
 [EditorBrowsable(EditorBrowsableState.Never)]
 public static class ActiveCompute
@@ -23,39 +23,68 @@ public static class ActiveCompute
     }
 
     /// <summary>
-    /// Records a guard violation on the compute running in the current flow, so that call caches nothing and throws
-    /// it even if the compute catches it, and returns it for the caller to throw. <paramref name="violation"/> gets
-    /// <paramref name="state"/> and whether this flow is inside a fused fetch of that compute, and returns the
-    /// violation, or null when there is none. It isn't called, and this returns null, when no compute is running, so
-    /// a check on a hot path costs nothing there: pass a static lambda and its input as state, so nothing is
-    /// allocated either.
+    /// The reads of the compute running in the current flow, or null outside one. A check on a hot path reads this
+    /// first, so it costs one lookup outside a compute.
     /// </summary>
-    /// <remarks>
-    /// A fused fetch (<see cref="SluiceReads.From{T}(IEnumerable{Dependency}, Func{CancellationToken, Task{T}})"/>)
-    /// is a declared read: the dependencies recorded with it cover whatever it reads. So a check of where a read
-    /// comes from may let it through there; every other check ignores it. The fetch's flow, and the tasks it starts,
-    /// are inside it (see <see cref="Fetch{T}"/>); the rest of the compute, and a compute started from the fetch's
-    /// flow, are outside it.
-    /// </remarks>
-    /// <typeparam name="TState">The check's input.</typeparam>
-    /// <param name="state">The check's input, passed to <paramref name="violation"/>.</param>
-    /// <param name="violation">The check: given the state and whether the flow is in a fused fetch.</param>
-    /// <returns>The violation recorded, or null.</returns>
-    public static Exception? Violate<TState>(TState state, Func<TState, bool, Exception?> violation)
+    public static SluiceReads? Reads => Current;
+
+    /// <summary>
+    /// Whether the current flow is in a fused fetch of <paramref name="reads"/>' compute
+    /// (<see cref="SluiceReads.From{T}(IEnumerable{Dependency}, Func{CancellationToken, Task{T}})"/>). A fetch is a
+    /// declared read: the dependencies recorded with it cover whatever it reads, so a check of where a read comes
+    /// from may let it through there; every other check ignores it. The fetch's flow, and the tasks it starts, are
+    /// inside it (see <see cref="Fetch{T}"/>); the rest of the compute, and a compute started from the fetch's flow,
+    /// are outside it.
+    /// </summary>
+    /// <param name="reads">The compute's reads.</param>
+    public static bool InFetch(SluiceReads reads) => _fetch.Value == reads;
+
+    /// <summary>The name of the query <paramref name="reads"/>' compute is computing, for messages.</summary>
+    /// <param name="reads">The compute's reads.</param>
+    public static string QueryName(SluiceReads reads)
     {
+        ArgumentNullException.ThrowIfNull(reads);
+        return reads.Query;
+    }
+
+    /// <summary>
+    /// Records a guard violation on <paramref name="reads"/>' compute, so that call caches nothing and throws it even
+    /// if the compute catches it, and returns it for the caller to throw.
+    /// </summary>
+    /// <param name="reads">The compute's reads.</param>
+    /// <param name="violation">The violation.</param>
+    /// <returns><paramref name="violation"/>.</returns>
+    public static Exception Violate(SluiceReads reads, Exception violation)
+    {
+        ArgumentNullException.ThrowIfNull(reads);
         ArgumentNullException.ThrowIfNull(violation);
-        if (Current is not { } reads)
-        {
-            return null;
-        }
+        reads.Violate(violation);
+        return violation;
+    }
 
-        var exception = violation(state, _fetch.Value == reads);
-        if (exception is not null)
-        {
-            reads.Violate(exception);
-        }
+    /// <summary>
+    /// The <typeparamref name="T"/> that <paramref name="reads"/>' compute holds, made by <paramref name="create"/>
+    /// from the application's services on first use. The compute disposes it when it ends.
+    /// </summary>
+    /// <typeparam name="T">The resource; the compute holds one of each type.</typeparam>
+    /// <param name="reads">The compute's reads.</param>
+    /// <param name="create">Makes the resource from the application's services.</param>
+    /// <exception cref="InvalidOperationException">The compute has already returned.</exception>
+    public static T Hold<T>(SluiceReads reads, Func<IServiceProvider, T> create)
+        where T : class, IAsyncDisposable
+    {
+        ArgumentNullException.ThrowIfNull(reads);
+        ArgumentNullException.ThrowIfNull(create);
+        return reads.Hold(create);
+    }
 
-        return exception;
+    /// <summary>Whether <paramref name="reads"/>' compute holds <paramref name="resource"/>.</summary>
+    /// <param name="reads">The compute's reads.</param>
+    /// <param name="resource">The resource.</param>
+    public static bool Holds(SluiceReads reads, object resource)
+    {
+        ArgumentNullException.ThrowIfNull(reads);
+        return reads.Holds(resource);
     }
 
     /// <summary>

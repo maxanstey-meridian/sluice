@@ -22,12 +22,12 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         var read = await node.Cache.GetOrSetAsync(
             _customer,
             ada,
-            (read, ct) => read.Entity(db.Customers, ada).SingleOrDefaultAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Customers, ada).SingleOrDefaultAsync(ct)
         );
 
         read!.Name.Should().Be("Ada");
         Task ReadAda(SluiceReads read, CancellationToken ct) =>
-            read.Entity(db.Customers, ada).SingleAsync(ct);
+            read.Entity(read.Db<ShopDb>().Customers, ada).SingleAsync(ct);
         (await CachedRead.IsEvictedBy(ReadAda, db.Customers.Dependency(ada))).Should().BeTrue();
         (await CachedRead.IsEvictedBy(ReadAda, db.Customers.AllDependencies())).Should().BeTrue();
         (await CachedRead.IsEvictedBy(ReadAda, db.Customers.Dependency(bob))).Should().BeFalse();
@@ -44,34 +44,19 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         var read = await node.Cache.GetOrSetAsync(
             _customer,
             missing,
-            (read, ct) => read.Entity(db.Customers, missing).SingleOrDefaultAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Customers, missing).SingleOrDefaultAsync(ct)
         );
 
         read.Should().BeNull();
         (
             await CachedRead.IsEvictedBy(
-                (read, ct) => read.Entity(db.Customers, missing).SingleOrDefaultAsync(ct),
+                (read, ct) =>
+                    read.Entity(read.Db<ShopDb>().Customers, missing).SingleOrDefaultAsync(ct),
                 db.Customers.Dependency(missing)
             )
         )
             .Should()
             .BeTrue();
-    }
-
-    [Fact]
-    public async Task An_All_read_is_evicted_by_any_key_of_its_set_and_by_AllDependencies_but_not_by_another_set()
-    {
-        await using var node = new SluiceNode();
-        await using var db = postgres.CreateDb(node);
-        var (ada, _) = await db.AddCustomers();
-
-        Task ReadAll(SluiceReads read, CancellationToken ct) =>
-            read.All(db.Customers).ToListAsync(ct);
-
-        (await CachedRead.IsEvictedBy(ReadAll, db.Customers.Dependency(ada))).Should().BeTrue();
-        (await CachedRead.IsEvictedBy(ReadAll, db.Customers.Dependency(-1))).Should().BeTrue();
-        (await CachedRead.IsEvictedBy(ReadAll, db.Customers.AllDependencies())).Should().BeTrue();
-        (await CachedRead.IsEvictedBy(ReadAll, db.Orders.AllDependencies())).Should().BeFalse();
     }
 
     [Fact]
@@ -83,7 +68,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
 
         Task Mixed(SluiceReads read, CancellationToken ct) =>
             Task.WhenAll(
-                read.Entity(db.Customers, ada).SingleAsync(ct),
+                read.Entity(read.Db<ShopDb>().Customers, ada).SingleAsync(ct),
                 read.From(_greetings.For("ada"), _ => Task.FromResult("hello"))
             );
         (await CachedRead.IsEvictedBy(Mixed, db.Customers.Dependency(ada))).Should().BeTrue();
@@ -103,7 +88,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await db.SaveChangesAsync();
 
         Task<User> ReadGrace(SluiceReads read, CancellationToken ct) =>
-            read.Entity(db.Users, new UserId(7)).SingleAsync(ct);
+            read.Entity(read.Db<ShopDb>().Users, new UserId(7)).SingleAsync(ct);
 
         var grace = await node.Cache.GetOrSetAsync(_user, 7, ReadGrace);
         grace.Name.Should().Be("Grace");
@@ -127,7 +112,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await db.SaveChangesAsync();
 
         Task<Invoice> ReadInvoice(SluiceReads read, CancellationToken ct) =>
-            read.Entity(db.Invoices, new InvoiceNo(41)).SingleAsync(ct);
+            read.Entity(read.Db<ShopDb>().Invoices, new InvoiceNo(41)).SingleAsync(ct);
 
         var invoice = await node.Cache.GetOrSetAsync(_invoice, 41, ReadInvoice);
         invoice.Payee.Should().Be("Ada");
@@ -151,7 +136,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
 
         (
             await CachedRead.IsEvictedBy(
-                (read, ct) => read.Entity(db.Dogs, rex.Id).SingleAsync(ct),
+                (read, ct) => read.Entity(read.Db<ShopDb>().Dogs, rex.Id).SingleAsync(ct),
                 db.Animals.Dependency(rex.Id)
             )
         )
@@ -159,7 +144,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .BeTrue();
         (
             await CachedRead.IsEvictedBy(
-                (read, ct) => read.All(db.Animals).ToListAsync(ct),
+                (read, ct) => read.Db<ShopDb>().Animals.ToListAsync(ct),
                 db.Dogs.Dependency(rex.Id)
             )
         )
@@ -167,7 +152,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .BeTrue();
         (
             await CachedRead.IsEvictedBy(
-                (read, ct) => read.Entity(db.Circles, circle.Id).SingleAsync(ct),
+                (read, ct) => read.Entity(read.Db<ShopDb>().Circles, circle.Id).SingleAsync(ct),
                 db.Shapes.Dependency(circle.Id)
             )
         )
@@ -175,7 +160,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .BeTrue("an abstract TPC root has no table, but each of its concrete types does");
         (
             await CachedRead.IsEvictedBy(
-                (read, ct) => read.All(db.Shapes).ToListAsync(ct),
+                (read, ct) => read.Db<ShopDb>().Shapes.ToListAsync(ct),
                 db.Circles.AllDependencies()
             )
         )
@@ -202,9 +187,11 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             customer.Id,
             async (read, ct) =>
             {
-                await read.All(db.Customers).ToListAsync(ct);
-                await read.Children(db.Orders, o => o.CustomerId, customer.Id).ToListAsync(ct);
-                return await read.Entity(db.Customers, customer.Id).SingleOrDefaultAsync(ct);
+                await read.Db<ShopDb>().Customers.ToListAsync(ct);
+                await read.Children(read.Db<ShopDb>().Orders, o => o.CustomerId, customer.Id)
+                    .ToListAsync(ct);
+                return await read.Entity(read.Db<ShopDb>().Customers, customer.Id)
+                    .SingleOrDefaultAsync(ct);
             }
         );
 
@@ -239,7 +226,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
         var (ada, _) = await db.AddCustomers();
         Task<Customer?> ReadAda(SluiceReads read, CancellationToken ct) =>
-            read.Entity(db.Customers, ada).SingleOrDefaultAsync(ct);
+            read.Entity(read.Db<ShopDb>().Customers, ada).SingleOrDefaultAsync(ct);
         if (soft)
         {
             await node.Cache.GetOrSetAsync(_customer, ada, ReadAda);

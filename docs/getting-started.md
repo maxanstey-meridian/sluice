@@ -17,8 +17,9 @@ needs EF Core 10.0.12 or later on a relational provider. It's tested on PostgreS
 playground uses SQLite.
 
 Leave out `Meridian.Sluice.EntityFrameworkCore` if you don't use EF Core. Everything on this
-page except the `AppDb` model, the `AddDbContext` and `UseSluice` registration, the
-`read.Entity` lines and the EF write works with the core package alone.
+page except the `AppDb` model, the `AddDbContextFactory` and `UseSluice` registration, the
+`read.Db` lines and the EF write works with the core package alone. Everything Sluice has is in
+the `Sluice` namespace.
 
 ## The data
 
@@ -119,7 +120,7 @@ public sealed class GreetingApi
 
 ```csharp
 builder.Services.AddSluice();
-builder.Services.AddDbContext<AppDb>(
+builder.Services.AddDbContextFactory<AppDb>(
     (services, options) => options.UseSqlite(connectionString).UseSluice(services)
 );
 ```
@@ -128,8 +129,12 @@ builder.Services.AddDbContext<AppDb>(
 creates a FusionCache of its own. To configure it (durations, Redis, several servers), pass a
 callback to `AddSluice`; see [Configuration](/guides/configuration).
 
-`UseSluice` does two things. Each time `SaveChanges` commits, it evicts what the save changed.
-And while a cached value is being built, it makes EF queries that skip Sluice's helpers throw
+`AddDbContextFactory` registers `AppDb` for your own code, and a factory Sluice uses to give
+each cached value's computation a context of its own.
+
+`UseSluice` does two things. Each time `SaveChanges` (or `ExecuteUpdate`, or `ExecuteDelete`)
+commits, it evicts what the write changed. And while a cached value is being built, it records
+the tables each query reads, and makes queries it can't track throw
 ([strict reads](/guides/strict-reads)). It needs `AddSluice` and logging registered; ASP.NET
 Core and the Generic Host register logging for you.
 
@@ -163,6 +168,7 @@ public static class Dashboards
 - `id => id.Value` turns a `UserId` into text, which Sluice builds its cache keys from. A record
   needs one; a `string` or `IFormattable` key (numbers, `Guid`, enums) doesn't.
 - EF entities need no declaration. Sluice works out their dependencies from the EF model.
+- A value with no key, such as a list of every user, is a `Query<TValue>`: `new("users")`.
 
 Both are declared once, as `static readonly` fields, and shared by every reader and writer.
 [Sources and Queries](/guides/sources-and-queries) covers key types, names and durations.
@@ -176,9 +182,11 @@ public ValueTask<Dashboard> GetDashboard(UserId userId, CancellationToken ct) =>
         userId,
         async (read, ct) =>
         {
-            // EF Core: each read records the row it reads.
-            var user = await read.Entity(db.Users, userId).SingleAsync(ct);
-            var darkMode = await read.Entity(db.Flags, FlagId.DarkMode)
+            // EF Core: query the compute's own context. Each query records what it reads.
+            var db = read.Db<AppDb>();
+            var user = await db.Users.SingleAsync(u => u.Id == userId, ct);
+            var darkMode = await db.Flags
+                .Where(flag => flag.Id == FlagId.DarkMode)
                 .Select(flag => flag.Enabled)
                 .SingleAsync(ct);
 
@@ -199,21 +207,30 @@ public ValueTask<Dashboard> GetDashboard(UserId userId, CancellationToken ct) =>
     );
 ```
 
-`cache` is the `SluiceCache`, `db` the `AppDb`, and `greetings` the `GreetingApi`, all injected
-into the class that holds this method.
+`cache` is the `SluiceCache` and `greetings` the `GreetingApi`, both injected into the class that
+holds this method.
 
 The lambda is the *compute*: the function that builds the value when it isn't cached. If the
 dashboard is cached, it comes back and the compute doesn't run. If it isn't, the compute runs,
-and each `read.*` call records a dependency:
+and records what it reads:
 
 | Read | Records |
 |---|---|
-| `read.Entity(db.Users, userId)` | the user row with that key |
-| `read.Entity(db.Flags, FlagId.DarkMode)` | the dark-mode flag row |
+| `read.Db<AppDb>()` | nothing yet: it's the compute's own `AppDb`, made from the factory and disposed when the compute ends |
+| `db.Users.SingleAsync(…)` | the users table |
+| `db.Flags.Where(…)…` | the flags table |
 | `read.From(Dashboards.Greeting.For(userId), fetch)` | that user's greeting, then runs `fetch` |
 
 Recording happens as the compute runs, so it records what was actually read. Bob isn't an admin,
 so his compute never reaches the greeting, and his dashboard doesn't depend on one.
+
+A plain query depends on the whole table: renaming any user evicts both dashboards. To depend
+on one row, start the query from `read.Entity(db.Users, userId)` instead; see
+[Narrowing to rows](/guides/ef-core#narrowing-to-rows).
+
+Query the context `read.Db` gives you, not one you injected: the compute's own context holds
+nothing from your request, so it can't cache your unsaved edits for everyone. A query on any
+other context throws.
 
 A compute must record at least one dependency, or the call throws and nothing is cached. The
 `ct` the compute gets is the caller's token.
@@ -234,7 +251,7 @@ public async Task<bool> ToggleDarkMode(CancellationToken ct)
 }
 ```
 
-Both dashboards read the flag, so both are evicted, and the next read of each recomputes.
+Both dashboards read the flags table, so both are evicted, and the next read of each recomputes.
 
 Sluice can't see the greeting service's writes, so after one, tell it what changed:
 
@@ -251,7 +268,7 @@ public async Task SetGreeting(UserId userId, string text)
 Only Alice's dashboard read Alice's greeting, so Bob's stays cached.
 
 The same goes for anything that writes without a `UseSluice` context: another service, a cron
-job, SQL run by hand, a trigger, `ExecuteUpdate` or raw SQL. After one of those, invalidate by
+job, SQL run by hand, a trigger, or `ExecuteSql`. After one of those, invalidate by
 hand, or the old value stays cached until it expires. Keep durations short for data written
 outside your app. See [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see).
 
@@ -276,6 +293,6 @@ that dashboard has been computed. The database is a SQLite file, recreated on ea
 
 - [Sources and Queries](/guides/sources-and-queries): key types, typed ids, names, durations
 - [Reading and Invalidating](/guides/invalidation): the generic path in full
-- [EF Core](/guides/ef-core): the helpers, what a save invalidates, and bypasses
-- [Strict Reads](/guides/strict-reads): what's refused inside a compute, and why
+- [EF Core](/guides/ef-core): what a query records, the helpers, what a write invalidates
+- [Strict Reads](/guides/strict-reads): what a compute can't read, and why
 - [Configuration](/guides/configuration): FusionCache options and multi-node setups

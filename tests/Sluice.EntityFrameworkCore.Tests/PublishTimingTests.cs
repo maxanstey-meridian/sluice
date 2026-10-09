@@ -26,7 +26,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         var probe = new ProbeBeforeUpdate();
         await using var db = postgres.CreateDb(node, before: [probe]);
         var (ada, _) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         bool? evictedBeforeTheWrite = null;
 
         // A reader that gets in before the write would cache the old row again after an early publish.
@@ -57,8 +57,8 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
             ? postgres.CreateDb(node, after: [saveAgain])
             : postgres.CreateDb(node, before: [saveAgain]);
         var (ada, bob) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
-        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
         var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
 
         customers.Single(c => c.Id == ada).Name = "Ada Lovelace";
@@ -79,8 +79,8 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         var saveAgain = new SaveAgain(whileSaving: false);
         await using var db = postgres.CreateDb(node, before: [saveAgain]);
         var (ada, bob) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
-        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
         var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
 
         customers.Single(c => c.Id == ada).Name = "Ada Lovelace";
@@ -106,8 +106,8 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         var saveAgain = new SaveAgain(whileSaving: false);
         await using var db = postgres.CreateDb(node, before: [saveAgain]);
         var (ada, bob) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
-        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
         var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
 
         await using var transaction = await db.Database.BeginTransactionAsync();
@@ -134,7 +134,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = postgres.CreateDb(node, before: [new TransactionPerSave()]);
         var (ada, _) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
 
         await db.Rename(ada, "Ada Lovelace");
 
@@ -149,7 +149,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = postgres.CreateDb(node);
         var (ada, _) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
 
         await using var transaction = await db.Database.BeginTransactionAsync();
         await db.Rename(ada, "Ada Lovelace");
@@ -166,7 +166,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = postgres.CreateDb(node);
         var (ada, _) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
 
         await using var transaction = await db.Database.BeginTransactionAsync();
         await db.Rename(ada, "Ada Lovelace");
@@ -182,7 +182,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = postgres.CreateDb(node, before: [new FailCommit()]);
         var (ada, _) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
 
         await using var transaction = await db.Database.BeginTransactionAsync();
         await db.Rename(ada, "Ada Lovelace");
@@ -206,8 +206,8 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = postgres.CreateDb(node, before: [new FailReleaseSavepoint()]);
         var (ada, bob) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
-        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
         var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
 
         await using var transaction = await db.Database.BeginTransactionAsync();
@@ -239,7 +239,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = postgres.CreateDb(node);
         var (ada, _) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         await db.Database.OpenConnectionAsync();
 
         var abandoned = await db.Database.BeginTransactionAsync();
@@ -268,7 +268,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(node);
         var (ada, _) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         await using var connection = new NpgsqlConnection(postgres.ConnectionString);
         await connection.OpenAsync();
 
@@ -300,7 +300,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
             before: [failOnce]
         );
         var (ada, _) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         (await db.Customers.SingleAsync(c => c.Id == ada)).Name = "Ada Lovelace";
         var attempts = 0;
         failOnce.Arm();
@@ -339,7 +339,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = postgres.CreateDb(node);
         var (ada, _) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
 
         void ExpectNoAsyncCall(string call)
         {
@@ -421,7 +421,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         var cancelAfterCommit = new CancelAfterCommit();
         await using var db = postgres.CreateDb(node, before: [cancelAfterCommit]);
         var (ada, _) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         using var request = new CancellationTokenSource();
         cancelAfterCommit.Request = request;
 
@@ -440,7 +440,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         var cancelAfterCommit = new CancelAfterCommit();
         await using var db = postgres.CreateDb(node, before: [cancelAfterCommit]);
         var (ada, _) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         using var request = new CancellationTokenSource();
 
         await using var transaction = await db.Database.BeginTransactionAsync();
@@ -474,7 +474,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = CreateBatchByBatchDb(node);
         var (ada, _) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
 
         (await db.Customers.SingleAsync(c => c.Id == ada)).Name = "Ada Lovelace";
         db.Orders.Add(new Order { CustomerId = -1, Item = "No such customer" });
@@ -492,10 +492,10 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = CreateBatchByBatchDb(node);
         var next = await reader.NextCustomerId();
-        var notFound = await CachedRead.Customer(node.Cache, reader, next);
+        var notFound = await CachedRead.Customer(node.Cache, next);
         var all = await CachedRead.Of(
             node.Cache,
-            (read, ct) => read.All(reader.Customers).ToListAsync(ct)
+            (read, ct) => read.Db<ShopDb>().Customers.ToListAsync(ct)
         );
 
         var customer = new Customer { Name = "Inserted" };
@@ -520,7 +520,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = CreateBatchByBatchDb(node, before: [new FailInsertsInto("Parcels")]);
         var next = await reader.NextCustomerId();
-        var ordersOfNext = await CachedRead.OrdersOf(node.Cache, reader, next);
+        var ordersOfNext = await CachedRead.OrdersOf(node.Cache, next);
 
         // The customer commits first, then the order that points at it. The parcel points at the customer too
         // (through its temporary key, as it has no navigation), so it saves after the order, and fails.
@@ -557,7 +557,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var db = CreateBatchByBatchDb(node);
         var (ada, bob) = await db.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
         await reader.Customers.Where(c => c.Id == bob).ExecuteDeleteAsync();
 
@@ -580,7 +580,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         var cy = new Customer { Name = "Cy" };
         db.Customers.Add(cy);
         await db.SaveChangesAsync();
-        var cyRead = await CachedRead.Customer(node.Cache, reader, cy.Id);
+        var cyRead = await CachedRead.Customer(node.Cache, cy.Id);
         var customers = await db
             .Customers.Where(c => c.Id == ada || c.Id == bob || c.Id == cy.Id)
             .ToListAsync();
@@ -604,7 +604,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var reader = postgres.CreateDb(node);
         await using var setup = postgres.CreateDb();
         var (ada, bob) = await setup.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         using var request = new CancellationTokenSource();
         await using var db = CreateBatchByBatchDb(
             node,

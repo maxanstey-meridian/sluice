@@ -6,9 +6,14 @@ Sluice.Query<TKey, TValue>.Duration.get -> System.TimeSpan?
 Sluice.Query<TKey, TValue>.Duration.init -> void
 Sluice.Query<TKey, TValue>.Query(string! name) -> void
 Sluice.Query<TKey, TValue>.Query(string! name, System.Func<TKey, string!>! format) -> void
+Sluice.Query<TValue>
+Sluice.Query<TValue>.Duration.get -> System.TimeSpan?
+Sluice.Query<TValue>.Duration.init -> void
+Sluice.Query<TValue>.Query(string! name) -> void
 Sluice.SluiceCache
 Sluice.SluiceCache.ClearAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
 Sluice.SluiceCache.GetOrSetAsync<TKey, TValue>(Sluice.Query<TKey, TValue>! query, TKey key, System.Func<Sluice.SluiceReads!, System.Threading.CancellationToken, System.Threading.Tasks.Task<TValue>!>! compute, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TValue>
+Sluice.SluiceCache.GetOrSetAsync<TValue>(Sluice.Query<TValue>! query, System.Func<Sluice.SluiceReads!, System.Threading.CancellationToken, System.Threading.Tasks.Task<TValue>!>! compute, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TValue>
 Sluice.SluiceCache.Invalidate(params System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> void
 Sluice.SluiceCache.InvalidateAsync(Sluice.Dependency! dependency) -> System.Threading.Tasks.ValueTask
 Sluice.SluiceCache.InvalidateAsync(System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> System.Threading.Tasks.ValueTask
@@ -23,4 +28,9 @@ Sluice.Source<TKey>.For(TKey key) -> Sluice.Dependency!
 Sluice.Source<TKey>.Source(string! name) -> void
 Sluice.Source<TKey>.Source(string! name, System.Func<TKey, string!>! format) -> void
 static Sluice.SluiceServiceCollectionExtensions.AddSluice(this Microsoft.Extensions.DependencyInjection.IServiceCollection! services, System.Action<ZiggyCreatures.Caching.Fusion.IFusionCacheBuilder!>? configure = null) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
-static Sluice.Infrastructure.ActiveCompute.Violate<TState>(TState state, System.Func<TState, bool, System.Exception?>! violation) -> System.Exception?
+static Sluice.Infrastructure.ActiveCompute.Hold<T>(Sluice.SluiceReads! reads, System.Func<System.IServiceProvider!, T!>! create) -> T!
+static Sluice.Infrastructure.ActiveCompute.Holds(Sluice.SluiceReads! reads, object! resource) -> bool
+static Sluice.Infrastructure.ActiveCompute.InFetch(Sluice.SluiceReads! reads) -> bool
+static Sluice.Infrastructure.ActiveCompute.QueryName(Sluice.SluiceReads! reads) -> string!
+static Sluice.Infrastructure.ActiveCompute.Reads.get -> Sluice.SluiceReads?
+static Sluice.Infrastructure.ActiveCompute.Violate(Sluice.SluiceReads! reads, System.Exception! violation) -> System.Exception!

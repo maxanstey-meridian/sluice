@@ -48,6 +48,11 @@ memory write, the distributed write and the backplane message, and returns. `Get
 throws once FusionCache returns. The EF package's strict-read checks use the same route, so a
 compute that catches their exception still caches nothing.
 
+A compute also runs outside the caller's ambient transaction (`TransactionScope`), so a
+connection it opens can't see the caller's uncommitted rows. And it can hold resources for its
+own lifetime: the EF package's `read.Db` context is one, made on first use and disposed when the
+compute ends.
+
 "A compute is running" is an `AsyncLocal` set inside the factory, so it flows into tasks the
 compute starts, and not into anything else.
 
@@ -70,21 +75,33 @@ Keys go through the property's value converter to the value the database stores,
 (decimal scale, string case and trailing spaces, dates to the microsecond), so values the
 database treats as equal give one tag.
 
-`read.Entity`, `read.Children` and `read.All` record one of those dependencies, then return the
-set as a no-tracking query tagged `Sluice read helper` with auto-includes off, filtered to the
-key (`Entity`) or foreign key value (`Children`).
+`read.Db<TContext>()` makes the compute's own context from the registered
+`IDbContextFactory<TContext>`, with no-tracking queries, and disposes it when the compute ends.
 
-Strict reads are one EF interceptor for the whole process:
+Recording what a query reads is one EF interceptor for the whole process:
 
-- **On every command** (`CommandInitialized`, before it runs): inside a compute, a write throws;
-  a command without the marker in its SQL throws, unless it runs in a fused fetch; a read inside
-  a transaction throws. Outside a compute it returns at once.
-- **On every query compile** (`QueryCompilationStarting`): a marked query's expression tree, and
-  the query filters EF will add to it, are walked for anything beyond the helper's own rows.
+- **On every query compile** (`QueryCompilationStarting`), inside a compute or not: the query's
+  expression tree is walked for the entity types it reads: its roots, joins and subqueries, every
+  navigation (matched by name on every type the instance could be), many-to-many join types, and,
+  for each type reached, its query filters and auto-included navigations. Owned types count as
+  their owner. The result goes into a `TagWith` on the query, so its SQL starts
+  `-- Sluice reads: <types>` every time it runs. EF caches the compiled query, tag included, so
+  this runs once per query shape. A query whose reads can't be known (raw SQL, a function, a view)
+  is tagged `-- Sluice can't track: <why>` instead.
+- **On every command** (`CommandInitialized`, before it runs): inside a compute, a write throws; a
+  command from a context other than `read.Db`'s throws, unless it runs in a fused fetch; otherwise
+  the tag is read, and each type it names is recorded as a whole-type dependency, or the command
+  throws if the tag says it can't be tracked, or has none. A read inside a transaction throws.
+  Outside a compute it returns at once.
+
+`read.Entity` and `read.Children` record a narrower dependency, one row or one parent's rows, then
+return the set as a no-tracking query with auto-includes off, filtered to the key (`Entity`) or
+foreign key value (`Children`). The query is marked, so its tag leaves its own type out unless it
+reaches that type again.
 
 ## EF Core writes
 
-A second interceptor, one per `SluiceCache`, handles saves:
+A second interceptor, one per `SluiceCache`, handles writes. For a save:
 
 1. **`SavingChanges`**: reads the changed entries through `ChangeTracker.Entries()`, which detects
    changes the way EF's own save does, and snapshots their foreign keys' original values. EF
@@ -98,6 +115,10 @@ A second interceptor, one per `SluiceCache`, handles saves:
    - an EF transaction: hold the dependencies against the `DbTransaction`, and invalidate on
      commit, rollback or failure;
    - an enlisted or ambient transaction: invalidate from its `TransactionCompleted` event.
+
+An `ExecuteUpdate` or `ExecuteDelete` publishes the same way, once it has run: EF drops query tags
+from these statements, so the tables it wrote are found by their quoted names in its SQL, and
+every read of them is invalidated (for a delete, what it cascades into too).
 
 A failed, cancelled or conflicting save publishes the same way: never drop, because
 over-invalidating is safe. After a commit, a failure to invalidate is logged and never thrown.

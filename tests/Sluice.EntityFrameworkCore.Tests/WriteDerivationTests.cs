@@ -50,10 +50,10 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         return order;
     }
 
-    private Task<CachedRead> ReadCustomer(int id) => CachedRead.Customer(_node.Cache, _reader, id);
+    private Task<CachedRead> ReadCustomer(int id) => CachedRead.Customer(_node.Cache, id);
 
     private Task<CachedRead> ReadOrdersOf(int customerId) =>
-        CachedRead.OrdersOf(_node.Cache, _reader, customerId);
+        CachedRead.OrdersOf(_node.Cache, customerId);
 
     [Fact]
     public async Task Saving_an_entity_evicts_readers_of_its_key_and_only_those()
@@ -143,7 +143,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         var northBins = await CachedRead.Of(
             _node.Cache,
             (read, ct) =>
-                read.Children(_reader.Bins, b => b.WarehouseCode, north.Code).ToListAsync(ct)
+                read.Children(read.Db<ShopDb>().Bins, b => b.WarehouseCode, north.Code)
+                    .ToListAsync(ct)
         );
         _db.ChangeTracker.Clear();
 
@@ -215,7 +216,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
                     await CachedRead.Of(
                         _node.Cache,
                         (read, ct) =>
-                            read.Children(_reader.Orders, o => o.Customer, parent).ToListAsync(ct)
+                            read.Children(read.Db<ShopDb>().Orders, o => o.Customer, parent)
+                                .ToListAsync(ct)
                     )
                 )
             );
@@ -227,7 +229,7 @@ public sealed class WriteDerivationTests : IAsyncLifetime
                         _node.Cache,
                         (read, ct) =>
                             read.Children(
-                                    _reader.Notes,
+                                    read.Db<ShopDb>().Notes,
                                     n => EF.Property<int>(n, "CustomerId"),
                                     parent
                                 )
@@ -262,12 +264,14 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         var couponLines = await CachedRead.Of(
             _node.Cache,
             (read, ct) =>
-                read.Children(_reader.OrderLines, l => l.CouponId, coupon.Id).ToListAsync(ct)
+                read.Children(read.Db<ShopDb>().OrderLines, l => l.CouponId, coupon.Id)
+                    .ToListAsync(ct)
         );
         var otherLines = await CachedRead.Of(
             _node.Cache,
             (read, ct) =>
-                read.Children(_reader.OrderLines, l => l.CouponId, other.Id).ToListAsync(ct)
+                read.Children(read.Db<ShopDb>().OrderLines, l => l.CouponId, other.Id)
+                    .ToListAsync(ct)
         );
 
         line.CouponId = coupon.Id;
@@ -291,7 +295,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             CachedRead.Of(
                 _node.Cache,
                 (read, ct) =>
-                    read.Children(_reader.Bins, b => b.WarehouseCode, code).ToListAsync(ct)
+                    read.Children(read.Db<ShopDb>().Bins, b => b.WarehouseCode, code)
+                        .ToListAsync(ct)
             );
         var northBins = await ReadBinsOf(north.Code);
         var southBins = await ReadBinsOf(south.Code);
@@ -330,7 +335,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             CachedRead.Of(
                 _node.Cache,
                 (read, ct) =>
-                    read.Children(_reader.CustomerCoupons, foreignKey, key).ToListAsync(ct)
+                    read.Children(read.Db<ShopDb>().CustomerCoupons, foreignKey, key)
+                        .ToListAsync(ct)
             );
         var adaLinks = await ReadLinksBy(link => EF.Property<int>(link, "CustomerId"), ada.Id);
         var bobLinks = await ReadLinksBy(link => EF.Property<int>(link, "CustomerId"), bob.Id);
@@ -369,15 +375,16 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         await _db.SaveChangesAsync();
         var parcelRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Parcels, parcel.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Parcels, parcel.Id).SingleAsync(ct)
         );
         var adaParcels = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Children(_reader.Parcels, p => p.CustomerId, ada.Id).ToListAsync(ct)
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().Parcels, p => p.CustomerId, ada.Id).ToListAsync(ct)
         );
         var otherRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Parcels, other.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Parcels, other.Id).SingleAsync(ct)
         );
 
         async Task SaveAndExpectEviction(string change)
@@ -410,27 +417,27 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         await _db.SaveChangesAsync();
         var rexRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Animals, rex.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Animals, rex.Id).SingleAsync(ct)
         );
         var animals = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.All(_reader.Animals).ToListAsync(ct)
+            (read, ct) => read.Db<ShopDb>().Animals.ToListAsync(ct)
         );
         var truckRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Vehicles, truck.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Vehicles, truck.Id).SingleAsync(ct)
         );
         var vehicles = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.All(_reader.Vehicles).ToListAsync(ct)
+            (read, ct) => read.Db<ShopDb>().Vehicles.ToListAsync(ct)
         );
         var circleRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Shapes, circle.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Shapes, circle.Id).SingleAsync(ct)
         );
         var shapes = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.All(_reader.Shapes).ToListAsync(ct)
+            (read, ct) => read.Db<ShopDb>().Shapes.ToListAsync(ct)
         );
 
         rex.Fetches = true;
@@ -459,7 +466,7 @@ public sealed class WriteDerivationTests : IAsyncLifetime
     {
         var all = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.All(_reader.Customers).ToListAsync(ct)
+            (read, ct) => read.Db<ShopDb>().Customers.ToListAsync(ct)
         );
 
         var ada = await AddCustomer("Ada");
@@ -512,16 +519,17 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         await _db.SaveChangesAsync();
         var graceRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Users, graceId).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Users, graceId).SingleAsync(ct)
         );
         var alanRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Users, alanId).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Users, alanId).SingleAsync(ct)
         );
         var teaRead = await CachedRead.Of(
             _node.Cache,
             (read, ct) =>
-                read.Entity(_reader.Products, new Sku(sku.ToUpperInvariant())).SingleAsync(ct)
+                read.Entity(read.Db<ShopDb>().Products, new Sku(sku.ToUpperInvariant()))
+                    .SingleAsync(ct)
         );
 
         grace.Name = "Grace Hopper";
@@ -543,16 +551,18 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         var coffee = await AddOrder(ada, "Coffee");
         var teaLines = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Children(_reader.OrderLines, l => l.OrderId, tea.Id).ToListAsync(ct)
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().OrderLines, l => l.OrderId, tea.Id).ToListAsync(ct)
         );
         var coffeeLines = await CachedRead.Of(
             _node.Cache,
             (read, ct) =>
-                read.Children(_reader.OrderLines, l => l.OrderId, coffee.Id).ToListAsync(ct)
+                read.Children(read.Db<ShopDb>().OrderLines, l => l.OrderId, coffee.Id)
+                    .ToListAsync(ct)
         );
         var allLines = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.All(_reader.OrderLines).ToListAsync(ct)
+            (read, ct) => read.Db<ShopDb>().OrderLines.ToListAsync(ct)
         );
 
         _db.OrderLines.Add(new OrderLine { OrderId = tea.Id, LineNumber = 1 });
@@ -599,7 +609,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         var couponLines = await CachedRead.Of(
             _node.Cache,
             (read, ct) =>
-                read.Children(_reader.OrderLines, l => l.CouponId, coupon.Id).ToListAsync(ct)
+                read.Children(read.Db<ShopDb>().OrderLines, l => l.CouponId, coupon.Id)
+                    .ToListAsync(ct)
         );
 
         // Only the principals are tracked, so the database's ON DELETE rules change the dependents.
@@ -649,26 +660,29 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             (
                 "the order",
                 await Read(
-                    (read, ct) => read.Entity(_reader.Orders, tea.Id).SingleOrDefaultAsync(ct)
+                    (read, ct) =>
+                        read.Entity(read.Db<ShopDb>().Orders, tea.Id).SingleOrDefaultAsync(ct)
                 )
             ),
-            ("every order", await Read((read, ct) => read.All(_reader.Orders).ToListAsync(ct))),
+            ("every order", await Read((read, ct) => read.Db<ShopDb>().Orders.ToListAsync(ct))),
             (
                 "the coupon's orders",
                 await Read(
                     (read, ct) =>
-                        read.Children(_reader.Orders, o => o.CouponId, coupon.Id).ToListAsync(ct)
+                        read.Children(read.Db<ShopDb>().Orders, o => o.CouponId, coupon.Id)
+                            .ToListAsync(ct)
                 )
             ),
             (
                 "every order line",
-                await Read((read, ct) => read.All(_reader.OrderLines).ToListAsync(ct))
+                await Read((read, ct) => read.Db<ShopDb>().OrderLines.ToListAsync(ct))
             ),
             (
                 "the order's lines",
                 await Read(
                     (read, ct) =>
-                        read.Children(_reader.OrderLines, l => l.OrderId, tea.Id).ToListAsync(ct)
+                        read.Children(read.Db<ShopDb>().OrderLines, l => l.OrderId, tea.Id)
+                            .ToListAsync(ct)
                 )
             ),
         ];
@@ -691,8 +705,10 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         var coupon = await AddCoupon();
         var tea = await AddOrder(ada, "Tea", coupon.Id);
         _db.ChangeTracker.Clear();
-        var teaRead = await Read((read, ct) => read.Entity(_reader.Orders, tea.Id).SingleAsync(ct));
-        var orders = await Read((read, ct) => read.All(_reader.Orders).ToListAsync(ct));
+        var teaRead = await Read(
+            (read, ct) => read.Entity(read.Db<ShopDb>().Orders, tea.Id).SingleAsync(ct)
+        );
+        var orders = await Read((read, ct) => read.Db<ShopDb>().Orders.ToListAsync(ct));
         var adasOrders = await ReadOrdersOf(ada.Id);
         var adaRead = await ReadCustomer(ada.Id);
 
@@ -722,9 +738,11 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         await _db.SaveChangesAsync();
         _db.ChangeTracker.Clear();
         var rexRead = await Read(
-            (read, ct) => read.Entity(_reader.Animals, rex.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Animals, rex.Id).SingleAsync(ct)
         );
-        var animals = await Read((read, ct) => read.All(_reader.Animals).ToListAsync(ct));
+        var animals = await Read(
+            (read, ct) => read.Db<ShopDb>().Animals.IgnoreAutoIncludes().ToListAsync(ct)
+        );
 
         _db.Customers.Remove(await _db.Customers.SingleAsync(c => c.Id == ada.Id));
         await _db.SaveChangesAsync();
@@ -746,21 +764,24 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             (
                 "the answer",
                 await Read(
-                    (read, ct) => read.Entity(_reader.Notes, answer.Id).SingleOrDefaultAsync(ct)
+                    (read, ct) =>
+                        read.Entity(read.Db<ShopDb>().Notes, answer.Id).SingleOrDefaultAsync(ct)
                 )
             ),
             (
                 "the thanks",
                 await Read(
-                    (read, ct) => read.Entity(_reader.Notes, thanks.Id).SingleOrDefaultAsync(ct)
+                    (read, ct) =>
+                        read.Entity(read.Db<ShopDb>().Notes, thanks.Id).SingleOrDefaultAsync(ct)
                 )
             ),
-            ("every note", await Read((read, ct) => read.All(_reader.Notes).ToListAsync(ct))),
+            ("every note", await Read((read, ct) => read.Db<ShopDb>().Notes.ToListAsync(ct))),
             (
                 "the replies to the answer",
                 await Read(
                     (read, ct) =>
-                        read.Children(_reader.Notes, n => n.ReplyToId, answer.Id).ToListAsync(ct)
+                        read.Children(read.Db<ShopDb>().Notes, n => n.ReplyToId, answer.Id)
+                            .ToListAsync(ct)
                 )
             ),
         ];
@@ -788,20 +809,22 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             (
                 "the order",
                 await Read(
-                    (read, ct) => read.Entity(_reader.Orders, tea.Id).SingleOrDefaultAsync(ct)
+                    (read, ct) =>
+                        read.Entity(read.Db<ShopDb>().Orders, tea.Id).SingleOrDefaultAsync(ct)
                 )
             ),
-            ("every order", await Read((read, ct) => read.All(_reader.Orders).ToListAsync(ct))),
+            ("every order", await Read((read, ct) => read.Db<ShopDb>().Orders.ToListAsync(ct))),
             ("the customer's orders", await ReadOrdersOf(ada.Id)),
             (
                 "every order line",
-                await Read((read, ct) => read.All(_reader.OrderLines).ToListAsync(ct))
+                await Read((read, ct) => read.Db<ShopDb>().OrderLines.ToListAsync(ct))
             ),
             (
                 "the order's lines",
                 await Read(
                     (read, ct) =>
-                        read.Children(_reader.OrderLines, l => l.OrderId, tea.Id).ToListAsync(ct)
+                        read.Children(read.Db<ShopDb>().OrderLines, l => l.OrderId, tea.Id)
+                            .ToListAsync(ct)
                 )
             ),
         ];
@@ -828,10 +851,10 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         _db.AddRange(north, bin, otherBin);
         await _db.SaveChangesAsync();
         var otherBinRead = await Read(
-            (read, ct) => read.Entity(_reader.Bins, otherBin.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Bins, otherBin.Id).SingleAsync(ct)
         );
         var coffeeRead = await Read(
-            (read, ct) => read.Entity(_reader.Orders, coffee.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Orders, coffee.Id).SingleAsync(ct)
         );
         var adaRead = await ReadCustomer(ada.Id);
 
@@ -845,7 +868,7 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         _db.Vehicles.AddRange(truck, otherTruck);
         await _db.SaveChangesAsync();
         var otherTruckRead = await Read(
-            (read, ct) => read.Entity(_reader.Vehicles, otherTruck.Id).SingleAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Vehicles, otherTruck.Id).SingleAsync(ct)
         );
         _db.Vehicles.Remove(truck);
         await _db.SaveChangesAsync();
@@ -868,7 +891,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         await _db.SaveChangesAsync();
         _db.ChangeTracker.Clear();
         var trailers = await Read(
-            (read, ct) => read.Children(_reader.Trailers, t => t.TruckId, truck.Id).ToListAsync(ct)
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().Trailers, t => t.TruckId, truck.Id).ToListAsync(ct)
         );
 
         // The context only knows the row as a vehicle; the database deletes the truck's trailer with it.
@@ -886,7 +910,7 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         var tea = await AddOrder(ada, "Tea");
         var teaRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Orders, tea.Id).SingleOrDefaultAsync(ct)
+            (read, ct) => read.Entity(read.Db<ShopDb>().Orders, tea.Id).SingleOrDefaultAsync(ct)
         );
         _db.ChangeTracker.CascadeDeleteTiming = CascadeTiming.OnSaveChanges;
 

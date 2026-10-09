@@ -9,15 +9,19 @@ using Microsoft.Extensions.Logging;
 namespace Sluice.EntityFrameworkCore;
 
 /// <summary>
-/// Invalidates what each tracked save wrote, once it has committed. One instance per <see cref="SluiceCache"/>,
-/// shared by every context that uses it, so contexts sharing one transaction share its pending invalidations.
+/// Invalidates what each tracked save, <c>ExecuteUpdate</c> and <c>ExecuteDelete</c> wrote, once it has committed.
+/// One instance per <see cref="SluiceCache"/>, shared by every context that uses it, so contexts sharing one
+/// transaction share its pending invalidations.
 /// </summary>
 /// <remarks>
 /// Never drops: every outcome that might have committed something publishes, because over-invalidating is safe.
 /// Publishing after a commit logs failures instead of throwing, since a throw would make the caller retry a write
 /// that already committed. Sync EF calls publish synchronously.
 /// </remarks>
-internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTransactionInterceptor
+internal sealed partial class SluiceInterceptor
+    : ISaveChangesInterceptor,
+        IDbTransactionInterceptor,
+        IDbCommandInterceptor
 {
     private static readonly ConditionalWeakTable<SluiceCache, SluiceInterceptor> _instances = new();
 
@@ -40,9 +44,14 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
     }
 
     /// <summary>The interceptor for the <see cref="SluiceCache"/> registered in <paramref name="services"/>.</summary>
+    /// <exception cref="InvalidOperationException">Sluice isn't registered in <paramref name="services"/>.</exception>
     internal static SluiceInterceptor For(IServiceProvider services) =>
         _instances.GetValue(
-            services.GetRequiredService<SluiceCache>(),
+            services.GetService<SluiceCache>()
+                ?? throw new InvalidOperationException(
+                    "UseSluice needs Sluice registered in the application's services: call services.AddSluice() "
+                        + "where you register your services."
+                ),
             cache => new(cache, services.GetRequiredService<ILogger<SluiceInterceptor>>())
         );
 
@@ -131,6 +140,33 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
         return result;
     }
 
+    // A bulk write is one statement: whether it failed before or after the database ran it, publishing is safe.
+    public int NonQueryExecuted(DbCommand command, CommandExecutedEventData eventData, int result)
+    {
+        CompleteBulkWrite(command, eventData);
+        return result;
+    }
+
+    public async ValueTask<int> NonQueryExecutedAsync(
+        DbCommand command,
+        CommandExecutedEventData eventData,
+        int result,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await CompleteBulkWriteAsync(command, eventData).ConfigureAwait(false);
+        return result;
+    }
+
+    public void CommandFailed(DbCommand command, CommandErrorEventData eventData) =>
+        CompleteBulkWrite(command, eventData);
+
+    public Task CommandFailedAsync(
+        DbCommand command,
+        CommandErrorEventData eventData,
+        CancellationToken cancellationToken = default
+    ) => CompleteBulkWriteAsync(command, eventData);
+
     // A provider may hand out the same DbTransaction object again (Npgsql does, per connection). Anything still
     // pending on it belongs to an earlier transaction that ended without a commit or rollback EF saw succeed: one
     // disposed without either, which committed nothing, or one whose commit failed, which has published already.
@@ -194,7 +230,7 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
     {
         if (context is not null && Take(_saves, context, keep) is { } save)
         {
-            if (!DeferToTransaction(context, save))
+            if (!DeferToTransaction(context, save.Dependencies))
             {
                 Publish(save.Dependencies);
             }
@@ -205,29 +241,96 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
     {
         if (context is not null && Take(_saves, context, keep) is { } save)
         {
-            if (!DeferToTransaction(context, save))
+            if (!DeferToTransaction(context, save.Dependencies))
             {
                 await PublishAsync(save.Dependencies).ConfigureAwait(false);
             }
         }
     }
 
-    // Hands the save to the transaction the context is in now, if any, to publish when that ends: read here, not
-    // when the save began, since an interceptor may have committed the save's transaction already. Its dependencies
-    // are derived now, before the commit, where a throw is still safe, because the entries can change again before it.
-    private bool DeferToTransaction(DbContext context, CapturedSave save)
+    // Which rows a bulk write changed is unknown, so every read of the types it may have written is evicted. EF 10
+    // reports ExecuteDelete as ExecuteUpdate, so the statement says which it was; anything but an UPDATE is taken for a
+    // delete, which also evicts the lists its rows were in and what the database cascades to.
+    private void CompleteBulkWrite(DbCommand command, CommandEventData eventData)
+    {
+        if (BulkWrite(command, eventData) is var (context, derive))
+        {
+            if (!DeferToTransaction(context, derive))
+            {
+                Publish(derive);
+            }
+        }
+    }
+
+    private async Task CompleteBulkWriteAsync(DbCommand command, CommandEventData eventData)
+    {
+        if (BulkWrite(command, eventData) is var (context, derive))
+        {
+            if (!DeferToTransaction(context, derive))
+            {
+                await PublishAsync(derive).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static (DbContext Context, Func<List<Dependency>> Derive)? BulkWrite(
+        DbCommand command,
+        CommandEventData eventData
+    ) =>
+        eventData
+            is {
+                Context: { } context,
+                CommandSource: CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete,
+            }
+            ? (context, () => BulkWritten(context, command))
+            : null;
+
+    private static List<Dependency> BulkWritten(DbContext context, DbCommand command)
+    {
+        var update = IsUpdate(command);
+        return
+        [
+            .. ModelSources
+                .Named(context, command.CommandText)
+                .SelectMany(entityType =>
+                    update
+                        ? ModelSources.UpdateDependencies(entityType)
+                        : ModelSources.AllDependencies(entityType)
+                ),
+        ];
+    }
+
+    private static bool IsUpdate(DbCommand command)
+    {
+        foreach (var line in command.CommandText.AsSpan().EnumerateLines())
+        {
+            var statement = line.TrimStart();
+            if (!statement.IsEmpty && !statement.StartsWith("--"))
+            {
+                return statement.StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        return false;
+    }
+
+    // Hands the write to the transaction the context is in now, if any, to publish when that ends: read here, not
+    // when a save began, since an interceptor may have committed the save's transaction already. Its dependencies
+    // are derived now, before the commit, where a throw is still safe, because a save's entries can change again
+    // before it.
+    private bool DeferToTransaction(DbContext context, Func<List<Dependency>> derive)
     {
         var transaction = ContextTransaction.Of(context);
         if (transaction.Ef is { } ef)
         {
-            // A transaction's connection runs one command at a time, so its saves never add here concurrently.
-            _pending.GetValue(ef, _ => []).AddRange(save.Dependencies());
+            // A transaction's connection runs one command at a time, so its writes never add here concurrently.
+            _pending.GetValue(ef, _ => []).AddRange(derive());
             return true;
         }
 
         if (transaction.Ambient is { } ambient)
         {
-            PublishWhenCompleted(ambient, save.Dependencies());
+            PublishWhenCompleted(ambient, derive());
             return true;
         }
 

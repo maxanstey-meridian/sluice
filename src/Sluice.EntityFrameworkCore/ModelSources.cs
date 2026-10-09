@@ -1,7 +1,9 @@
 using System.Linq.Expressions;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Sluice.EntityFrameworkCore;
 
@@ -83,6 +85,60 @@ internal static class ModelSources
         );
 
     /// <summary>
+    /// The entity types whose tables <paramref name="sql"/> names, as the provider quotes them, mapped to the types
+    /// that store rows there. It can only find too many: a column or alias with a table's name matches it too.
+    /// </summary>
+    /// <remarks>
+    /// For a bulk write, whose SQL names the table it writes. EF drops query tags from <c>ExecuteUpdate</c> and
+    /// <c>ExecuteDelete</c> (EF Core 10), so this is the only per-execution record of what one wrote.
+    /// </remarks>
+    internal static IEnumerable<IEntityType> Named(DbContext context, string sql)
+    {
+        var quote = context.GetService<ISqlGenerationHelper>();
+        return context
+            .Model.GetEntityTypes()
+            .Where(entityType =>
+                entityType.FindPrimaryKey() is not null
+                && entityType.GetTableName() is { } table
+                && sql.Contains(quote.DelimitIdentifier(table), StringComparison.Ordinal)
+            )
+            .Select(Unowned)
+            .Select(entityType => entityType.GetRootType())
+            .Distinct();
+    }
+
+    /// <summary>
+    /// What an update of <paramref name="entityType"/> rows may change: the whole type, and every foreign key it (or
+    /// a derived type) declares, since an update may move rows between parents.
+    /// </summary>
+    /// <exception cref="NotSupportedException">The type isn't mapped to a table.</exception>
+    internal static IEnumerable<Dependency> UpdateDependencies(IEntityType entityType) =>
+        [
+            Entity(entityType).All,
+            .. entityType
+                .GetForeignKeys()
+                .Concat(entityType.GetDerivedForeignKeys())
+                .Select(foreignKey => ForeignKey(foreignKey).All),
+        ];
+
+    /// <summary>
+    /// Every dependency on <paramref name="entityType"/>: the whole type, and every foreign key it (or a derived type)
+    /// declares or that points at it, so every read of it is evicted. Also the same for every type the model lets the
+    /// database delete or set to null when its rows are deleted.
+    /// </summary>
+    /// <exception cref="NotSupportedException">The type isn't mapped to a table.</exception>
+    internal static IEnumerable<Dependency> AllDependencies(IEntityType entityType) =>
+        [
+            Entity(entityType).All,
+            .. entityType
+                .GetForeignKeys()
+                .Concat(entityType.GetDerivedForeignKeys())
+                .Concat(CascadingForeignKeys(entityType))
+                .Select(foreignKey => ForeignKey(foreignKey).All),
+            .. Cascades(entityType),
+        ];
+
+    /// <summary>
     /// The dependency on the <paramref name="entityType"/> row whose primary key is <paramref name="key"/>, which
     /// <c>read.Entity</c> records and <c>set.Dependency</c> returns.
     /// </summary>
@@ -106,7 +162,8 @@ internal static class ModelSources
             ? property
             : throw new NotSupportedException(
                 $"{entityType.DisplayName()} has a composite primary key. Reading or invalidating one row by "
-                    + "composite key isn't supported; read it with read.All or invalidate it with AllDependencies()."
+                    + "composite key isn't supported; query it from read.Db<TContext>(), or invalidate it with "
+                    + "AllDependencies()."
             );
 
     /// <summary>
@@ -196,9 +253,11 @@ internal static class ModelSources
         }
     }
 
-    // Why the type's rows aren't all in tables, if they aren't. An abstract type with no table of its own (the root of
-    // a TPC hierarchy) has no rows but those of its concrete types, so it's mapped when each of them is.
-    private static string? Unmapped(IEntityType entityType) =>
+    /// <summary>
+    /// Why the type's rows aren't all in tables, if they aren't. An abstract type with no table of its own (the root of
+    /// a TPC hierarchy) has no rows but those of its concrete types, so it's mapped when each of them is.
+    /// </summary>
+    internal static string? Unmapped(IEntityType entityType) =>
         entityType.FindPrimaryKey() is null ? "is keyless"
         : entityType.GetViewName() is { } view ? $"is mapped to the view '{view}'"
         : entityType.GetFunctionName() is { } function ? $"is mapped to the function '{function}'"
@@ -257,7 +316,8 @@ internal static class ModelSources
         return [.. dependencies];
     }
 
-    private static IEntityType Unowned(IEntityType entityType) =>
+    /// <summary>The entity whose rows <paramref name="entityType"/> is stored with: itself, unless it's owned.</summary>
+    internal static IEntityType Unowned(IEntityType entityType) =>
         entityType.FindOwnership() is { } ownership
             ? Unowned(ownership.PrincipalEntityType)
             : entityType;

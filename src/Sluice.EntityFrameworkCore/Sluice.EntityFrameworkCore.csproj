@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <PackageId>Meridian.Sluice.EntityFrameworkCore</PackageId>
-        <Description>EF Core integration for Sluice: read helpers that take their dependencies from the EF model, strict reads inside a compute, and invalidation of tracked writes once they commit.</Description>
+        <Description>EF Core integration for Sluice: ordinary queries inside a compute record the tables they read, helpers narrow them to rows, and saves and bulk updates invalidate what they wrote once they commit.</Description>
         <PackageTags>cache;caching;fusioncache;invalidation;efcore;entity-framework-core</PackageTags>
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>

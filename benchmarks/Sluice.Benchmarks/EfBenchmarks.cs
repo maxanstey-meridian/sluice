@@ -19,8 +19,8 @@ public sealed class ItemDb(DbContextOptions<ItemDb> options) : DbContext(options
 }
 
 /// <summary>
-/// What <c>UseSluice</c> adds to EF: a save of one changed row, and a cache miss that reads one row through a read
-/// helper, each beside the same without Sluice. On in-memory SQLite, so the database is about as fast as it gets and
+/// What <c>UseSluice</c> adds to EF: a save of one changed row, and a cache miss that reads one row on the compute's
+/// own pooled context, through a read helper and as a plain query, each beside the same without Sluice. On in-memory SQLite, so the database is about as fast as it gets and
 /// Sluice's share is as large as it gets.
 /// </summary>
 [MemoryDiagnoser]
@@ -44,7 +44,13 @@ public class EfBenchmarks
     {
         _connection = new SqliteConnection("Data Source=:memory:");
         await _connection.OpenAsync();
-        _services = new ServiceCollection().AddLogging().AddSluice().BuildServiceProvider();
+        _services = new ServiceCollection()
+            .AddLogging()
+            .AddSluice()
+            .AddPooledDbContextFactory<ItemDb>(
+                (services, options) => options.UseSqlite(_connection).UseSluice(services)
+            )
+            .BuildServiceProvider();
         _sluice = _services.GetRequiredService<SluiceCache>();
         _fusion = new FusionCache(new FusionCacheOptions());
 
@@ -121,7 +127,28 @@ public class EfBenchmarks
                 _query,
                 key,
                 (read, ct) =>
-                    read.Entity(_withSluice.Items, 1).Select(item => item.Value).SingleAsync(ct)
+                    read.Entity(read.Db<ItemDb>().Items, 1)
+                        .Select(item => item.Value)
+                        .SingleAsync(ct)
+            );
+        }
+    }
+
+    [Benchmark(OperationsPerInvoke = Misses)]
+    [BenchmarkCategory("Miss")]
+    public async Task MissSluiceWithPlainQuery()
+    {
+        await _sluice.ClearAsync();
+        for (var key = 0; key < Misses; key++)
+        {
+            await _sluice.GetOrSetAsync(
+                _query,
+                key,
+                (read, ct) =>
+                    read.Db<ItemDb>()
+                        .Items.Where(item => item.Id == 1)
+                        .Select(item => item.Value)
+                        .SingleAsync(ct)
             );
         }
     }

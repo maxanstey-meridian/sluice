@@ -44,16 +44,20 @@ public sealed class CachedRead
         return await cached.WasEvicted();
     }
 
-    /// <summary>A cached read of customer <paramref name="id"/> through <paramref name="reader"/>.</summary>
-    public static Task<CachedRead> Customer(SluiceCache cache, ShopDb reader, int id) =>
-        Of(cache, (read, ct) => read.Entity(reader.Customers, id).SingleOrDefaultAsync(ct));
+    /// <summary>A cached read of customer <paramref name="id"/>.</summary>
+    public static Task<CachedRead> Customer(SluiceCache cache, int id) =>
+        Of(
+            cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().Customers, id).SingleOrDefaultAsync(ct)
+        );
 
-    /// <summary>A cached read of the orders of customer <paramref name="customerId"/> through <paramref name="reader"/>.</summary>
-    public static Task<CachedRead> OrdersOf(SluiceCache cache, ShopDb reader, int customerId) =>
+    /// <summary>A cached read of the orders of customer <paramref name="customerId"/>.</summary>
+    public static Task<CachedRead> OrdersOf(SluiceCache cache, int customerId) =>
         Of(
             cache,
             (read, ct) =>
-                read.Children(reader.Orders, o => o.CustomerId, customerId).ToListAsync(ct)
+                read.Children(read.Db<ShopDb>().Orders, o => o.CustomerId, customerId)
+                    .ToListAsync(ct)
         );
 
     /// <summary>Reads the value again: true if it had been evicted and was recomputed (and so is cached again).</summary>

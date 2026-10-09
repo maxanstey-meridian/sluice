@@ -32,18 +32,23 @@ public sealed record Keys(int Customer, int Order, int Coupon, int Note, int Veh
         );
 }
 
-/// <summary>A read of the shop through the helpers, rendered as text, and named so a mismatch says which.</summary>
+/// <summary>A read of the shop on the compute's own context, rendered as text, and named so a mismatch says which.</summary>
 public sealed record ShopView(
     string Name,
-    Func<SluiceReads, ShopDb, CancellationToken, Task<string>> Read
-);
+    Func<ShopDb, SluiceReads, CancellationToken, Task<string>> Read
+)
+{
+    public Task<string> Run(SluiceReads read, CancellationToken ct) =>
+        Read(read.Db<ShopDb>(), read, ct);
+}
 
 public static class ShopViews
 {
     /// <summary>
-    /// Each kind of helper read of the workload's rows: every <c>Entity</c> and <c>Children</c> read of each key from
-    /// <paramref name="first"/> (exclusive) to <paramref name="last"/>, deleted keys included, and filtered
-    /// <c>All</c> reads over the workload's rows.
+    /// Each kind of read of the workload's rows: every <c>Entity</c> and <c>Children</c> read of each key from
+    /// <paramref name="first"/> (exclusive) to <paramref name="last"/>, deleted keys included, plain queries of each
+    /// key, and plain queries over the workload's rows that follow navigations, many-to-many navigations, joins,
+    /// subqueries and <c>Include</c> into other types.
     /// </summary>
     public static IReadOnlyList<ShopView> Of(Keys first, Keys last)
     {
@@ -51,10 +56,10 @@ public static class ShopViews
         {
             new(
                 "customers",
-                async (read, db, ct) =>
+                async (db, read, ct) =>
                     Text(
-                        await read.All(db.Customers)
-                            .Where(c => c.Id > first.Customer)
+                        await db
+                            .Customers.Where(c => c.Id > first.Customer)
                             .OrderBy(c => c.Id)
                             .Select(c => new { c.Id, c.Name })
                             .ToListAsync(ct)
@@ -63,10 +68,10 @@ public static class ShopViews
             // A filter over a column a write can change: an order that becomes big joins it.
             new(
                 "big orders",
-                async (read, db, ct) =>
+                async (db, read, ct) =>
                     Text(
-                        await read.All(db.Orders)
-                            .Where(o => o.Id > first.Order && o.Item == "big")
+                        await db
+                            .Orders.Where(o => o.Id > first.Order && o.Item == "big")
                             .OrderBy(o => o.Id)
                             .Select(o => o.Id)
                             .ToListAsync(ct)
@@ -74,10 +79,10 @@ public static class ShopViews
             ),
             new(
                 "order lines",
-                async (read, db, ct) =>
+                async (db, read, ct) =>
                     Text(
-                        await read.All(db.OrderLines)
-                            .Where(l => l.OrderId > first.Order)
+                        await db
+                            .OrderLines.Where(l => l.OrderId > first.Order)
                             .OrderBy(l => l.OrderId)
                             .ThenBy(l => l.LineNumber)
                             .Select(l => new
@@ -91,10 +96,10 @@ public static class ShopViews
             ),
             new(
                 "trucks",
-                async (read, db, ct) =>
+                async (db, read, ct) =>
                     Text(
-                        await read.All(db.Vehicles)
-                            .Where(v => v.Id > first.Vehicle)
+                        await db
+                            .Vehicles.Where(v => v.Id > first.Vehicle)
                             .OfType<Truck>()
                             .OrderBy(t => t.Id)
                             .Select(t => new { t.Id, t.Axles })
@@ -103,12 +108,122 @@ public static class ShopViews
             ),
             new(
                 "trailers",
-                async (read, db, ct) =>
+                async (db, read, ct) =>
                     Text(
-                        await read.All(db.Trailers)
-                            .Where(t => t.Id > first.Trailer)
+                        await db
+                            .Trailers.Where(t => t.Id > first.Trailer)
                             .OrderBy(t => t.Id)
                             .Select(t => new { t.Id, t.TruckId })
+                            .ToListAsync(ct)
+                    )
+            ),
+            new(
+                "orders with their customer's name",
+                async (db, read, ct) =>
+                    Text(
+                        await db
+                            .Orders.Where(o => o.Id > first.Order)
+                            .OrderBy(o => o.Id)
+                            .Select(o => new { o.Id, o.Customer!.Name })
+                            .ToListAsync(ct)
+                    )
+            ),
+            new(
+                "orders with their customer, included",
+                async (db, read, ct) =>
+                    Text(
+                        (
+                            await db
+                                .Orders.Include(o => o.Customer)
+                                .Where(o => o.Id > first.Order)
+                                .OrderBy(o => o.Id)
+                                .ToListAsync(ct)
+                        ).Select(o => $"{o.Id} {o.Item} {o.Customer!.Name}")
+                    )
+            ),
+            new(
+                "customers with their order count",
+                async (db, read, ct) =>
+                    Text(
+                        await db
+                            .Customers.Where(c => c.Id > first.Customer)
+                            .OrderBy(c => c.Id)
+                            .Select(c => new
+                            {
+                                c.Id,
+                                Orders = db.Orders.Count(o => o.CustomerId == c.Id),
+                            })
+                            .ToListAsync(ct)
+                    )
+            ),
+            new(
+                "customers with their coupons",
+                async (db, read, ct) =>
+                    Text(
+                        (
+                            await db
+                                .Customers.Where(c => c.Id > first.Customer)
+                                .OrderBy(c => c.Id)
+                                .Select(c => new
+                                {
+                                    c.Id,
+                                    Coupons = c
+                                        .Coupons.OrderBy(x => x.Id)
+                                        .Select(x => x.Id)
+                                        .ToList(),
+                                })
+                                .ToListAsync(ct)
+                        ).Select(c => $"{c.Id}: {string.Join(",", c.Coupons)}")
+                    )
+            ),
+            new(
+                "order lines joined to their order",
+                async (db, read, ct) =>
+                    Text(
+                        await (
+                            from o in db.Orders
+                            join l in db.OrderLines on o.Id equals l.OrderId
+                            where o.Id > first.Order
+                            orderby o.Id, l.LineNumber
+                            select new
+                            {
+                                o.Id,
+                                o.CustomerId,
+                                l.LineNumber,
+                                l.CouponId,
+                            }
+                        ).ToListAsync(ct)
+                    )
+            ),
+            new(
+                "notes with their reply count",
+                async (db, read, ct) =>
+                    Text(
+                        await db
+                            .Notes.Where(n => n.Id > first.Note)
+                            .OrderBy(n => n.Id)
+                            .Select(n => new
+                            {
+                                n.Id,
+                                Replies = db.Notes.Count(r => r.ReplyToId == n.Id),
+                            })
+                            .ToListAsync(ct)
+                    )
+            ),
+            new(
+                "trucks with their trailer count",
+                async (db, read, ct) =>
+                    Text(
+                        await db
+                            .Vehicles.OfType<Truck>()
+                            .Where(t => t.Id > first.Vehicle)
+                            .OrderBy(t => t.Id)
+                            .Select(t => new
+                            {
+                                t.Id,
+                                t.Axles,
+                                Trailers = db.Trailers.Count(x => x.TruckId == t.Id),
+                            })
                             .ToListAsync(ct)
                     )
             ),
@@ -118,8 +233,27 @@ public static class ShopViews
         {
             views.Add(
                 new(
+                    $"customer {id}, found",
+                    async (db, read, ct) => (await db.Customers.FindAsync([id], ct))?.Name ?? "none"
+                )
+            );
+            views.Add(
+                new(
+                    $"orders of customer {id}, filtered",
+                    async (db, read, ct) =>
+                        Text(
+                            await db
+                                .Orders.Where(o => o.CustomerId == id)
+                                .OrderBy(o => o.Id)
+                                .Select(o => o.Item)
+                                .ToListAsync(ct)
+                        )
+                )
+            );
+            views.Add(
+                new(
                     $"customer {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         await read.Entity(db.Customers, id)
                             .Select(c => c.Name)
                             .SingleOrDefaultAsync(ct)
@@ -129,7 +263,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"orders of customer {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(db.Orders, o => o.CustomerId, id)
                                 .OrderBy(o => o.Id)
@@ -146,14 +280,14 @@ public static class ShopViews
             views.Add(
                 new(
                     $"order count of customer {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Number(await read.Children(db.Orders, o => o.Customer, id).CountAsync(ct))
                 )
             );
             views.Add(
                 new(
                     $"notes of customer {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(
                                     db.Notes,
@@ -169,7 +303,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"coupons of customer {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(
                                     db.CustomerCoupons,
@@ -188,8 +322,19 @@ public static class ShopViews
         {
             views.Add(
                 new(
+                    $"order {id} with its customer's name",
+                    async (db, read, ct) =>
+                        (
+                            await read.Entity(db.Orders, id)
+                                .Select(o => new { o.Item, o.Customer!.Name })
+                                .SingleOrDefaultAsync(ct)
+                        )?.ToString() ?? "none"
+                )
+            );
+            views.Add(
+                new(
                     $"order {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         (
                             await read.Entity(db.Orders, id)
                                 .Select(o => new
@@ -205,7 +350,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"lines of order {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(db.OrderLines, l => l.OrderId, id)
                                 .OrderBy(l => l.LineNumber)
@@ -221,14 +366,14 @@ public static class ShopViews
             views.Add(
                 new(
                     $"coupon {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         await read.Entity(db.Coupons, id).AnyAsync(ct) ? "exists" : "none"
                 )
             );
             views.Add(
                 new(
                     $"orders with coupon {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(db.Orders, o => o.CouponId, id)
                                 .OrderBy(o => o.Id)
@@ -240,7 +385,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"lines with coupon {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(db.OrderLines, l => l.CouponId, id)
                                 .OrderBy(l => l.OrderId)
@@ -253,7 +398,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"customers with coupon {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(
                                     db.CustomerCoupons,
@@ -273,7 +418,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"note {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         (
                             await read.Entity(db.Notes, id)
                                 .Select(n => new
@@ -289,7 +434,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"replies to note {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(db.Notes, n => n.ReplyToId, id)
                                 .OrderBy(n => n.Id)
@@ -305,7 +450,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"vehicle {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         await read.Entity(db.Vehicles, id).SingleOrDefaultAsync(ct) switch
                         {
                             null => "none",
@@ -317,7 +462,7 @@ public static class ShopViews
             views.Add(
                 new(
                     $"trailers of truck {id}",
-                    async (read, db, ct) =>
+                    async (db, read, ct) =>
                         Text(
                             await read.Children(db.Trailers, t => t.TruckId, id)
                                 .OrderBy(t => t.Id)
@@ -342,11 +487,11 @@ public static class ShopViews
 /// <summary>
 /// Makes random changes to the shop's rows through a context with <c>UseSluice</c>, the ways an app would: tracked
 /// inserts, edits and deletes, deletes of rows it never loaded, <c>Update</c> of a detached row, several changes in
-/// one save, saves in a transaction that commits or rolls back, and bulk statements invalidated by hand. It reads the
+/// one save, saves in a transaction that commits or rolls back, and bulk statements. It reads the
 /// rows it may pick from the database before each change, through the same context, so it sees its own uncommitted
 /// rows inside a transaction.
 /// </summary>
-public sealed class RandomWriter(ShopDb db, SluiceCache cache, Keys first, Random random)
+public sealed class RandomWriter(ShopDb db, Keys first, Random random)
 {
     private static readonly string[] _names = ["Ada", "Bob", "Cy", "Di", "Ed"];
     private static readonly string[] _plates = ["AB1", "CD2", "EF3"];
@@ -762,14 +907,12 @@ public sealed class RandomWriter(ShopDb db, SluiceCache cache, Keys first, Rando
         await db
             .Orders.Where(o => o.CustomerId == customer)
             .ExecuteUpdateAsync(set => set.SetProperty(o => o.Item, item));
-        await cache.InvalidateAsync(db.Orders.AllDependencies());
         return $"bulk-make customer {customer}'s orders {item}";
     }
 
     private async Task<string> BulkDeleteCustomer(int id)
     {
         await db.Customers.Where(c => c.Id == id).ExecuteDeleteAsync();
-        await cache.InvalidateAsync(db.Customers.AllDependencies());
         return $"bulk-delete customer {id}";
     }
 

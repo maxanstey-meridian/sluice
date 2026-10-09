@@ -50,11 +50,11 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 
 ## SLUICE-CORE-007 A value is cached only with the dependencies its compute recorded
 
-**Rule:** a compute that records no dependency, or calls `GetOrSetAsync` itself (a fused fetch included), makes the call throw `InvalidOperationException` and stores nothing. The guard returns from the factory with memory, L2 and backplane writes skipped and rethrows after `GetOrSetAsync` returns; swallowing it in the compute doesn't help. The EF package marks the compute the same way through the hidden public `Sluice.Infrastructure.ActiveCompute.Violate`, held by the public API files like any other member.
+**Rule:** a compute that records no dependency, or calls `GetOrSetAsync` itself (a fused fetch included), makes the call throw `InvalidOperationException` and stores nothing. The guard returns from the factory with memory, L2 and backplane writes skipped and rethrows after `GetOrSetAsync` returns; swallowing it in the compute doesn't help. The EF package marks the compute the same way through the hidden public `Sluice.Infrastructure.ActiveCompute` (`Reads`, `InFetch`, `Violate`, `Hold`, `Holds`), held by the public API files like any other member.
 **Why:** a value with no dependencies is never invalidated, and a nested hit hides the inner value's dependencies. Throwing from the factory would let fail-safe serve a stale value and hide the bug.
 **Accepts:** work started under `ExecutionContext.SuppressFlow` doesn't see the compute, so every guard is off there.
 **Owner:** `SluiceCache.GetOrSetAsync` and `SluiceCache.ComputeAsync`.
-**Proof:** `ComputeGuardTests.A_compute_that_records_no_reads_throws_and_caches_nothing`, `A_compute_that_records_no_reads_stores_nothing_another_node_can_read`, `A_compute_that_records_no_reads_evicts_nothing_on_another_node`, `Calling_GetOrSetAsync_inside_a_compute_throws`, `Calling_GetOrSetAsync_inside_a_fused_fetch_throws`, `The_zero_reads_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`, `The_nesting_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`; for a caught strict-read violation, the EF tests' `StrictReadTests.A_compute_that_catches_a_strict_read_violation_caches_nothing_and_its_caller_still_gets_it`.
+**Proof:** `ComputeGuardTests.A_compute_that_records_no_reads_throws_and_caches_nothing`, `A_compute_that_records_no_reads_stores_nothing_another_node_can_read`, `A_compute_that_records_no_reads_evicts_nothing_on_another_node`, `Calling_GetOrSetAsync_inside_a_compute_throws`, `Calling_GetOrSetAsync_inside_a_fused_fetch_throws`, `The_zero_reads_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`, `The_nesting_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`; for a caught EF violation, the EF tests' `TrackedReadTests.A_compute_that_catches_a_violation_caches_nothing_and_its_caller_still_gets_it`.
 
 ## SLUICE-CORE-008 No recorded read is lost
 
@@ -65,19 +65,19 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 
 ## SLUICE-CORE-009 Different query keys never share an entry
 
-**Rule:** without a `format`, `string` keys are used as they are and `IFormattable` keys through `ToString(null, CultureInfo.InvariantCulture)`; any other key type, an interface or abstract key type, and `DateTime`, `DateTimeOffset` and `TimeOnly` are rejected at declaration with a message naming `format`. A `format` is used as given; one that returns null throws. Query names can't contain `:` or start with `__fc`.
+**Rule:** without a `format`, `string` keys are used as they are and `IFormattable` keys through `ToString(null, CultureInfo.InvariantCulture)`; any other key type, an interface or abstract key type, and `DateTime`, `DateTimeOffset` and `TimeOnly` are rejected at declaration with a message naming `format`. A `format` is used as given; one that returns null throws. A keyless `Query<TValue>`'s entry key is its name, which no keyed entry key can equal, since those all contain `:` after the name. Query names, keyed or not, can't contain `:` or start with `__fc`.
 **Why:** a collision serves one key's value to another key's caller. Culture-dependent text splits or merges entries across nodes; the three date types' invariant text drops precision; with an interface key type the runtime type picks the text (`int 1` and `long 1` collide); and FusionCache treats any key under `__fc:t:` as tag data.
 **Accepts:** a user `IFormattable` type and every `format` are the user's contract. Equal values that print differently (`1.5m`, `1.50m`) only split the cache. Key text is wire format: changing a `format` changes every entry key and tag. A `TagCacheKeyPrefix` that doesn't start with `__fc` (set directly, or through `SetToSafeStrings()` with a special character other than `_`) isn't caught.
-**Owner:** `KeyText.Default` and `KeyText.Of`, plus the name checks in the `Query` constructor.
-**Proof:** `KeyTextTests.*`, `DeclarationTests.Without_a_format_a_key_type_that_is_neither_string_nor_IFormattable_is_rejected`, `Without_a_format_interface_and_abstract_key_types_are_rejected`, `Without_a_format_DateTime_DateTimeOffset_and_TimeOnly_keys_are_rejected`, `A_format_that_returns_null_throws`, `Query_names_containing_a_colon_are_rejected`, `Query_names_starting_with_FusionCache_s_internal_prefix_are_rejected`.
+**Owner:** `KeyText.Default` and `KeyText.Of`, plus the name checks in `QueryNames.Claim`.
+**Proof:** `KeyTextTests.*`, `DeclarationTests.Without_a_format_a_key_type_that_is_neither_string_nor_IFormattable_is_rejected`, `Without_a_format_interface_and_abstract_key_types_are_rejected`, `Without_a_format_DateTime_DateTimeOffset_and_TimeOnly_keys_are_rejected`, `A_format_that_returns_null_throws`, `Query_names_containing_a_colon_are_rejected`, `Query_names_starting_with_FusionCache_s_internal_prefix_are_rejected`, `A_keyless_query_name_is_checked_as_a_keyed_one_is`.
 
 ## SLUICE-CORE-010 A query name is declared with one set of types
 
-**Rule:** declaring a `Query` name with a second key or value type throws `ArgumentException`; a same-typed repeat is allowed. `Source` names aren't checked.
+**Rule:** declaring a `Query` name with a second key or value type, or as both a keyed and a keyless query, throws `ArgumentException`; a same-typed repeat is allowed. `Source` names aren't checked.
 **Why:** two same-named queries share entries, so on a multi-node setup one reads the other's value from L2 as the wrong shape without an error, or `42` and `"42"` share an entry. A `Source` clash only over-invalidates.
 **Accepts:** copies in other processes, and same-typed copies with a different `format`, aren't caught.
-**Owner:** `QueryNames.Claim`, called from the `Query` constructor.
-**Proof:** `DeclarationTests.Redeclaring_a_query_name_with_a_different_key_or_value_type_throws`, `A_redeclaration_names_types_by_namespace_so_same_named_types_are_told_apart`.
+**Owner:** `QueryNames.Claim`, called from both `Query` constructors.
+**Proof:** `DeclarationTests.Redeclaring_a_query_name_with_a_different_key_or_value_type_throws`, `A_redeclaration_names_types_by_namespace_so_same_named_types_are_told_apart`, `A_keyless_and_a_keyed_query_cannot_share_a_name`.
 
 ## SLUICE-CORE-011 A fused read records its dependencies before its fetch runs
 
@@ -88,8 +88,31 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 
 ## SLUICE-CORE-013 A fused fetch is reported as a declared read, to checks of the running compute only
 
-**Rule:** in the flow of a fused fetch, and tasks it starts, `ActiveCompute.Violate` tells its check that the flow is inside a fetch of the running compute. The rest of the compute, a fetch running beside it, and a compute started from its flow are outside it; a record-only `read.From` is no fetch. What each check does there is its own rule: SLUICE-CORE-007, SLUICE-EF-002, SLUICE-EF-015 and SLUICE-EF-016.
-**Why:** the fetch's recorded dependencies cover what it reads, by declaration; it's the route for views, keyless types, raw SQL and compiled queries.
+**Rule:** in the flow of a fused fetch, and tasks it starts, `ActiveCompute.InFetch` is true for the running compute's reads. The rest of the compute, a fetch running beside it, and a compute started from its flow are outside it; a record-only `read.From` is no fetch. What each check does there is its own rule: SLUICE-CORE-007, SLUICE-EF-002 and SLUICE-EF-015.
+**Why:** the fetch's recorded dependencies cover what it reads, by declaration; it's the route for views, keyless types and raw SQL.
 **Accepts:** a fetch's plain query may read rows its declaration doesn't cover, or track; that's the app's declaration. A task the fetch leaves running stays inside it until the compute ends.
-**Owner:** `ActiveCompute` (`Fetch` and `Violate`).
-**Proof:** `ComputeGuardTests.Calling_GetOrSetAsync_inside_a_fused_fetch_throws`; the EF tests' `StrictReadTests.A_query_run_in_a_fused_fetch_is_cached_and_evicted_by_its_declared_dependency`, `A_plain_query_after_a_read_From_that_only_records_still_throws`, `While_fused_fetches_run_side_by_side_each_runs_plain_queries_and_the_compute_s_own_flow_does_not`, `A_compute_started_from_a_fused_fetch_that_outlived_its_own_compute_is_checked`, `A_compute_that_catches_a_strict_read_violation_caches_nothing_and_its_caller_still_gets_it`.
+**Owner:** `ActiveCompute` (`Fetch` and `InFetch`).
+**Proof:** `ComputeGuardTests.Calling_GetOrSetAsync_inside_a_fused_fetch_throws`; the EF tests' `TrackedReadTests.A_query_run_in_a_fused_fetch_is_cached_and_evicted_by_its_declared_dependency`, `A_query_after_a_read_From_that_only_records_is_still_checked`, `While_fused_fetches_run_side_by_side_each_runs_queries_on_any_context_and_the_compute_s_own_flow_does_not`, `A_compute_started_from_a_fused_fetch_that_outlived_its_own_compute_is_checked`, `A_compute_that_catches_a_violation_caches_nothing_and_its_caller_still_gets_it`.
+
+## SLUICE-CORE-014 A compute runs outside the caller's ambient transaction
+
+**Rule:** while a compute runs, `Transaction.Current` is null: `ComputeAsync` suppresses the caller's ambient transaction around it, and the caller has it back once the compute ends.
+**Why:** a cached value is served to every caller, so it mustn't see a transaction's uncommitted rows, or an old snapshot. A connection the compute opens would otherwise enlist in the caller's transaction.
+**Accepts:** a connection already enlisted before the compute (one the caller opened) stays enlisted; the EF package refuses reads on it (SLUICE-EF-002). A compute that opens its own `TransactionScope` is the app's choice.
+**Owner:** `SluiceCache.ComputeAsync`.
+**Proof:** `ComputeScopeTests.A_compute_runs_outside_the_caller_s_ambient_transaction_and_the_caller_gets_it_back`; the EF tests' `ReadGuardTests.A_compute_reads_what_is_committed_inside_an_enlisted_transaction_or_a_TransactionScope`.
+
+## SLUICE-CORE-015 What a compute holds lives exactly as long as the compute
+
+**Rule:** `ActiveCompute.Hold` gives a compute one instance of each resource type, made from the application's services on first use, and the compute disposes each once it has returned, before its caller resumes. Holding something after the compute returned throws.
+**Why:** the EF package's `read.Db` context must be the compute's own: created inside it, recognisable as its own (`ActiveCompute.Holds`), and gone with it, so nothing it read outlives the compute.
+**Accepts:** a task the compute leaves running may find its resource disposed.
+**Owner:** `SluiceReads.Hold` and `SluiceReads.ReleaseAsync`, called from `SluiceCache.ComputeAsync`.
+**Proof:** `ComputeScopeTests.What_a_compute_holds_is_one_instance_per_type_and_is_disposed_when_it_ends`; the EF tests' `ComputeContextTests.A_compute_gets_one_context_that_does_not_track_and_is_disposed_when_it_ends`.
+
+## SLUICE-CORE-016 Sluice is registered once
+
+**Rule:** a second `AddSluice` on one service collection throws `InvalidOperationException`, saying to call it once.
+**Why:** FusionCache's own error for a second named cache doesn't say which call made it.
+**Owner:** `SluiceServiceCollectionExtensions.AddSluice`.
+**Proof:** `ComputeScopeTests.Registering_Sluice_twice_throws`.
