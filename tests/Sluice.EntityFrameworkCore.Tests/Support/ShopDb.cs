@@ -1,6 +1,7 @@
 using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
 namespace Sluice.EntityFrameworkCore.Tests.Support;
 
@@ -399,9 +400,18 @@ public sealed class Account
 /// <summary>The current tenant, held in shared state as an app's ambient accessor would hold it.</summary>
 public static class TenantAccessor
 {
+    /// <summary>The tenant when none is set, which anything can change.</summary>
+    public static int Fallback;
+
+    /// <summary>The tenant of the current flow, in a readonly field holding an object.</summary>
+    public static readonly AsyncLocal<int> Flow = new();
+
     public static int Current { get; set; }
 
     public static int Read() => Current;
+
+    /// <summary>The current tenant, through a lambda of the caller's.</summary>
+    public static int Map(Func<int, int> pick) => pick(Current);
 }
 
 /// <summary>An object a query filter captures, which reads the current tenant when the query runs.</summary>
@@ -411,18 +421,51 @@ public sealed class TenantSource
 }
 
 /// <summary>
+/// Configures query filters of <see cref="Ledger"/>'s that read this object's own state: <c>instance method</c>
+/// through a method, and <c>field</c> a field anything can set.
+/// </summary>
+public sealed class LedgerFilters : IEntityTypeConfiguration<Ledger>
+{
+    public int TenantId;
+
+    public void Configure(EntityTypeBuilder<Ledger> builder)
+    {
+        builder.HasQueryFilter("instance method", ledger => ledger.TenantId == Tenant());
+        builder.HasQueryFilter("field", ledger => ledger.TenantId == TenantId);
+    }
+
+    private int Tenant() => TenantAccessor.Current;
+}
+
+public enum LedgerKind
+{
+    Sales,
+    Void,
+}
+
+/// <summary>
 /// Has named query filters that read shared state, one way each: <c>accessor</c> a static property, <c>method</c> a
-/// static method, <c>clock</c> the time, and <c>captured</c> an object it captured; and <c>plain</c>, which reads only
-/// a readonly static field, a captured value and <c>EF.Functions</c>, which can't change between calls.
+/// static method, <c>clock</c> the time, <c>captured</c> an object it captured, <c>static field</c> a static field
+/// that isn't readonly, <c>async local</c> a readonly static <c>AsyncLocal</c>, <c>new object</c> an object it makes,
+/// <c>lambda</c> a static method given a lambda, <c>struct</c> a captured struct holding an object, <c>database
+/// function</c> a built-in database function given no column, and <see cref="LedgerFilters"/>' two; and <c>plain</c>,
+/// which reads only what can't change between calls.
 /// </summary>
 public sealed class Ledger
 {
     public static readonly string Closed = "closed";
+    public static readonly int NoTenant = -1;
+    public static readonly Guid NoBatch = Guid.Empty;
+
+    public static string Region { get; } = "eu";
 
     public int Id { get; set; }
     public int TenantId { get; set; }
     public string Code { get; set; } = "";
     public DateTime PostedAt { get; set; }
+    public bool IsDeleted { get; set; }
+    public LedgerKind Kind { get; set; }
+    public Guid Batch { get; set; }
 }
 
 /// <summary>
@@ -520,6 +563,10 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     /// <summary>The database's own <c>upper</c>, mapped as a built-in function.</summary>
     [DbFunction("upper", IsBuiltIn = true)]
     public static string Upper(string text) => throw new NotSupportedException();
+
+    /// <summary>The database's own <c>current_setting</c>, mapped as a built-in function.</summary>
+    [DbFunction("current_setting", IsBuiltIn = true)]
+    public static string? Setting(string name, bool missingOk) => throw new NotSupportedException();
 
     /// <summary>Adds two customers, Ada and Bob, then forgets them, so later queries load them afresh.</summary>
     public async Task<(int Ada, int Bob)> AddCustomers()
@@ -655,7 +702,9 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Memo>().HasQueryFilter(memo => Customers.Any(c => c.Id == memo.CustomerId));
         model.Entity<Account>().HasQueryFilter(account => account.TenantId == TenantId);
         var tenants = new TenantSource();
+        var scope = (Tenant: 0, Source: tenants);
         var code = "open";
+        var tenant = 0;
         model
             .Entity<Ledger>()
             .HasQueryFilter("accessor", ledger => ledger.TenantId == TenantAccessor.Current);
@@ -670,12 +719,41 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .HasQueryFilter("captured", ledger => ledger.TenantId == tenants.Current);
         model
             .Entity<Ledger>()
+            .HasQueryFilter("static field", ledger => ledger.TenantId == TenantAccessor.Fallback);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("async local", ledger => ledger.TenantId == TenantAccessor.Flow.Value);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("new object", ledger => ledger.TenantId == new TenantSource().Current);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("lambda", ledger => ledger.TenantId == TenantAccessor.Map(id => id));
+        model.Entity<Ledger>().HasQueryFilter("struct", ledger => ledger.TenantId == scope.Tenant);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter(
+                "database function",
+                ledger => ledger.Code != Setting("app.ledger_code", true)
+            );
+        model.ApplyConfiguration(new LedgerFilters());
+        model
+            .Entity<Ledger>()
             .HasQueryFilter(
                 "plain",
                 ledger =>
-                    ledger.Code != Ledger.Closed
+                    !ledger.IsDeleted
+                    && ledger.Kind != LedgerKind.Void
+                    && ledger.Code != Ledger.Closed
+                    && ledger.Code != Ledger.Region
                     && ledger.Code != code
-                    && !EF.Functions.Like(ledger.Code, "void%")
+                    && ledger.TenantId != tenant
+                    && ledger.TenantId != Ledger.NoTenant
+                    && ledger.Batch != Ledger.NoBatch
+                    && ledger.PostedAt > DateTime.MinValue
+                    && EF.Property<string>(ledger, nameof(Ledger.Code)) != "void"
+                    && !ledger.Code.StartsWith("x")
+                    && !EF.Functions.ILike(ledger.Code, "void%")
             );
         model.Entity<Voucher>().Navigation(voucher => voucher.Ticket).AutoInclude();
         model

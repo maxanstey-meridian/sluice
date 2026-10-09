@@ -26,15 +26,15 @@ reads, instead of refusing everything but its helpers.
   also loads auto-included navigations (ones the model includes in every query); add
   `.IgnoreAutoIncludes()` to get `read.All`'s shape.
 - **Every query on a `UseSluice` context now starts with a SQL comment,** inside a compute or
-  not: `-- Sluice reads: …` naming the entity types it reads, or `-- Sluice can't track: …` with the
-  reason. You'll see it in logs, `ToQueryString()` and SQL snapshot tests.
+  not: `-- Sluice reads: …` naming the entity types it reads, or `-- Sluice can't track: …` with
+  the reason. You'll see it in logs, `ToQueryString()` and SQL snapshot tests.
 - **Still refused inside a compute:** raw SQL, views, keyless types, your own database functions,
   query filters that read the context's state, entities that load lazily or hold their context,
   writes, and reads inside a transaction. Read the first four in a fused `read.From` fetch.
-- **Newly refused inside a compute:** a query filter that reads static or shared state, such as a
-  static tenant accessor or `DateTime.Now`, since its value differs per call; and another
-  compute's `read` (its `read.From`, `read.Db` or a helper), captured and used in this one, which
-  would record what this compute read on the other.
+- **Newly refused inside a compute:** a query filter that reads state that can change, such as a
+  static tenant accessor, a captured service or `DateTime.Now`, since its value differs per
+  call; and another compute's `read` (its `read.From`, `read.Db` or a helper), captured and used
+  in this one, which would record what this compute read on the other.
 - **New: `ExecuteUpdate` and `ExecuteDelete` invalidate by themselves,** once they commit: every
   read of the table they wrote, and for a delete what the database cascades into. One that fails
   or is cancelled still invalidates, as a save does. Delete any invalidation you wrote by hand

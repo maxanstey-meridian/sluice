@@ -47,7 +47,7 @@ public sealed class PoolingTests(PostgresFixture postgres)
         });
         var provider = node.Services;
         var cache = node.Cache;
-        await using var reader = postgres.CreateDb(node);
+        await using var reader = postgres.CreateDb();
         var (ada, bob) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(cache, ada);
         var bobRead = await CachedRead.Customer(cache, bob);

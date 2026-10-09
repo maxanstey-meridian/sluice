@@ -26,7 +26,8 @@ compute:
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
   `ToSqlQuery`. No tracked write ever invalidates them;
 - a query filter that reads the context's state, such as a tenant id held on the context, or
-  static state, such as a static tenant accessor or `DateTime.Now`. See
+  other state that can change, such as a static tenant accessor, a captured service or
+  `DateTime.Now`. See
   [Tenants](#tenants-and-other-context-state);
 - entities that load lazily or hold their context: lazy-loading proxies, an injected lazy
   loader or `DbContext`, or an owned value that holds one. A cached one would read related rows
@@ -51,7 +52,7 @@ which depends on the reason:
 |---|---|
 | raw SQL, a function, a table-valued function, a temporal query or another query root Sluice doesn't know | read it in a fused fetch: [the declared route](#the-declared-route) |
 | a type not mapped to a table | read it in a fused fetch |
-| a query filter that reads the context's state or static state | put the tenant (or whatever it reads) in the query key, filter by it yourself and add `IgnoreQueryFilters()`: [Tenants](#tenants-and-other-context-state) |
+| a query filter that reads the context's state or other state that can change | put the tenant (or whatever it reads) in the query key, filter by it yourself and add `IgnoreQueryFilters()`: [Tenants](#tenants-and-other-context-state) |
 | entities that load lazily or hold their context | select the values you need (`Select(o => new { o.Id, o.Total })`), not the entities |
 | an `Include` path that isn't a constant | include by a lambda (`Include(o => o.Lines)`) or a constant path (`Include("Lines")`) |
 | `IgnoreQueryFilters` names that aren't constants | name the filters by constants |
@@ -67,8 +68,8 @@ helpers check this when you call them, too.
 
 Use the compute's own `read`, the one its lambda was given. What you record through a `read`
 lands on its compute, so one captured from another compute would record it there (or nowhere,
-once that compute has returned), and this value would miss it. So `read.From`, `read.Db` and the helpers, called on
-another compute's `read` inside this one, throw.
+once that compute has returned), and this value would miss it. So `read.From`, `read.Db` and
+the helpers, called on another compute's `read` inside this one, throw.
 
 ### Writes
 
@@ -177,8 +178,14 @@ too, but more broadly: a write to any invoice, in any tenant, evicts it.
 The same goes for any context-dependent filter, such as soft delete toggled per context:
 whatever changes what a compute reads must be part of the query key.
 
-A filter that reads static state is refused too, for the same reason: a static tenant accessor
-(`HasQueryFilter(i => i.TenantId == TenantContext.Current)`) gives a different value on each
-call, and `DateTime.Now` a different one as time passes, but the cached value is served
-whatever it is now. Put the value in the query key in the same way; for time, put a rounded
-date in the key, such as today's, and filter by that.
+A filter that reads anything outside the rows that can change is refused too, for the same
+reason: a static tenant accessor (`HasQueryFilter(i => i.TenantId == TenantContext.Current)`), a
+method or field of a service captured where the filter was configured, a database function that
+reads the connection's settings (`current_setting`) or the clock, and `DateTime.Now`. Each can
+give a different value on each call, but the cached value is served whatever it is now. Put the
+value in the query key in the same way; for time, put a rounded date in the key, such as
+today's, and filter by that. What a filter may read besides the rows: constants, `static
+readonly` fields and static `{ get; } = …` properties holding a plain value (a number, string,
+date, `Guid` or enum), and plain local values captured where the filter was written. Calling a
+method, or constructing a value of your own type (`new UserId(5)`), is refused even when it
+never changes, since Sluice can't see inside it.

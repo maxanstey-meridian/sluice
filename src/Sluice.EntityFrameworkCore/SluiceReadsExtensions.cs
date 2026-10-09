@@ -41,7 +41,7 @@ public static class SluiceReadsExtensions
     /// <returns>The same context for every call in one compute.</returns>
     /// <exception cref="InvalidOperationException">
     /// No <see cref="IDbContextFactory{TContext}"/> is registered, the context isn't configured with
-    /// <c>UseSluice</c>, or the compute has already returned.
+    /// <c>UseSluice</c>, the compute has already returned, or <paramref name="read"/> is another compute's.
     /// </exception>
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
     public static TContext Db<TContext>(this SluiceReads read)

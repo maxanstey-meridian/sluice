@@ -230,7 +230,7 @@ public sealed class ComputeScopeTests
                     held.Add(ActiveCompute.Hold(read, _ => new Held()));
                     held.Add(ActiveCompute.Hold(read, _ => new Second { Throws = failure }));
                     held.Add(ActiveCompute.Hold(read, _ => new Third()));
-                    return Task.FromResult(true);
+                    return Task.FromResult(false);
                 }
             );
 
@@ -238,6 +238,7 @@ public sealed class ComputeScopeTests
             .Which.Should()
             .BeSameAs(failure);
         held.Should().HaveCount(3).And.OnlyContain(resource => resource.Disposed);
+        (await node.Cache.GetOrSetAsync(_query, "one-dispose-throws", Fresh)).Should().BeTrue();
     }
 
     [Fact]
@@ -325,9 +326,42 @@ public sealed class ComputeScopeTests
             .BeTrue();
     }
 
-    // A dispose that threw out of the factory would let fail-safe serve the expired value.
     [Fact]
-    public async Task A_dispose_that_throws_stores_nothing_even_when_fail_safe_has_an_expired_entry()
+    public async Task When_a_cancelled_compute_s_dispose_throws_the_caller_gets_both()
+    {
+        await using var node = new SluiceNode();
+        var disposeFailure = new InvalidOperationException("dispose failed");
+        using var cancel = new CancellationTokenSource();
+
+        var call = async () =>
+            await node.Cache.GetOrSetAsync(
+                _query,
+                "cancelled-and-dispose-throws",
+                async (read, ct) =>
+                {
+                    read.From(_rows.For(1));
+                    ActiveCompute.Hold(read, _ => new Held { Throws = disposeFailure });
+                    await cancel.CancelAsync();
+                    ct.ThrowIfCancellationRequested();
+                    return false;
+                },
+                cancel.Token
+            );
+
+        var thrown = (await call.Should().ThrowAsync<AggregateException>()).Which;
+        thrown.InnerExceptions.Should().HaveCount(2);
+        thrown.InnerExceptions[0].Should().BeAssignableTo<OperationCanceledException>();
+        thrown.InnerExceptions[1].Should().BeSameAs(disposeFailure);
+    }
+
+    // A dispose that threw out of the factory would let fail-safe serve the expired value, whether or not the
+    // compute recorded dependencies (without them the no-dependencies guard would stop the store anyway).
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_dispose_that_throws_stores_nothing_even_when_fail_safe_has_an_expired_entry(
+        bool records
+    )
     {
         await using var node = new SluiceNode(cache =>
             cache.WithDefaultEntryOptions(o => o.IsFailSafeEnabled = true)
@@ -342,7 +376,11 @@ public sealed class ComputeScopeTests
                 "fail-safe",
                 (read, _) =>
                 {
-                    // No dependencies either: the guard still runs, and nothing is stored.
+                    if (records)
+                    {
+                        read.From(_rows.For(1));
+                    }
+
                     ActiveCompute.Hold(read, _ => new Held { Throws = disposeFailure });
                     return Task.FromResult(false);
                 }

@@ -168,8 +168,8 @@ write evicts, or one built from data other callers shouldn't see.
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
   `ToSqlQuery`. No tracked write ever invalidates them. An abstract TPC base type is fine when
   every concrete type under it has a table;
-- a query filter that reads the context's state, such as a tenant id, or static state, such as
-  a static tenant accessor or `DateTime.Now`;
+- a query filter that reads the context's state, such as a tenant id, or other state that can
+  change, such as a static tenant accessor, a captured service or `DateTime.Now`;
 - entities that load lazily, or hold their context: select the values you need instead;
 - a query on any context other than `read.Db`'s, and reading inside a transaction. See
   [Transactions](/guides/transactions);

@@ -17,7 +17,7 @@ internal static class ModelSources
 {
     private const string SourceAnnotation = "Sluice:Source";
     private const string CascadeAnnotation = "Sluice:Cascades";
-    private const string TableNameAnnotation = "Sluice:TableName";
+    private const string TablePatternAnnotation = "Sluice:TablePattern";
 
     /// <summary>
     /// The source of <paramref name="entityType"/>'s rows, keyed by primary key; a composite key is passed as an
@@ -97,9 +97,9 @@ internal static class ModelSources
                 && entityType.GetTableName() is { } table
                 && entityType
                     .GetOrAddRuntimeAnnotationValue(
-                        TableNameAnnotation,
-                        static identifier => NamePattern(identifier!),
-                        quote.DelimitIdentifier(table)
+                        TablePatternAnnotation,
+                        static arg => NamePattern(arg.Quote.DelimitIdentifier(arg.Table)),
+                        (Quote: quote, Table: table)
                     )
                     .IsMatch(sql)
             )
@@ -318,10 +318,17 @@ internal static class ModelSources
     /// <summary>
     /// The pattern of <paramref name="identifier"/>, as the provider delimits it, standing alone in SQL: not part of a
     /// longer identifier, so an unquoted <c>users</c> (Npgsql leaves a lowercase name bare) isn't found in
-    /// <c>old_users</c> or <c>users_id</c>. A quoted one carries its own delimiters.
+    /// <c>old_users</c> or <c>users_id</c>. A quoted one carries its own delimiters, so its ends need no check.
     /// </summary>
     internal static Regex NamePattern(string identifier) =>
-        new($@"(?<![\w$]){Regex.Escape(identifier)}(?![\w$])", RegexOptions.CultureInvariant);
+        new(
+            (IsWordChar(identifier[0]) ? @"(?<![\w$])" : "")
+                + Regex.Escape(identifier)
+                + (IsWordChar(identifier[^1]) ? @"(?![\w$])" : ""),
+            RegexOptions.CultureInvariant
+        );
+
+    private static bool IsWordChar(char c) => c == '$' || c == '_' || char.IsLetterOrDigit(c);
 
     /// <summary>The entity whose rows <paramref name="entityType"/> is stored with: itself, unless it's owned.</summary>
     internal static IEntityType Unowned(IEntityType entityType) =>

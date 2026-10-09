@@ -216,7 +216,7 @@ Inside a compute, a few things throw, because Sluice couldn't tell what they rea
 the fetch of `read.From(dependency, fetch)`, with a `Source` you declare and invalidate
 yourself. A query on any context other than `read.Db`'s throws too: that context may hold your
 request's unsaved edits or uncommitted rows, which mustn't be cached for everyone. So does a
-query filter that reads the context's state or static state, such as a tenant id.
+query filter that reads the context's state or other state that can change, such as a tenant id.
 [Strict reads](https://maxanstey-meridian.github.io/sluice/guides/strict-reads) has the full
 list, and what Sluice can't check.
 

@@ -163,9 +163,8 @@ public sealed class SluiceReads
     }
 
     // Once the compute has closed, so nothing is added after. Disposes every resource, newest first, even when one
-    // throws, so a pooled context still goes back to its pool, then returns what they threw: one exception, an
-    // AggregateException for several, or null.
-    internal async ValueTask<Exception?> ReleaseAsync()
+    // throws, so a pooled context still goes back to its pool, then returns what they threw, or null.
+    internal async ValueTask<List<Exception>?> ReleaseAsync()
     {
         if (_held is null)
         {
@@ -185,20 +184,12 @@ public sealed class SluiceReads
             }
         }
 
-        return failures switch
-        {
-            null => null,
-            [var only] => only,
-            _ => new AggregateException(
-                "Disposing what the compute held threw more than once.",
-                failures
-            ),
-        };
+        return failures;
     }
 
     // A read captured from another compute would record on that compute (or nowhere, once it has returned) what this
-    // one's value is built from, so this one would be cached without it. The running compute gets the violation, so it caches
-    // nothing even if it catches the exception.
+    // one's value is built from, so this one would be cached without it. The running compute gets the violation, so it
+    // caches nothing even if it catches the exception.
     private void ThrowIfAnotherCompute()
     {
         if (ActiveCompute.Reads is { } current && current != this)
@@ -206,8 +197,9 @@ public sealed class SluiceReads
             throw ActiveCompute.Violate(
                 current,
                 new InvalidOperationException(
-                    "A read from another compute was used inside this one, so what it read would be recorded on the "
-                        + "wrong compute. Use the read the compute was given."
+                    $"The compute of query {current.Query} used the read of another compute (query {Query}"
+                        + (IsOpen ? "" : ", which has already returned")
+                        + "), so what it reads wouldn't be recorded on this one. Use the read the compute was given."
                 )
             );
         }

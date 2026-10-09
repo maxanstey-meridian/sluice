@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Data.Common;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -383,21 +384,21 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         }
     }
 
-    /// <summary>Whether an expression reads the query's rows: whether it holds a parameter or a query root.</summary>
-    private sealed class RowReader : ExpressionVisitor
+    /// <summary>Whether an expression holds a node that matches.</summary>
+    private sealed class Finder(Func<Expression, bool> match) : ExpressionVisitor
     {
         private bool _found;
 
-        internal static bool In(Expression expression)
+        internal static bool In(Expression expression, Func<Expression, bool> match)
         {
-            var reader = new RowReader();
-            reader.Visit(expression);
-            return reader._found;
+            var finder = new Finder(match);
+            finder.Visit(expression);
+            return finder._found;
         }
 
         public override Expression? Visit(Expression? node)
         {
-            _found |= node is ParameterExpression or QueryRootExpression;
+            _found |= node is not null && match(node);
             return _found ? node : base.Visit(node);
         }
     }
@@ -422,8 +423,13 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         private List<string>? _ignoredFilters;
         private bool _ignoresAutoIncludes;
 
-        // The type whose query filter is being visited, if any.
+        // Whether a value type holds only plain values, worked out once per type.
+        private static readonly ConcurrentDictionary<Type, bool> _plain = new();
+
+        // The type whose query filter is being visited, if any, and the parameters that stand for rows in it: the
+        // filter's own, and those of the lambdas a query operator over rows takes.
         private IEntityType? _filter;
+        private readonly HashSet<ParameterExpression> _rows = [];
         private string? _untrackable;
 
         /// <summary>The tag for the query: what it reads, or why that can't be known.</summary>
@@ -436,25 +442,182 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             return analysis.Tags();
         }
 
+        // EF evaluates every part of a query filter that doesn't read its rows afresh each time the query runs (or,
+        // like DateTime.UtcNow, translates it to SQL that reads no table), so each such part must be fixed once the
+        // model is built, or callers with different values would share one cached value. What isn't fixed is refused
+        // and not followed further. DbSet accesses in a filter are query roots by now.
         public override Expression? Visit(Expression? node)
         {
-            // A filter that reads the context (a tenant, the current user) gives each context its own rows, so one
-            // cached value would be served to all of them. DbSet accesses in a filter are query roots by now.
-            if (
-                _filter is not null
-                && node is not null
-                && typeof(DbContext).IsAssignableFrom(node.Type)
-            )
+            if (_filter is null || node is null)
             {
-                Untrackable(
-                    $"{_filter.DisplayName()}'s query filter reads the context's state (such as a tenant or the "
-                        + "current user), and the cached value is served to every caller whatever that state is"
-                        + FilterByItYourself
-                );
+                return base.Visit(node);
+            }
+
+            if (!Finder.In(node, ReadsRows))
+            {
+                if (Unfixed(node) is { } unfixed)
+                {
+                    Refuse(unfixed);
+                }
+
+                return node;
+            }
+
+            // A query operator over rows runs its lambdas on rows: a subquery's, or a navigation's.
+            if (node is MethodCallExpression call)
+            {
+                foreach (var argument in call.Arguments)
+                {
+                    if (
+                        (
+                            argument is UnaryExpression { NodeType: ExpressionType.Quote } quote
+                                ? quote.Operand
+                                : argument
+                        )
+                        is LambdaExpression lambda
+                    )
+                    {
+                        _rows.UnionWith(lambda.Parameters);
+                    }
+                }
             }
 
             return base.Visit(node);
         }
+
+        private bool ReadsRows(Expression node) =>
+            node is QueryRootExpression || (node is ParameterExpression row && _rows.Contains(row));
+
+        // The part of a query filter's expression that doesn't read its rows and isn't fixed once the model is built,
+        // or null if it all is. Fixed is built only from plain constants; readonly static fields and get-only static
+        // auto-properties holding plain values; plain values a closure captured; fields of those; EF.Functions; and
+        // EF.Constant, EF.Parameter, operators, conversions, conditions and construction of fixed values that run only
+        // the runtime's own code. Anything else is refused, even when it never changes: a method call, an object, a
+        // static property with a body.
+        private static Expression? Unfixed(Expression node) =>
+            node switch
+            {
+                ConstantExpression { Value: null } => null,
+                ConstantExpression => IsPlain(node.Type) ? null : node,
+                MemberExpression { Expression: null, Member: FieldInfo { IsInitOnly: true } }
+                    when IsPlain(node.Type) => null,
+                MemberExpression { Expression: null, Member: PropertyInfo property }
+                    when IsPlain(node.Type) && IsReadonlyAutoProperty(property) => null,
+                MemberExpression { Expression: null, Member.DeclaringType: var type }
+                    when type == typeof(EF) && node.Type == typeof(DbFunctions) => null,
+                MemberExpression
+                {
+                    Expression: ConstantExpression { Value: { } closure },
+                    Member: FieldInfo,
+                } when IsClosure(closure.GetType()) && IsPlain(node.Type) => null,
+                MemberExpression { Expression: { } value, Member: FieldInfo }
+                    when IsPlain(node.Type) && Unfixed(value) is null => null,
+                MethodCallExpression
+                {
+                    Method.Name: nameof(EF.Constant) or nameof(EF.Parameter),
+                    Arguments: [var value],
+                } call when call.Method.DeclaringType == typeof(EF) => Unfixed(value),
+                UnaryExpression unary when IsRuntime(unary.Method) => Unfixed(unary.Operand),
+                BinaryExpression { Conversion: null } binary when IsRuntime(binary.Method) =>
+                    Unfixed(binary.Left) ?? Unfixed(binary.Right),
+                ConditionalExpression conditional => Unfixed(conditional.Test)
+                    ?? Unfixed(conditional.IfTrue)
+                    ?? Unfixed(conditional.IfFalse),
+                NewExpression @new when IsPlain(node.Type) && IsRuntime(@new.Constructor) =>
+                    FirstUnfixed(@new.Arguments),
+                NewArrayExpression { NodeType: ExpressionType.NewArrayInit } array
+                    when IsPlain(node.Type.GetElementType()!) => FirstUnfixed(array.Expressions),
+                MemberInitExpression init
+                    when init.Bindings.All(binding =>
+                        binding is MemberAssignment { Member: FieldInfo }
+                    ) => Unfixed(init.NewExpression)
+                    ?? FirstUnfixed(
+                        init.Bindings.Select(binding => ((MemberAssignment)binding).Expression)
+                    ),
+                _ => node,
+            };
+
+        private static Expression? FirstUnfixed(IEnumerable<Expression> parts) =>
+            parts.Select(Unfixed).FirstOrDefault(part => part is not null);
+
+        // A value that can't change once made: a primitive, an enum, a string, or a struct whose fields all hold
+        // plain values (decimal, the dates and times, Guid, a nullable plain value), not one holding an object.
+        private static bool IsPlain(Type type) =>
+            _plain.GetOrAdd(
+                type,
+                static type =>
+                    type.IsPrimitive
+                    || type.IsEnum
+                    || type == typeof(string)
+                    || (
+                        type.IsValueType
+                        && type.GetFields(
+                                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+                            )
+                            .All(field => IsPlain(field.FieldType))
+                    )
+            );
+
+        // A static property with only a compiler-made getter over a readonly backing field, so it reads that field.
+        private static bool IsReadonlyAutoProperty(PropertyInfo property) =>
+            property is { CanWrite: false, GetMethod: { IsStatic: true } getter }
+            && getter.IsDefined(typeof(CompilerGeneratedAttribute), false)
+            && property.DeclaringType?.GetField(
+                $"<{property.Name}>k__BackingField",
+                BindingFlags.Static | BindingFlags.NonPublic
+            )
+                is { IsInitOnly: true };
+
+        // The class the compiler makes to hold a lambda's captured variables.
+        private static bool IsClosure(Type type) =>
+            type.IsDefined(typeof(CompilerGeneratedAttribute), false);
+
+        // An operator, conversion or constructor that runs no code but the runtime's own.
+        private static bool IsRuntime(MethodBase? method) =>
+            method is null || method.DeclaringType?.Assembly == typeof(object).Assembly;
+
+        // A filter that reads the context (a tenant, the current user) gives each context its own rows, so one cached
+        // value would be served to all of them; other shared state, to every caller whatever it is.
+        private void Refuse(Expression unfixed)
+        {
+            if (Finder.In(unfixed, node => typeof(DbContext).IsAssignableFrom(node.Type)))
+            {
+                Untrackable(
+                    $"{_filter!.DisplayName()}'s query filter reads the context's state (such as a tenant or the "
+                        + "current user), and the cached value is served to every caller whatever that state is"
+                        + FilterByItYourself
+                );
+            }
+            else
+            {
+                Untrackable(
+                    $"{_filter!.DisplayName()}'s query filter reads shared state ({Describe(unfixed)}), which can "
+                        + "differ between calls, and the cached value is served to every caller whatever it is"
+                        + FilterByItYourself
+                );
+            }
+        }
+
+        // What a refused part of a query filter reads, as its source names it.
+        private string Describe(Expression node) =>
+            node switch
+            {
+                MemberExpression { Expression: ConstantExpression { Value: { } closure } } member
+                    when IsClosure(closure.GetType()) => $"the captured {member.Member.Name}",
+                MemberExpression { Expression: MemberExpression inner } member =>
+                    $"{Describe(inner)}.{member.Member.Name}",
+                MemberExpression member =>
+                    $"{member.Member.DeclaringType?.Name}.{member.Member.Name}",
+                MethodCallExpression call when model.FindDbFunction(call.Method) is { } function =>
+                    $"the database function {function.Name}",
+                MethodCallExpression { Object: MemberExpression inner } call =>
+                    $"{Describe(inner)}.{call.Method.Name}()",
+                MethodCallExpression call =>
+                    $"{call.Method.DeclaringType?.Name}.{call.Method.Name}()",
+                InvocationExpression => "a delegate it invokes",
+                NewExpression => $"a new {node.Type.Name}",
+                _ => $"a {node.Type.Name}",
+            };
 
         protected override Expression VisitExtension(Expression node)
         {
@@ -512,6 +675,21 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             if (method.DeclaringType == typeof(EntityFrameworkQueryableExtensions))
             {
                 VisitQueryOperator(node);
+
+                // In a query filter's subquery, EF's own operators take their names and tags as constants, which
+                // shape the query rather than being values it reads.
+                if (_filter is not null)
+                {
+                    foreach (var argument in node.Arguments)
+                    {
+                        if (argument is not ConstantExpression)
+                        {
+                            Visit(argument);
+                        }
+                    }
+
+                    return node;
+                }
             }
             else if (
                 node.TryGetEFPropertyArguments(out var instance, out var name)
@@ -520,21 +698,12 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             {
                 ReachNavigation(instance.Type, name);
             }
-            else if (model.FindDbFunction(method) is { } function)
+            // A built-in function reading the rows is trusted; in a query filter, one reading none is refused in Visit.
+            else if (model.FindDbFunction(method) is { IsBuiltIn: false } function)
             {
-                if (!function.IsBuiltIn)
-                {
-                    Untrackable(
-                        $"it calls the database function {function.Name}, which can read any table{DeclareIt}"
-                    );
-                }
-            }
-            // A static method none of whose arguments reads the query's rows doesn't depend on them: EF calls it
-            // before the query runs, or (Guid.NewGuid()) translates it to SQL that reads no table. One that does read
-            // them is translated or refused by EF; EF.Functions' methods take EF.Functions and the rows.
-            else if (_filter is not null && method.IsStatic && !node.Arguments.Any(RowReader.In))
-            {
-                SharedState($"{method.DeclaringType?.Name}.{method.Name}()");
+                Untrackable(
+                    $"it calls the database function {function.Name}, which can read any table{DeclareIt}"
+                );
             }
 
             return base.VisitMethodCall(node);
@@ -547,42 +716,8 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 ReachNavigation(declaringType, node.Member.Name);
             }
 
-            // A query filter's static members and captured values are read afresh each time the query runs (or, like
-            // DateTime.UtcNow, become SQL that reads no table), so they can differ between calls. Only a readonly
-            // static field or a captured variable holding a plain value can't change once the model is built; an
-            // object held either way can, whatever it holds. EF.Functions is EF's own, and a captured context is
-            // refused in Visit, for its own reason.
-            if (_filter is not null)
-            {
-                switch (node)
-                {
-                    case { Expression: null, Member: FieldInfo { IsInitOnly: true } }
-                        when IsPlain(node.Type):
-                    case { Expression: null } when node.Type == typeof(DbFunctions):
-                    case { Expression: ConstantExpression { Value: DbContext } }:
-                    case { Expression: ConstantExpression, Member: FieldInfo }
-                        when IsPlain(node.Type):
-                        break;
-                    case { Expression: null, Member: var member }:
-                        SharedState($"{member.DeclaringType?.Name}.{member.Name}");
-                        break;
-                    case { Expression: ConstantExpression, Member: var member }:
-                        SharedState($"the captured {member.Name}");
-                        break;
-                }
-            }
-
             return base.VisitMember(node);
         }
-
-        private static bool IsPlain(Type type) => type.IsValueType || type == typeof(string);
-
-        private void SharedState(string state) =>
-            Untrackable(
-                $"{_filter!.DisplayName()}'s query filter reads shared state ({state}), which can differ between "
-                    + "calls, and the cached value is served to every caller whatever it is"
-                    + FilterByItYourself
-            );
 
         private void VisitQueryOperator(MethodCallExpression node)
         {
@@ -715,6 +850,8 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                             && (filter.IsAnonymous || _ignoredFilters?.Contains(filter.Key) != true)
                         )
                         {
+                            _rows.Clear();
+                            _rows.Add(predicate.Parameters[0]);
                             Visit(predicate.Body);
                         }
                     }

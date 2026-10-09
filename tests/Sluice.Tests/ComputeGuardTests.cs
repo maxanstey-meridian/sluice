@@ -188,8 +188,10 @@ public sealed class ComputeGuardTests
     {
         await using var node = new SluiceNode();
         SluiceReads? captured = null;
-        var aStarted = new TaskCompletionSource();
-        var aMayFinish = new TaskCompletionSource();
+        var aStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aMayFinish = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
         var fetched = false;
 
         var a = node
@@ -244,12 +246,55 @@ public sealed class ComputeGuardTests
         await b.Should()
             .ThrowAsync<InvalidOperationException>()
             .WithMessage(
-                "A read from another compute was used inside this one, so what it read would be recorded on the "
-                    + "wrong compute. Use the read the compute was given."
+                "The compute of query guard-outer used the read of another compute (query guard-outer), so what it "
+                    + "reads wouldn't be recorded on this one. Use the read the compute was given."
             );
         fetched.Should().BeFalse();
         aMayFinish.SetResult();
         (await a).Should().Be("a");
+        (await node.Cache.GetOrSetAsync(_outer, "b", Good)).Should().Be("good#1");
+    }
+
+    // Before the core checked, a returned compute's read threw only "called after the compute returned", which the
+    // running compute could catch and then cache without what it read.
+    [Fact]
+    public async Task Using_a_returned_compute_s_read_throws_and_caches_nothing()
+    {
+        await using var node = new SluiceNode();
+        SluiceReads? captured = null;
+        await node.Cache.GetOrSetAsync(
+            _outer,
+            "returned",
+            (read, _) =>
+            {
+                read.From(_rows.For(1));
+                captured = read;
+                return Task.FromResult("a");
+            }
+        );
+
+        var b = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _outer,
+                    "b",
+                    (read, _) =>
+                    {
+                        read.From(_rows.For(2));
+                        try
+                        {
+                            captured!.From(_rows.For(3));
+                        }
+                        catch (InvalidOperationException) { }
+
+                        return Task.FromResult("b");
+                    }
+                )
+                .AsTask();
+
+        await b.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("*which has already returned*");
         (await node.Cache.GetOrSetAsync(_outer, "b", Good)).Should().Be("good#1");
     }
 }

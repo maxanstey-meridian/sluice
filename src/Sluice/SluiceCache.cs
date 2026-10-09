@@ -59,17 +59,17 @@ public sealed class SluiceCache
     /// has ended. Waiting on another caller's compute for the same key can't be cancelled.
     /// </param>
     /// <exception cref="InvalidOperationException">
-    /// The compute recorded no dependencies, or this was called from inside another compute, a fused
-    /// <c>read.From(dependency, fetch)</c> fetch included. Nothing is cached in either case.
+    /// The compute recorded no dependencies, used another compute's <c>read</c>, or this was called from inside
+    /// another compute, a fused <c>read.From(dependency, fetch)</c> fetch included. Nothing is cached in any case.
     /// </exception>
     /// <exception cref="OperationCanceledException">
-    /// The compute was cancelled, or <paramref name="ct"/> was already cancelled, in which case no cached value is
-    /// returned and nothing is computed.
+    /// The compute was cancelled (unless disposing what it held also threw), or <paramref name="ct"/> was already
+    /// cancelled, in which case no cached value is returned and nothing is computed.
     /// </exception>
     /// <exception cref="AggregateException">
-    /// The compute threw and disposing what it held (such as <c>read.Db</c>'s context) threw too, or several disposes
-    /// threw. A single failed dispose after a compute that didn't throw reaches the caller as it is. Nothing is cached
-    /// in either case.
+    /// The compute threw (or was cancelled) and disposing what it held (such as <c>read.Db</c>'s context) threw too,
+    /// or several disposes threw. A single failed dispose after a compute that didn't throw reaches the caller as it
+    /// is. Nothing is cached in any case.
     /// </exception>
     [SuppressMessage(
         "ApiDesign",
@@ -237,7 +237,7 @@ public sealed class SluiceCache
         TValue value = default!;
         Exception? computeFailure = null;
         string[] tags;
-        Exception? releaseFailure;
+        List<Exception>? releaseFailures;
 
         // A cached value is served to every caller, so it mustn't see a transaction's uncommitted rows. Connections the
         // compute opens don't enlist in the caller's ambient transaction.
@@ -260,18 +260,27 @@ public sealed class SluiceCache
             }
 
             tags = reads.Close();
-            releaseFailure = await reads.ReleaseAsync().ConfigureAwait(false);
+            releaseFailures = await reads.ReleaseAsync().ConfigureAwait(false);
         }
 
         // A failed dispose mustn't throw out of the factory: it would replace the compute's exception or a guard
         // violation, skip the check below, and with fail-safe on let FusionCache serve an expired value over it. It
         // becomes a violation instead, behind any guard violation the compute recorded (Violate keeps the first).
-        if (releaseFailure is not null)
+        if (releaseFailures is not null)
         {
             reads.Violate(
-                computeFailure is null
-                    ? releaseFailure
-                    : new AggregateException(computeFailure, releaseFailure)
+                (computeFailure, releaseFailures) switch
+                {
+                    (null, [var only]) => only,
+                    (null, _) => new AggregateException(
+                        "Disposing what the compute held threw more than once.",
+                        releaseFailures
+                    ),
+                    _ => new AggregateException(
+                        "The compute threw, and disposing what it held threw too.",
+                        [computeFailure, .. releaseFailures]
+                    ),
+                }
             );
         }
         else if (computeFailure is not null && !reads.HasViolation)

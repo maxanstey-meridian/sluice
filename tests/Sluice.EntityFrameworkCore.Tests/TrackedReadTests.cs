@@ -174,24 +174,50 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                 + SelectValues
         ),
         ["query filter reading a static property"] = (
-            (db, ct) =>
-                db.Ledgers.IgnoreQueryFilters(["method", "clock", "captured"]).ToListAsync(ct),
+            (db, ct) => LedgersFilteredBy(db, "accessor").ToListAsync(ct),
             "*Ledger's query filter reads shared state (TenantAccessor.Current)" + FilterYourself
         ),
         ["query filter calling a static method"] = (
-            (db, ct) =>
-                db.Ledgers.IgnoreQueryFilters(["accessor", "clock", "captured"]).ToListAsync(ct),
+            (db, ct) => LedgersFilteredBy(db, "method").ToListAsync(ct),
             "*Ledger's query filter reads shared state (TenantAccessor.Read())" + FilterYourself
         ),
         ["query filter reading the clock"] = (
-            (db, ct) =>
-                db.Ledgers.IgnoreQueryFilters(["accessor", "method", "captured"]).ToListAsync(ct),
+            (db, ct) => LedgersFilteredBy(db, "clock").ToListAsync(ct),
             "*Ledger's query filter reads shared state (DateTime.UtcNow)" + FilterYourself
         ),
         ["query filter reading an object it captured"] = (
-            (db, ct) =>
-                db.Ledgers.IgnoreQueryFilters(["accessor", "method", "clock"]).ToListAsync(ct),
-            "*Ledger's query filter reads shared state (the captured tenants)" + FilterYourself
+            (db, ct) => LedgersFilteredBy(db, "captured").ToListAsync(ct),
+            "*Ledger's query filter reads shared state (the captured tenants.Current)"
+                + FilterYourself
+        ),
+        ["query filter reading a static field that isn't readonly"] = (
+            (db, ct) => LedgersFilteredBy(db, "static field").ToListAsync(ct),
+            "*Ledger's query filter reads shared state (TenantAccessor.Fallback)" + FilterYourself
+        ),
+        ["query filter reading a readonly static AsyncLocal"] = (
+            (db, ct) => LedgersFilteredBy(db, "async local").ToListAsync(ct),
+            "*Ledger's query filter reads shared state (TenantAccessor.Flow.Value)" + FilterYourself
+        ),
+        ["query filter reading an object it makes"] = (
+            (db, ct) => LedgersFilteredBy(db, "new object").ToListAsync(ct),
+            "*Ledger's query filter reads shared state (TenantSource.Current)" + FilterYourself
+        ),
+        ["query filter reading a captured struct holding an object"] = (
+            (db, ct) => LedgersFilteredBy(db, "struct").ToListAsync(ct),
+            "*Ledger's query filter reads shared state (the captured scope.Item1)" + FilterYourself
+        ),
+        ["query filter calling a built-in database function given no column"] = (
+            (db, ct) => LedgersFilteredBy(db, "database function").ToListAsync(ct),
+            "*Ledger's query filter reads shared state (the database function current_setting)"
+                + FilterYourself
+        ),
+        ["query filter calling a method of the object configuring it"] = (
+            (db, ct) => LedgersFilteredBy(db, "instance method").ToListAsync(ct),
+            "*Ledger's query filter reads shared state (LedgerFilters.Tenant())" + FilterYourself
+        ),
+        ["query filter reading a field of the object configuring it"] = (
+            (db, ct) => LedgersFilteredBy(db, "field").ToListAsync(ct),
+            "*Ledger's query filter reads shared state (LedgerFilters.TenantId)" + FilterYourself
         ),
         ["save"] = (
             (db, ct) =>
@@ -329,10 +355,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             db => [db.Orders.Dependency(-1)]
         ),
         ["query filter reading only what can't change between calls"] = (
-            (r, ct) =>
-                r.Db<ShopDb>()
-                    .Ledgers.IgnoreQueryFilters(["accessor", "method", "clock", "captured"])
-                    .ToListAsync(ct),
+            (r, ct) => LedgersFilteredBy(r.Db<ShopDb>(), null).ToListAsync(ct),
             db => [db.Ledgers.Dependency(-1)],
             db => [db.Coupons.Dependency(-1)]
         ),
@@ -560,6 +583,16 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     // Generic code reaches the navigation through the interface its type parameter is constrained to.
     private static IQueryable<string> CustomerNames<T>(IQueryable<T> rows)
         where T : IHasCustomer => rows.Select(row => row.Customer!.Name);
+
+    // Ledgers under the plain query filter and the one named, if any: Ledger's other filters each read shared state.
+    private static IQueryable<Ledger> LedgersFilteredBy(ShopDb db, string? filter) =>
+        db.Ledgers.IgnoreQueryFilters([
+            .. db
+                .Model.FindEntityType(typeof(Ledger))!
+                .GetDeclaredQueryFilters()
+                .Select(declared => declared.Key!)
+                .Where(key => key != "plain" && key != filter),
+        ]);
 
     // EF's own scalar path, which sequence-based key generation uses.
     private static IRelationalCommand SelectOne(ShopDb db) =>
@@ -829,6 +862,29 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                     + "read.From(dependency, fetch), with a dependency on a Source you declare, and invalidate that "
                     + "source when its data changes. This is a bug in Sluice's analysis; please report it with the "
                     + "query"
+            );
+    }
+
+    // EF can't translate a method of the app's given a lambda, so it refuses the query before any command runs; the
+    // analysis refuses it too, rather than taking the lambda's own parameter for the rows.
+    [Fact]
+    public async Task A_query_filter_calling_a_static_method_with_a_lambda_that_does_not_read_the_rows_is_tagged_as_untrackable()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var query = LedgersFilteredBy(db, "lambda").Expression;
+
+        var tagged = TrackedReads.Instance.QueryCompilationStarting(
+            query,
+            new QueryExpressionEventData(null!, null!, db, query, null!)
+        );
+
+        tagged
+            .ToString()
+            .Should()
+            .Match(
+                "*Sluice can't track: Ledger's query filter reads shared state (TenantAccessor.Map())"
+                    + FilterYourself
             );
     }
 

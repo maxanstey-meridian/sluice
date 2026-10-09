@@ -681,6 +681,10 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
             )
             .Should()
             .HaveCount(6)
-            .And.OnlyContain(record => record.Exception != null);
+            .And.OnlyContain(record =>
+                record.Exception != null
+                && record.GetStructuredStateValue("DependencyCount") != null
+                && record.GetStructuredStateValue("DependencyCount") != "(null)"
+            );
     }
 }
