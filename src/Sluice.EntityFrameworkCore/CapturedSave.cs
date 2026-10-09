@@ -15,17 +15,20 @@ internal sealed class CapturedSave
     private readonly List<(EntityEntry Entry, EntityState State)> _changes = [];
     private readonly List<Dependency> _originals = [];
 
-    private CapturedSave() { }
+    private CapturedSave(ContextTransaction transaction) => Transaction = transaction;
+
+    /// <summary>
+    /// The transaction the save began in. Only a save left over when its context saves again uses it; a save that
+    /// completes reads its transaction then.
+    /// </summary>
+    internal ContextTransaction Transaction { get; }
 
     /// <summary>Captures what <paramref name="context"/> is about to save, without changing what EF saves.</summary>
-    /// <param name="context">The context about to save.</param>
-    /// <param name="unfinished">
-    /// A save on the same context that hasn't completed: the save this one runs inside (an interceptor that saves
-    /// again), or one a concurrency conflict left behind. Its rows are carried into this save and published with
-    /// it, since EF reports the end of the inner save before the outer one's, and the outer one then finds nothing.
-    /// </param>
-    internal static CapturedSave Capture(DbContext context, CapturedSave? unfinished)
+    /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
+    internal static CapturedSave Capture(DbContext context)
     {
+        // First, so a provider Sluice can't see transactions for is refused before anything else happens.
+        var save = new CapturedSave(ContextTransaction.Of(context));
         var tracker = context.ChangeTracker;
 
         // EF cascades OnSaveChanges deletes after this point; surface them now. The public call forces every
@@ -40,13 +43,6 @@ internal sealed class CapturedSave
         )
         {
             tracker.CascadeChanges();
-        }
-
-        var save = new CapturedSave();
-        if (unfinished is not null)
-        {
-            save._changes.AddRange(unfinished._changes);
-            save._originals.AddRange(unfinished._originals);
         }
 
         // Entries() detects changes only when AutoDetectChangesEnabled, exactly as SaveChanges is about to.
@@ -147,10 +143,12 @@ internal sealed class CapturedSave
     }
 
     // A row saved without being loaded (attached, removed or updated from an object the context didn't query) has
-    // no original values from the database, so the parent it had is unknown. Two signs give it away: Update() marks
-    // every property modified with its original value equal to its current one, and a stub's foreign key holds a
-    // value the database can't (null in a required key, or the default of a non-nullable type, such as 0). A
-    // nullable foreign key left null on a stub looks like a row with no parent, and can't be told apart.
+    // no original values from the database, so the parent it had is unknown. Two signs point to one, and both can
+    // also match a loaded row, which only over-invalidates. Update(), or setting the state to Modified, marks every
+    // property modified with its original value equal to its current one. A stub's foreign key holds what the object
+    // was created with: null, which a required key can't hold, or the default of a non-nullable type, such as 0,
+    // which a real parent rarely has. A stub created with any other value, or with a nullable key left null, looks
+    // like a loaded row, and can't be told apart.
     private static bool OriginalIsUnknown(EntityEntry entry, IForeignKey foreignKey) =>
         foreignKey.Properties.Any(property =>
         {

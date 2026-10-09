@@ -13,14 +13,11 @@ namespace Sluice.EntityFrameworkCore.Tests;
 /// that doesn't enlist, so they run inside a scope too.
 /// </summary>
 [Collection(PostgresCollection.Name)]
-public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLifetime
+public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposable
 {
     private readonly ShopDb _reader = postgres.CreateDb(enlist: false);
 
-    // xUnit 2 disposes a test class through IAsyncLifetime, never through IAsyncDisposable.
-    public Task InitializeAsync() => Task.CompletedTask;
-
-    public Task DisposeAsync() => _reader.DisposeAsync().AsTask();
+    public void Dispose() => _reader.Dispose();
 
     [Theory]
     [InlineData(true)]
@@ -133,6 +130,39 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
         (await _reader.NameOf(ada))
             .Should()
             .Be("Ada Lovelace", "the aborted scope didn't hold the save");
+    }
+
+    [Fact]
+    public async Task A_save_left_behind_by_a_conflict_in_a_disposed_TransactionScope_is_evicted_by_the_next_save_without_failing_it()
+    {
+        await using var node = new SluiceNode();
+        var (ada, bob) = await _reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
+        await using var db = postgres.CreateDb(node);
+        Task completed;
+
+        var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
+        await _reader.Customers.Where(c => c.Id == bob).ExecuteDeleteAsync();
+        customers.ForEach(c => c.Name += " (edited)");
+
+        // The conflict ends the save without an event, so Sluice still holds it when the scope is disposed.
+        using (new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+        {
+            var save = () => db.SaveChangesAsync();
+            await save.Should().ThrowAsync<DbUpdateConcurrencyException>();
+            completed = Completion.Of(Transaction.Current!);
+        }
+
+        await completed;
+        (await adaRead.WasEvicted()).Should().BeTrue("the conflict published when the scope ended");
+
+        // Ada's row is cached again, so only the leftover's own publish can evict it.
+        db.ChangeTracker.Clear();
+        db.Customers.Add(new Customer { Name = "Cy" });
+        await db.SaveChangesAsync();
+
+        (await adaRead.WasEvicted()).Should().BeTrue("the next save published the leftover");
+        node.Logs.GetSnapshot().Should().NotContain(record => record.Level >= LogLevel.Error);
     }
 
     [Fact]

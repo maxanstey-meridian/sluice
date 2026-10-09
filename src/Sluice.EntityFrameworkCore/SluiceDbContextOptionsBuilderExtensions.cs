@@ -28,7 +28,9 @@ public static class SluiceDbContextOptionsBuilderExtensions
     /// <para>
     /// Call <c>UseSluice</c> after adding any interceptor that changes entities in <c>SavingChanges</c> (soft delete,
     /// auditing, an outbox). Interceptors run in the order they were added, and Sluice records what a save writes in
-    /// its own <c>SavingChanges</c>, so it misses changes made by an interceptor that runs after it.
+    /// its own <c>SavingChanges</c>, so it misses changes made by an interceptor that runs after it. Interceptors added
+    /// in the context's <c>OnConfiguring</c> are added after those in the <c>AddDbContext</c> options, so they always
+    /// run after Sluice: add such interceptors where you call <c>UseSluice</c>, before it.
     /// </para>
     /// <para>
     /// Every context using the same <see cref="SluiceCache"/> shares one interceptor, so pooled contexts, context
@@ -40,11 +42,18 @@ public static class SluiceDbContextOptionsBuilderExtensions
     /// </para>
     /// <para>
     /// A row saved without being loaded first (attached, updated or removed from an object the context didn't
-    /// query) has no original values, so Sluice can't tell which parent it had. It invalidates every
-    /// <c>Children</c> reader of that foreign key instead, except when a nullable foreign key was left null on the
-    /// object: that looks like a row with no parent, and the old parent's <c>Children</c> readers aren't
-    /// invalidated. Load the row before changing it, or invalidate
+    /// query) has no original values, so Sluice can't tell which parent it had. When it can see that, because
+    /// <c>Update()</c> marked every value changed, or the foreign key is still null or the default of its type (such as
+    /// 0), it invalidates every <c>Children</c> reader of that foreign key. When it can't, because the object was
+    /// created with another foreign key value, or with a nullable one left null, the old parent's <c>Children</c>
+    /// readers aren't invalidated. So load the row before changing it, or invalidate
     /// <see cref="DbSetDependencyExtensions.AllDependencies{T}"/> after the save.
+    /// </para>
+    /// <para>
+    /// Loading isn't enough on its own: don't call <c>Update()</c> or set the state to <c>Modified</c> on a row you
+    /// loaded, as generic repositories often do. That looks the same as an update of an unloaded row, so each such
+    /// save invalidates every <c>Children</c> reader of the row's foreign keys, for every parent. Let the change
+    /// tracker find the changes instead.
     /// </para>
     /// </remarks>
     /// <exception cref="InvalidOperationException">

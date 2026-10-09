@@ -48,6 +48,7 @@ The cache defaults are checked when `SluiceCache` is first resolved, and a `Quer
 
 **Rule:** the tags read and published for a dependency are `n:k`, `n:` and `n:*`; none is ever a bare source name.
 **Why:** FusionCache's clear sentinels (`*` and `!`, or `-rem` and `-exp` after `SetToSafeStrings()`) are ordinary tags. Publishing one clears every *other* node.
+**Accepts:** a key whose text is `""` gives the tag `n:`, the same as the whole-source tag every reader of the source carries, so invalidating key `""` evicts every reader of that source. That only over-invalidates.
 **Owner:** `Dependency.ReadTags` and `Dependency.InvalidationTags`.
 **Proof:** `MultiNodeTests.A_source_named_like_a_clear_sentinel_clears_nothing_on_other_nodes`.
 

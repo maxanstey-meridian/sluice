@@ -45,18 +45,9 @@ public sealed class PoolingTests(PostgresFixture postgres)
         await using var provider = services.BuildServiceProvider();
         var cache = provider.GetRequiredService<SluiceCache>();
         await using var reader = postgres.CreateDb();
-        var ada = new Customer { Name = "Ada" };
-        var bob = new Customer { Name = "Bob" };
-        reader.Customers.AddRange(ada, bob);
-        await reader.SaveChangesAsync();
-        var adaRead = await CachedRead.Of(
-            cache,
-            (read, ct) => read.Entity(reader.Customers, ada.Id).SingleAsync(ct)
-        );
-        var bobRead = await CachedRead.Of(
-            cache,
-            (read, ct) => read.Entity(reader.Customers, bob.Id).SingleAsync(ct)
-        );
+        var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(cache, reader, ada);
+        var bobRead = await CachedRead.Customer(cache, reader, bob);
 
         // A leased context, and what returns it to the pool.
         (ShopDb Db, IAsyncDisposable Return) Lease()
@@ -78,8 +69,7 @@ public sealed class PoolingTests(PostgresFixture postgres)
         await using (lease)
         {
             await using var transaction = await db.Database.BeginTransactionAsync();
-            (await db.Customers.SingleAsync(c => c.Id == ada.Id)).Name = "Ada Lovelace";
-            await db.SaveChangesAsync();
+            await db.Rename(ada, "Ada Lovelace");
         }
 
         (db, lease) = Lease();
@@ -92,16 +82,13 @@ public sealed class PoolingTests(PostgresFixture postgres)
                 db.ContextId.Lease.Should().NotBe(first.Lease);
             }
 
-            (await db.Customers.SingleAsync(c => c.Id == bob.Id)).Name = "Bob Babbage";
-            await db.SaveChangesAsync();
+            await db.Rename(bob, "Bob Babbage");
         }
 
         (await bobRead.WasEvicted()).Should().BeTrue();
         (await adaRead.WasEvicted())
             .Should()
             .BeFalse("the first lease's transaction never committed");
-        (await reader.Customers.AsNoTracking().SingleAsync(c => c.Id == ada.Id))
-            .Name.Should()
-            .Be("Ada");
+        (await reader.NameOf(ada)).Should().Be("Ada");
     }
 }

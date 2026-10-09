@@ -24,7 +24,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
         var probe = new ProbeBeforeUpdate();
-        await using var db = postgres.CreateDb(node, interceptors: probe);
+        await using var db = postgres.CreateDb(node, before: [probe]);
         var (ada, _) = await db.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         bool? evictedBeforeTheWrite = null;
@@ -38,21 +38,24 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
     public async Task A_save_an_interceptor_makes_from_inside_another_save_evicts_what_both_saves_wrote(
-        bool whileSaving
+        bool whileSaving,
+        bool sync
     )
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
         var saveAgain = new SaveAgain(whileSaving);
 
-        // As an app would register them: one that changes entities in SavingChanges after Sluice (see UseSluice),
-        // one that saves from SavedChanges wherever it likes.
+        // Either way the second save runs inside the first after Sluice captured it. One that saves from SavingChanges
+        // nests only when added after Sluice; added before, it saves before Sluice captures anything.
         await using var db = whileSaving
-            ? postgres.CreateDbWithInterceptorsAfterSluice(node, null, saveAgain)
-            : postgres.CreateDb(node, interceptors: saveAgain);
+            ? postgres.CreateDb(node, after: [saveAgain])
+            : postgres.CreateDb(node, before: [saveAgain]);
         var (ada, bob) = await db.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
@@ -60,12 +63,83 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
 
         customers.Single(c => c.Id == ada).Name = "Ada Lovelace";
         saveAgain.Once(() => customers.Single(c => c.Id == bob).Name = "Bob Babbage");
-        await db.SaveChangesAsync();
+        await Save(db, sync);
 
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
         (await reader.NameOf(bob)).Should().Be("Bob Babbage");
         (await adaRead.WasEvicted()).Should().BeTrue("the outer save wrote Ada");
         (await bobRead.WasEvicted()).Should().BeTrue("the inner save wrote Bob");
+    }
+
+    [Fact]
+    public async Task A_committed_save_is_evicted_though_an_interceptor_then_saves_again_in_a_transaction_it_never_commits()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        var saveAgain = new SaveAgain(whileSaving: false);
+        await using var db = postgres.CreateDb(node, before: [saveAgain]);
+        var (ada, bob) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
+        var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
+
+        customers.Single(c => c.Id == ada).Name = "Ada Lovelace";
+        saveAgain.Once(
+            () => customers.Single(c => c.Id == bob).Name = "Bob (never committed)",
+            inAbandonedTransaction: true
+        );
+        await db.SaveChangesAsync();
+
+        (await reader.NameOf(ada)).Should().Be("Ada Lovelace", "the outer save committed");
+        (await reader.NameOf(bob)).Should().Be("Bob");
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the outer save committed before the inner save's transaction began");
+        (await bobRead.WasEvicted()).Should().BeFalse("the inner transaction never committed");
+    }
+
+    [Fact]
+    public async Task Inside_an_EF_transaction_a_save_an_interceptor_saves_again_after_is_evicted_once_more_when_the_transaction_commits()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        var saveAgain = new SaveAgain(whileSaving: false);
+        await using var db = postgres.CreateDb(node, before: [saveAgain]);
+        var (ada, bob) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
+        var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
+
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        customers.Single(c => c.Id == ada).Name = "Ada Lovelace";
+        saveAgain.Once(() => customers.Single(c => c.Id == bob).Name = "Bob Babbage");
+        await db.SaveChangesAsync();
+
+        // The inner save published Ada's save early, as a leftover, before the commit; reading Ada now caches her old,
+        // committed row again.
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the leftover published at once");
+        await transaction.CommitAsync();
+
+        (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+        (await adaRead.WasEvicted()).Should().BeTrue("the commit publishes the leftover again");
+        (await bobRead.WasEvicted()).Should().BeTrue("the commit publishes the inner save");
+    }
+
+    [Fact]
+    public async Task A_save_whose_transaction_an_interceptor_commits_before_Sluice_sees_the_save_complete_is_evicted()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node, before: [new TransactionPerSave()]);
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+
+        await db.Rename(ada, "Ada Lovelace");
+
+        (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+        (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
     [Fact]
@@ -117,7 +191,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
-        await using var db = postgres.CreateDb(node, interceptors: new FailCommit());
+        await using var db = postgres.CreateDb(node, before: [new FailCommit()]);
         var (ada, _) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
 
@@ -147,24 +221,28 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
-        await using var db = postgres.CreateDb(node, interceptors: new FailReleaseSavepoint());
+        await using var db = postgres.CreateDb(node, before: [new FailReleaseSavepoint()]);
         var (ada, bob) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
         var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
 
         await using var transaction = await db.Database.BeginTransactionAsync();
         customers.Single(c => c.Id == ada).Name = "Ada Lovelace";
         await Save(db, sync);
 
-        // EF reports the second save's savepoint as a failed transaction, and Sluice publishes then; Ada's old row
-        // is cached again before the commit.
+        // EF reports the second save's savepoint as a failed transaction, and Sluice publishes what the transaction
+        // wrote so far. Reading Ada caches her old row again before the commit.
         customers.Single(c => c.Id == bob).Name = "Bob Babbage";
         await Save(db, sync);
-        await adaRead.WasEvicted();
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("a failed transaction publishes what it wrote so far");
         await transaction.CommitAsync();
 
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
-        (await adaRead.WasEvicted()).Should().BeTrue();
+        (await adaRead.WasEvicted()).Should().BeTrue("the commit publishes the first save again");
+        (await bobRead.WasEvicted()).Should().BeTrue("the commit publishes the second save");
     }
 
     [Theory]
@@ -236,7 +314,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(
             node,
             npgsql => npgsql.EnableRetryOnFailure(1, TimeSpan.Zero, null),
-            failOnce
+            before: [failOnce]
         );
         var (ada, _) = await db.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
@@ -267,7 +345,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     }
 
     [Fact]
-    public async Task Sync_SaveChanges_Commit_and_Rollback_evict_without_going_through_async_code()
+    public async Task Sync_SaveChanges_Commit_Rollback_and_their_failures_evict_without_going_through_async_code()
     {
         // Any async call into the distributed cache throws, and FusionCache logs it as a warning.
         await using var node = new SluiceNode(cache =>
@@ -324,6 +402,32 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         }
 
         (await adaRead.WasEvicted()).Should().BeTrue();
+
+        await using (var failing = CreateBatchByBatchDb(node))
+        {
+            failing.Customers.Single(c => c.Id == ada).Name = "Ada Failed";
+            failing.Orders.Add(new Order { CustomerId = -1, Item = "No such customer" });
+            node.Logs.Clear();
+            var save = () => failing.SaveChanges();
+            save.Should().Throw<DbUpdateException>();
+            ExpectNoAsyncCall("a failed SaveChanges");
+        }
+
+        (await adaRead.WasEvicted()).Should().BeTrue("the failed save's first batch committed");
+
+        await using (var failingCommit = postgres.CreateDb(node, before: [new FailCommit()]))
+        {
+            using var transaction = failingCommit.Database.BeginTransaction();
+            failingCommit.Customers.Single(c => c.Id == ada).Name = "Ada Unknown";
+            failingCommit.SaveChanges();
+            (await adaRead.WasEvicted()).Should().BeFalse("the transaction hasn't ended");
+            node.Logs.Clear();
+            var commit = () => transaction.Commit();
+            commit.Should().Throw<InvalidOperationException>().WithMessage("The commit failed.");
+            ExpectNoAsyncCall("a failed Commit");
+        }
+
+        (await adaRead.WasEvicted()).Should().BeTrue("the failed commit's outcome is unknown");
     }
 
     [Fact]
@@ -332,7 +436,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
         var cancelAfterCommit = new CancelAfterCommit();
-        await using var db = postgres.CreateDb(node, interceptors: cancelAfterCommit);
+        await using var db = postgres.CreateDb(node, before: [cancelAfterCommit]);
         var (ada, _) = await db.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         using var request = new CancellationTokenSource();
@@ -351,7 +455,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
         var cancelAfterCommit = new CancelAfterCommit();
-        await using var db = postgres.CreateDb(node, interceptors: cancelAfterCommit);
+        await using var db = postgres.CreateDb(node, before: [cancelAfterCommit]);
         var (ada, _) = await db.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         using var request = new CancellationTokenSource();
@@ -366,9 +470,13 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     }
 
     // Without a transaction and one command per batch, the first batch commits before the second runs.
-    private ShopDb CreateBatchByBatchDb(SluiceNode node, params IInterceptor[] interceptors)
+    private ShopDb CreateBatchByBatchDb(
+        SluiceNode node,
+        IInterceptor[]? before = null,
+        IInterceptor[]? after = null
+    )
     {
-        var db = postgres.CreateDb(node, npgsql => npgsql.MaxBatchSize(1), interceptors);
+        var db = postgres.CreateDb(node, npgsql => npgsql.MaxBatchSize(1), before, after);
         db.Database.AutoTransactionBehavior = AutoTransactionBehavior.Never;
         return db;
     }
@@ -431,7 +539,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
-        await using var db = CreateBatchByBatchDb(node, new FailInsertsInto("Parcels"));
+        await using var db = CreateBatchByBatchDb(node, before: [new FailInsertsInto("Parcels")]);
         var next = await reader.NextCustomerId();
         var ordersOfNext = await CachedRead.OrdersOf(node.Cache, reader, next);
 
@@ -488,12 +596,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
         var suppress = new SuppressConcurrencyConflict();
-        await using var db = postgres.CreateDbWithInterceptorsAfterSluice(
-            node,
-            npgsql => npgsql.MaxBatchSize(1),
-            suppress
-        );
-        db.Database.AutoTransactionBehavior = AutoTransactionBehavior.Never;
+        await using var db = CreateBatchByBatchDb(node, after: [suppress]);
         var (ada, bob) = await db.AddCustomers();
         var cy = new Customer { Name = "Cy" };
         db.Customers.Add(cy);
@@ -524,7 +627,10 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         var (ada, bob) = await setup.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         using var request = new CancellationTokenSource();
-        await using var db = CreateBatchByBatchDb(node, new CancelAfterFirstCommand(request));
+        await using var db = CreateBatchByBatchDb(
+            node,
+            before: [new CancelAfterFirstCommand(request)]
+        );
 
         // Attached, not queried, so the save's first batch is the first command.
         Customer[] customers = [new() { Id = ada, Name = "Ada" }, new() { Id = bob, Name = "Bob" }];
@@ -590,6 +696,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
             .Where(record =>
                 record.Category == typeof(SluiceInterceptor).FullName
                 && record.Level == LogLevel.Error
+                && record.Id.Id == 1
             )
             .Should()
             .HaveCount(4)

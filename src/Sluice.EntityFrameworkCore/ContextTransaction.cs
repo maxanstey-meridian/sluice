@@ -27,11 +27,6 @@ internal readonly record struct ContextTransaction(DbTransaction? Ef, Transactio
         );
     }
 
-    /// <summary>Refuses a context whose transactions Sluice can't see, before it saves anything.</summary>
-    /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
-    internal static void EnsureRelational(IInfrastructure<IServiceProvider> context) =>
-        _ = Connection(context);
-
     private static IRelationalConnection Connection(IInfrastructure<IServiceProvider> context) =>
         context.Instance.GetService(typeof(IRelationalConnection)) as IRelationalConnection
         ?? throw new NotSupportedException(

@@ -129,6 +129,27 @@ public sealed class WriteDerivationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Removing_a_row_that_was_never_loaded_with_its_required_foreign_key_set_to_null_evicts_Children_readers_of_its_parent()
+    {
+        var north = new Warehouse { Code = $"N-{Guid.NewGuid():N}" };
+        var bin = new Bin { WarehouseCode = north.Code };
+        _db.AddRange(north, bin);
+        await _db.SaveChangesAsync();
+        var northBins = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) =>
+                read.Children(_reader.Bins, b => b.WarehouseCode, north.Code).ToListAsync(ct)
+        );
+        _db.ChangeTracker.Clear();
+
+        _db.Bins.Remove(new Bin { Id = bin.Id, WarehouseCode = null! });
+        await _db.SaveChangesAsync();
+
+        (await _reader.Bins.AnyAsync(b => b.Id == bin.Id)).Should().BeFalse();
+        (await northBins.WasEvicted()).Should().BeTrue("the north warehouse's bin was deleted");
+    }
+
+    [Fact]
     public async Task Updating_a_row_from_an_object_that_was_never_loaded_evicts_Children_readers_of_its_old_parent()
     {
         var ada = await AddCustomer("Ada");
@@ -459,8 +480,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
     [Fact]
     public async Task A_write_through_a_value_converter_evicts_readers_of_the_same_id()
     {
-        var graceId = new UserId(Random.Shared.Next(1_000_000, int.MaxValue));
-        var alanId = new UserId(graceId.Value - 1);
+        var graceId = new UserId(await _reader.UnusedUserId());
+        var alanId = new UserId(graceId.Value + 1);
         var sku = $"Tea-{Guid.NewGuid():N}";
         var grace = new User { Id = graceId, Name = "Grace" };
         var alan = new User { Id = alanId, Name = "Alan" };
@@ -615,9 +636,7 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         ada.Name = "Undetected";
         await _db.SaveChangesAsync();
 
-        (await _reader.Customers.AsNoTracking().SingleAsync(c => c.Id == ada.Id))
-            .Name.Should()
-            .Be("Ada");
+        (await _reader.NameOf(ada.Id)).Should().Be("Ada");
         (await adaRead.WasEvicted()).Should().BeFalse();
 
         _db.ChangeTracker.DetectChanges();

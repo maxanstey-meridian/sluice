@@ -19,36 +19,21 @@ public sealed class PostgresFixture : IAsyncLifetime
         new(new DbContextOptionsBuilder<ShopDb>().UseNpgsql(ConnectionString).Options);
 
     /// <summary>
-    /// A context whose tracked writes invalidate <paramref name="node"/>'s cache. <paramref name="interceptors"/>
-    /// run before Sluice's.
+    /// A context whose tracked writes invalidate <paramref name="node"/>'s cache, with <paramref name="before"/> added
+    /// before Sluice and <paramref name="after"/> after it, so they run in that order.
     /// </summary>
     public ShopDb CreateDb(
         SluiceNode node,
         Action<NpgsqlDbContextOptionsBuilder>? npgsql = null,
-        params IInterceptor[] interceptors
+        IInterceptor[]? before = null,
+        IInterceptor[]? after = null
     ) =>
         new(
             new DbContextOptionsBuilder<ShopDb>()
                 .UseNpgsql(ConnectionString, npgsql)
-                .AddInterceptors(interceptors)
+                .AddInterceptors(before ?? [])
                 .UseSluice(node.Services)
-                .Options
-        );
-
-    /// <summary>
-    /// A context whose tracked writes invalidate <paramref name="node"/>'s cache, with <paramref name="interceptors"/>
-    /// added after Sluice, so they run after it.
-    /// </summary>
-    public ShopDb CreateDbWithInterceptorsAfterSluice(
-        SluiceNode node,
-        Action<NpgsqlDbContextOptionsBuilder>? npgsql,
-        params IInterceptor[] interceptors
-    ) =>
-        new(
-            new DbContextOptionsBuilder<ShopDb>()
-                .UseNpgsql(ConnectionString, npgsql)
-                .UseSluice(node.Services)
-                .AddInterceptors(interceptors)
+                .AddInterceptors(after ?? [])
                 .Options
         );
 

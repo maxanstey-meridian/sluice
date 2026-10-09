@@ -219,6 +219,16 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public Task<string> NameOf(int id) =>
         Customers.AsNoTracking().Where(c => c.Id == id).Select(c => c.Name).SingleAsync();
 
+    /// <summary>A user key no row has yet, nor any larger one: one more than the largest.</summary>
+    public Task<int> UnusedUserId() =>
+        Database
+            .SqlQueryRaw<int>(
+                """
+                select (coalesce(max("Id"), 0) + 1)::int as "Value" from "Users"
+                """
+            )
+            .SingleAsync();
+
     /// <summary>The key the next inserted customer gets, as long as nothing else inserts one first.</summary>
     public Task<int> NextCustomerId() =>
         Database
