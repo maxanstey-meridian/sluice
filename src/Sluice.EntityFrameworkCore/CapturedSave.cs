@@ -168,7 +168,10 @@ internal sealed class CapturedSave
             if (!Checked(entityType, written, foreignKey.Properties))
             {
                 _originals.Add(source.All);
-                if (!ModelSources.HasRowVersion(entityType))
+
+                // An owner saved only for an owned row's sake evicts whole even with a row version, so there's
+                // nothing to advise.
+                if (written && !ModelSources.HasRowVersion(entityType))
                 {
                     _unversioned.Add(entityType);
                 }

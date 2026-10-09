@@ -343,7 +343,7 @@ internal static class ModelSources
     }
 
     // Every foreign key a row of the type may have: its own and its base types', and its derived types'.
-    internal static IEnumerable<IForeignKey> RowForeignKeys(IEntityType entityType) =>
+    private static IEnumerable<IForeignKey> RowForeignKeys(IEntityType entityType) =>
         entityType.GetForeignKeys().Concat(entityType.GetDerivedForeignKeys());
 
     /// <summary>

@@ -115,8 +115,8 @@ no longer than the entry's duration.
 - **Query filters that read the context's state need the compute to set it**, from the query
   key, with `read.Db<AppDb>(db => db.TenantId = tenantId)`; Sluice can't check what the
   configure sets. Filters that read it where the configure can't set it (through a service the
-context holds, a property with a body, a method, a readonly field or an init-only property)
-are refused. See
+  context holds, a property with a body, a method, a readonly field, or a virtual, init-only or
+  get-only property) are refused. See
   [Tenants](/guides/strict-reads#tenants-and-other-context-state).
 - **Invalidation isn't per tenant.** A write in one tenant evicts other tenants' cached reads
   of the same entity type, unless they read through `read.Children` on a tenant foreign key.

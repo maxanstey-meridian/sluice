@@ -55,6 +55,7 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
             var context = Resolve<TContext>();
             TrackedReads.EnsureOn(context);
             context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+            var index = _contexts.Length;
             _contexts = [.. _contexts, (typeof(TContext), context, false)];
             if (configure is not null)
             {
@@ -70,7 +71,10 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
                     throw;
                 }
 
-                _contexts = [.. _contexts[..^1], (typeof(TContext), context, true)];
+                // The configure may have asked for other contexts, which come after this one.
+                var configured = _contexts.ToArray();
+                configured[index] = (typeof(TContext), context, true);
+                _contexts = configured;
             }
 
             return context;

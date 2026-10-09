@@ -63,7 +63,7 @@ It's event id 2, under the category `Sluice.EntityFrameworkCore.TrackedReads`, a
 through EF's logger factory, which under dependency injection is your app's. To hide it, raise
 that category to `Warning`.
 
-It also logs once per entity type when a save of that type has to evict `read.Children` lists
+It also logs once per entity type and cache when a save of that type has to evict `read.Children` lists
 under every parent, not just the parent the row had (see
 [Row versions](/guides/ef-core#row-versions)): event id 3 when the type has no row version, 4
 when it's stored across several tables. Those are under the category

@@ -154,7 +154,10 @@ public sealed class Truck : Vehicle
 {
     public int Axles { get; set; }
 
-    /// <summary>A foreign key only trucks have, so a vehicle's row doesn't hold it.</summary>
+    /// <summary>
+    /// A foreign key only trucks have, so a vehicle's row doesn't hold it. A concurrency token, which doesn't keep
+    /// eviction exact for a row split across tables.
+    /// </summary>
     public int? OwnerId { get; set; }
 }
 
@@ -560,7 +563,16 @@ public sealed class Perch
     public Song? Song { get; set; }
 }
 
-public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options)
+/// <summary>A tenant scope the context holds as a whole, so a configure sets it with a new one.</summary>
+public readonly record struct TenantScope(int Tenant);
+
+/// <summary>Context state through an interface, whose implementing getter is virtual but sealed.</summary>
+public interface ITenanted
+{
+    public int TenantId { get; }
+}
+
+public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options), ITenanted
 {
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<Order> Orders => Set<Order>();
@@ -621,6 +633,12 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
 
     /// <summary>Context state set only by an object initializer, which read.Db's configure can't set either.</summary>
     public int SeededTenant { get; init; } = -1;
+
+    /// <summary>Context state with no setter at all.</summary>
+    public int DefaultTenant { get; } = -1;
+
+    /// <summary>Settable as a whole, so the read-only parts of the struct it holds are the configure's too.</summary>
+    public TenantScope Scope { get; set; } = new(-1);
 
     /// <summary>A database function of the app's, which could read any table.</summary>
     [DbFunction("customer_name")]
@@ -735,6 +753,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
 
         model.Entity<Vehicle>().UseTptMappingStrategy();
         model.Entity<Truck>().HasOne<Customer>().WithMany().HasForeignKey(t => t.OwnerId);
+        model.Entity<Truck>().Property(t => t.OwnerId).IsConcurrencyToken();
         model.Entity<Trailer>().HasOne<Truck>().WithMany().HasForeignKey(t => t.TruckId);
         model.Entity<Shape>().UseTpcMappingStrategy();
         model.Entity<Parcel>().HasOne<Customer>().WithMany().HasForeignKey(p => p.CustomerId);
@@ -815,6 +834,12 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model
             .Entity<Ledger>()
             .HasQueryFilter("init property", ledger => ledger.TenantId != SeededTenant);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("get-only property", ledger => ledger.TenantId != DefaultTenant);
+        model
+            .Entity<Ledger>()
+            .HasQueryFilter("context struct", ledger => ledger.TenantId != Scope.Tenant);
         model
             .Entity<Ledger>()
             .HasQueryFilter(

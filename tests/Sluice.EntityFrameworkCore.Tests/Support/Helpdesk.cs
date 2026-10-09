@@ -16,6 +16,13 @@ public sealed class HelpTicket
     public string Title { get; set; } = "";
 }
 
+/// <summary>Filtered by a virtual property of the context, which a derived context could give a body.</summary>
+public sealed class HelpMacro
+{
+    public int Id { get; set; }
+    public string? Desk { get; set; }
+}
+
 /// <summary>Filtered by the tenant service the context holds.</summary>
 public sealed class HelpNote
 {
@@ -71,8 +78,12 @@ public abstract class HelpdeskModel(DbContextOptions options) : DbContext(option
     /// <summary>The tenant again, through a property with a body.</summary>
     public string? TenantName => TenantId;
 
+    /// <summary>Settable, but virtual, so a derived context may read it through a body.</summary>
+    public virtual string? Desk { get; set; }
+
     public DbSet<HelpTicket> Tickets => Set<HelpTicket>();
     public DbSet<HelpTag> Tags => Set<HelpTag>();
+    public DbSet<HelpMacro> Macros => Set<HelpMacro>();
 
     /// <summary>The connection string of <paramref name="database"/> on the shop's server.</summary>
     public static string ConnectionString(string database) =>
@@ -125,6 +136,7 @@ public abstract class HelpdeskModel(DbContextOptions options) : DbContext(option
         model.Entity<HelpTicket>().HasOne<HelpTenant>().WithMany().HasForeignKey(t => t.TenantId);
         model.Entity<HelpTicket>().HasQueryFilter(ticket => ticket.TenantId == TenantId);
         model.Entity<HelpTag>().HasQueryFilter(tag => tag.TenantId == TenantName);
+        model.Entity<HelpMacro>().HasQueryFilter(macro => macro.Desk == Desk);
     }
 }
 

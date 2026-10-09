@@ -28,7 +28,7 @@ read the context). It can't for these, so they throw when they run inside a comp
 - a query filter that reads the context's state, such as a tenant id held on the context,
   unless the compute set it with `read.Db<AppDb>(configure)`; one that reads it where the
   configure can't set it (through a service the context holds, a property with a body, a
-  method, a readonly field, or an init-only or get-only property), configured or not; or one
+  method, a readonly field, or a virtual, init-only or get-only property), configured or not; or one
   that reads other state that can change, such as a static tenant accessor, a captured service
   or `DateTime.Now`. See [Tenants](#tenants-and-other-context-state);
 - entities that load lazily or hold their context: lazy-loading proxies, an injected lazy
@@ -218,11 +218,11 @@ Sluice takes three things on trust here, as it takes a fused fetch's dependencie
   overwrite it.
 
 What Sluice does check: the filter must read the state where it's stored and where the
-configure can set it: a field that isn't readonly, or an auto-property with a setter that isn't
-`init`, of the context, holding a plain value (a string, number, `Guid`, enum or a struct of
+configure can set it: a field that isn't readonly, or an auto-property that isn't virtual and has
+a setter that isn't `init`, of the context, holding a plain value (a string, number, `Guid`, enum or a struct of
 those). A filter that reads it through a tenant service the context holds
-(`i.TenantId == _tenants.TenantId`), a property with a body, a method, a `readonly` field or a
-`{ get; }` or `{ get; init; }` property is refused even on a configured context, since the
+(`i.TenantId == _tenants.TenantId`), a property with a body, a method, a `readonly` field, a
+virtual property, or a `{ get; }` or `{ get; init; }` property is refused even on a configured context, since the
 configure can't set it. Copy the value into a settable field or property in the constructor, and
 filter by that.
 

@@ -202,8 +202,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         _node.Logs.GetSnapshot().Should().NotContain(record => record.Id.Id == 3);
     }
 
-    // A row split across tables is written a table at a time, so no token covers it, and the log says so rather than
-    // suggesting a row version.
+    // A row split across tables is written a table at a time, so no token covers it, not even its foreign key as a
+    // concurrency token, and the log says so rather than suggesting a row version.
     [Fact]
     public async Task Editing_a_row_split_across_tables_evicts_every_Children_reader_and_logs_why()
     {

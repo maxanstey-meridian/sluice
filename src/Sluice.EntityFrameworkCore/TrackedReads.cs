@@ -43,12 +43,13 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     private const string UntrackableTag = "Sluice can't track: ";
     private const string ContextStateTag = "Sluice reads the context's state: ";
 
-    // The ignore-by-name remedy for each context-state tag's filters, built by the analysis that wrote the tag, which
-    // always runs before the query's commands do.
-    private static readonly ConcurrentDictionary<string, string> _contextStateRemedies = new();
     private const string HelperSuffix = " (helper)";
     private const string Separator = "; ";
     private const string DependenciesAnnotation = "Sluice:TagDependencies";
+
+    // The ignore-by-name remedy for each context-state tag's filters, built by the analysis that wrote the tag, which
+    // runs before the query's commands do. A tag this process didn't write (copied by hand) has none.
+    private static readonly ConcurrentDictionary<string, string> _contextStateRemedies = new();
 
     // The way to cache a read whose tables Sluice can't see, ending a reason the analysis gives.
     private const string DeclareIt =
@@ -218,10 +219,17 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 var name = context.GetType().Name;
                 return new(
                     $"Sluice can't track an EF query inside a compute ({Statement(command)}): {state}. That state "
-                        + "came from the context's constructor (the first caller's request, say), not the cache key, "
-                        + "and the cached value is served to every caller with this key. Set it from the cache key "
-                        + $"when the compute first asks for the context, with read.Db<{name}>(db => …). Or filter "
-                        + $"by hand: {_contextStateRemedies[state]}."
+                        + "is whatever the context was made with (its constructor's, from the first caller's request, "
+                        + "or what a pooled context's last user left), not the cache key, and the cached value is "
+                        + "served to every caller with this key. Set it from the cache key when the compute first "
+                        + $"asks for the context, with read.Db<{name}>(db => …). Or filter by hand: "
+                        + (
+                            _contextStateRemedies.TryGetValue(state, out var remedy)
+                                ? remedy
+                                : "ignore those filters by name, filter by that value yourself, and put it in the "
+                                    + "cache key"
+                        )
+                        + "."
                 );
             }
 
@@ -706,7 +714,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             Untrackable(
                 _refusedFilters.Exists(refused => refused.ReadsContext)
                     ? $"{reason}. Read the context's state from a settable field or auto-property of the context "
-                        + "(not readonly, init-only or get-only) holding a plain value instead, so read.Db's "
+                        + "(not readonly, virtual, init-only or get-only) holding a plain value instead, so read.Db's "
                         + $"configure can set it from the cache key. Or filter by hand: {ignore}"
                     : $"{reason}. {char.ToUpperInvariant(ignore[0])}{ignore[1..]}"
             );
@@ -1220,7 +1228,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                     );
                     _contextStateRemedies.TryAdd(
                         state,
-                        IgnoreByName([.. _contextState.Distinct()])
+                        IgnoreByName([.. _contextState.DistinctBy(read => (read.Type, read.Name))])
                     );
                     tags.Add(ContextStateTag + state);
                 }

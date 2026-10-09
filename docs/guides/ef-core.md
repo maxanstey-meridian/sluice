@@ -134,9 +134,10 @@ naming the query and the types it reads whole (see [Logging](/guides/configurati
 
 Dependencies belong to entity types, the classes in your EF model, not to tables. Each is named
 by EF's entity type name, usually its class's full name, such as `Shop.Domain.Order` (in an
-inheritance hierarchy, the base class's). So a second class mapped to the same table, such as a read model in another context,
-isn't linked to the first: a write through one doesn't evict reads through the other. And
-moving or renaming an entity class changes its dependencies' names. See
+inheritance hierarchy, the base class's). So a second class mapped to the same table, such as a
+read model in another context, isn't linked to the first: a write through one doesn't evict
+reads through the other. And moving or renaming an entity class changes its dependencies'
+names. See
 [Limitations](/misc/limitations#ef-core).
 
 ### Narrowing to rows

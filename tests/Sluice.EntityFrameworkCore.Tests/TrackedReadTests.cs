@@ -25,7 +25,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     private const string Declare =
         "*Run it in the fetch of read.From(dependency, fetch)*invalidate that source when its data changes*";
     private const string Configure =
-        "*That state came from the context's constructor*Set it from the cache key when the compute first asks for "
+        "*That state is whatever the context was made with*Set it from the cache key when the compute first asks for "
         + "the context, with read.Db<ShopDb>(db => …). Or filter by hand: *";
     private const string SelectValues = "*Select the values you need instead*";
     private const string ForeignContext = "*didn't get from read.Db<TContext>()*";
@@ -225,6 +225,15 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             """*Ledger's query filter "init property" reads the context's state through ShopDb.SeededTenant, """
                 + "which read.Db's configure can't set*settable field or auto-property*"
                 + """Or filter by hand: ignore just that filter with IgnoreQueryFilters(["init property"])*"""
+        ),
+        ["query filter reading a get-only property of the context"] = (
+            (db, ct) => LedgersFilteredBy(db, "get-only property").ToListAsync(ct),
+            """*Ledger's query filter "get-only property" reads the context's state through ShopDb.DefaultTenant, """
+                + "which read.Db's configure can't set*"
+        ),
+        ["query filter reading a struct the context holds"] = (
+            (db, ct) => LedgersFilteredBy(db, "context struct").ToListAsync(ct),
+            """*Ledger's query filter "context struct" reads the context's state (*""" + Configure
         ),
         ["query filter calling a built-in database function given no column"] = (
             (db, ct) => LedgersFilteredBy(db, "database function").ToListAsync(ct),

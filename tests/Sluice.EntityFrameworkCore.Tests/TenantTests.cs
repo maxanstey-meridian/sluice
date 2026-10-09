@@ -105,6 +105,12 @@ public sealed class TenantTests : IAsyncLifetime
             + "Read the context's state from a settable field or auto-property of the context*"
             + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*"
     )]
+    [InlineData(
+        "a virtual property",
+        "*HelpMacro's query filter reads the context's state through HelpdeskModel.Desk, which read.Db's configure can't set*"
+            + "Read the context's state from a settable field or auto-property of the context*"
+            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*"
+    )]
     public async Task A_filter_reading_state_a_configure_cannot_set_is_refused_even_on_a_configured_context(
         string through,
         string message
@@ -121,9 +127,12 @@ public sealed class TenantTests : IAsyncLifetime
                     (r, ct) =>
                     {
                         var db = r.Db<HelpdeskDb>(db => db.TenantId = "acme");
-                        return through == "a property with a body"
-                            ? db.Tags.CountAsync(ct)
-                            : db.Notes.CountAsync(ct);
+                        return through switch
+                        {
+                            "a property with a body" => db.Tags.CountAsync(ct),
+                            "a virtual property" => db.Macros.CountAsync(ct),
+                            _ => db.Notes.CountAsync(ct),
+                        };
                     }
                 )
                 .AsTask();
@@ -237,6 +246,71 @@ public sealed class TenantTests : IAsyncLifetime
         );
 
         seen.Should().Be("acme");
+    }
+
+    // A configure may ask for another context, such as a catalog to look the tenant's database up in. Both stay the
+    // compute's own, and the first is configured once its configure returns.
+    [Fact]
+    public async Task A_configure_that_asks_for_another_context_leaves_both_the_compute_s_own()
+    {
+        await using var node = Node("AddDbContext");
+        await AddTicket(node, HelpdeskModel.A, "acme");
+
+        var tickets = await node.Cache.GetOrSetAsync(
+            _tickets,
+            "acme",
+            async (r, ct) =>
+            {
+                var db = r.Db<HelpdeskDb>(db =>
+                {
+                    _ = r.Db<ShopDb>();
+                    db.TenantId = "acme";
+                });
+                await r.Db<ShopDb>().Customers.CountAsync(ct);
+                return await db.Tickets.Select(t => t.Title).ToListAsync(ct);
+            }
+        );
+
+        tickets.Should().NotBeEmpty().And.OnlyContain(title => title.StartsWith("acme-"));
+    }
+
+    // A query on a context the compute already has doesn't wait for another context's configure.
+    [Fact]
+    public async Task A_query_on_another_context_runs_while_a_configure_is_still_running()
+    {
+        await using var node = Node("AddDbContext");
+        using var configuring = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        await node.Cache.GetOrSetAsync(
+            _tickets,
+            "acme",
+            async (r, ct) =>
+            {
+                var shop = r.Db<ShopDb>();
+                var configured = Task.Run(
+                    () =>
+                        r.Db<HelpdeskDb>(db =>
+                        {
+                            configuring.Set();
+                            release.Wait(ct);
+                            db.TenantId = "acme";
+                        }),
+                    ct
+                );
+                try
+                {
+                    configuring.Wait(ct);
+                    await shop.Customers.CountAsync(ct).WaitAsync(TimeSpan.FromSeconds(10), ct);
+                }
+                finally
+                {
+                    release.Set();
+                }
+
+                return await (await configured).Tickets.Select(t => t.Title).ToListAsync(ct);
+            }
+        );
     }
 
     [Fact]
