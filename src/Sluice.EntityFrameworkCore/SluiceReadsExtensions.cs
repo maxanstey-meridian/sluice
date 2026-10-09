@@ -10,8 +10,20 @@ namespace Sluice;
 /// EF Core reads that record their dependency from the EF model and return a no-tracking query to compose.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The queries never track, so the cache never stores the context's live instances or its unsaved edits.
 /// Cache projections or detached entities.
+/// </para>
+/// <para>
+/// Reads are strict, so a compute can't read a row its dependencies don't cover. Inside a compute, every EF query must
+/// come from a read helper: a plain query, lazy or explicit loading, <c>FromSql</c>, a compiled query or a write
+/// throws <see cref="InvalidOperationException"/>. A helper's query may be filtered, ordered, paged and projected, but
+/// reading anything beyond its own rows throws when it runs, inside a compute or not: a join, a subquery or set
+/// operation over another set, a navigation (<c>Include</c>, <c>o.Customer.Name</c>, <c>c.Orders.Count</c>,
+/// many-to-many navigations), or <c>AsTracking()</c>. Owned types and JSON columns are part of their owner's row, so
+/// they're fine, and auto-included navigations aren't loaded. Read related rows with their own helper call. The
+/// call that ran the compute throws the violation, and caches nothing, even if the compute catches it.
+/// </para>
 /// </remarks>
 public static class SluiceReadsExtensions
 {
@@ -33,7 +45,10 @@ public static class SluiceReadsExtensions
     /// <typeparamref name="T"/> isn't mapped to a table (keyless, a view, a function or a SQL query), its primary key is
     /// composite, or the context's provider isn't relational.
     /// </exception>
-    /// <exception cref="InvalidOperationException">The context is in a transaction.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The context isn't configured with <c>UseSluice</c>, or is in a transaction. The query throws it too if it runs
+    /// inside a transaction.
+    /// </exception>
     public static IQueryable<T> Entity<T>(this SluiceReads read, DbSet<T> set, object key)
         where T : class
     {
@@ -44,7 +59,7 @@ public static class SluiceReadsExtensions
         var source = ModelSources.Entity(set.EntityType);
         var property = ModelSources.KeyProperty(set.EntityType);
         ModelSources.EnsureKeyType(property, key, nameof(key));
-        EnsureNoTransaction(set);
+        EnsureContext(set);
 
         read.From(source.For(key));
         return WhereEquals(set, property, key);
@@ -58,18 +73,22 @@ public static class SluiceReadsExtensions
     /// <param name="read">The compute's reads.</param>
     /// <param name="set">The set to read.</param>
     /// <param name="foreignKey">
-    /// The FK property (<c>o =&gt; o.CustomerId</c>), a shadow FK (<c>o =&gt; EF.Property&lt;int&gt;(o, "CustomerId")</c>)
-    /// or a reference navigation to the principal (<c>o =&gt; o.Customer</c>).
+    /// The FK property (<c>o =&gt; o.CustomerId</c>), a shadow FK named by a constant
+    /// (<c>o =&gt; EF.Property&lt;int&gt;(o, "CustomerId")</c>) or a reference navigation to the principal
+    /// (<c>o =&gt; o.Customer</c>).
     /// </param>
     /// <param name="principalKey">The foreign key value, of the FK property's CLR type (not nullable).</param>
     /// <exception cref="ArgumentException">
-    /// <paramref name="foreignKey"/> doesn't name a single-column foreign key, or <paramref name="principalKey"/>
-    /// isn't of its CLR type.
+    /// <paramref name="foreignKey"/> doesn't name a single-column foreign key, names it through <c>EF.Property</c> with
+    /// a name that isn't a constant, or <paramref name="principalKey"/> isn't of its CLR type.
     /// </exception>
     /// <exception cref="NotSupportedException">
     /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
     /// </exception>
-    /// <exception cref="InvalidOperationException">The context is in a transaction.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The context isn't configured with <c>UseSluice</c>, or is in a transaction. The query throws it too if it runs
+    /// inside a transaction.
+    /// </exception>
     public static IQueryable<T> Children<T>(
         this SluiceReads read,
         DbSet<T> set,
@@ -91,7 +110,7 @@ public static class SluiceReadsExtensions
         );
         var property = resolved.Properties[0];
         ModelSources.EnsureKeyType(property, principalKey, nameof(principalKey));
-        EnsureNoTransaction(set);
+        EnsureContext(set);
 
         read.From(ModelSources.ForeignKey(resolved).For(principalKey));
         return WhereEquals(set, property, principalKey);
@@ -106,7 +125,10 @@ public static class SluiceReadsExtensions
     /// <exception cref="NotSupportedException">
     /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
     /// </exception>
-    /// <exception cref="InvalidOperationException">The context is in a transaction.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The context isn't configured with <c>UseSluice</c>, or is in a transaction. The query throws it too if it runs
+    /// inside a transaction.
+    /// </exception>
     public static IQueryable<T> All<T>(this SluiceReads read, DbSet<T> set)
         where T : class
     {
@@ -114,23 +136,22 @@ public static class SluiceReadsExtensions
         ArgumentNullException.ThrowIfNull(set);
 
         var source = ModelSources.Entity(set.EntityType);
-        EnsureNoTransaction(set);
+        EnsureContext(set);
 
         read.From(source.All);
-        return set.AsNoTracking();
+        return StrictReads.Query(set);
     }
 
-    // Inside a transaction a compute would cache uncommitted rows for every caller, or an old snapshot under
-    // RepeatableRead or Serializable.
-    private static void EnsureNoTransaction<T>(DbSet<T> set)
+    // Without UseSluice the strict-read checks wouldn't run. Inside a transaction a compute would cache uncommitted
+    // rows for every caller, or an old snapshot under RepeatableRead or Serializable; the query is checked again
+    // when it runs, since it can be run later than it's built.
+    private static void EnsureContext<T>(DbSet<T> set)
         where T : class
     {
+        StrictReads.EnsureOn(set);
         if (!ContextTransaction.Of(set).IsNone)
         {
-            throw new InvalidOperationException(
-                "Sluice's EF reads can't run inside a transaction: the compute would cache rows other callers "
-                    + "can't see yet, or an old snapshot. Compute the value outside the transaction, or after it commits."
-            );
+            throw StrictReads.InTransaction();
         }
     }
 
@@ -152,6 +173,6 @@ public static class SluiceReadsExtensions
             Expression.Convert(Expression.Convert(captured.Body, property.ClrType), typeof(object))
         );
 
-        return set.AsNoTracking().Where(Expression.Lambda<Func<T, bool>>(equals, entity));
+        return StrictReads.Query(set).Where(Expression.Lambda<Func<T, bool>>(equals, entity));
     }
 }

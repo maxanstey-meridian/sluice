@@ -17,7 +17,7 @@
         <AdditionalFiles Include="PublicAPI.Unshipped.txt" />
     </ItemGroup>
 
-    <!-- ActiveCompute.IsActive only; the EF package pins this exact version because of it. -->
+    <!-- ActiveCompute.Violate only; the EF package pins this exact version because of it. -->
     <ItemGroup>
         <InternalsVisibleTo Include="Sluice.EntityFrameworkCore" />
     </ItemGroup>

@@ -13,10 +13,10 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     [Fact]
     public async Task A_numeric_key_read_as_1_is_evicted_by_the_same_value_written_as_1_00()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         db.Prices.Add(new Price { Amount = 1.00m, Label = "one" });
         await db.SaveChangesAsync();
-        await using var node = new SluiceNode();
 
         Task<Price> ReadOne(SluiceReads read, CancellationToken ct) =>
             read.Entity(db.Prices, 1m).SingleAsync(ct);
@@ -29,10 +29,10 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     [Fact]
     public async Task A_citext_key_read_in_one_case_is_evicted_by_the_same_key_in_another()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         db.Tags.Add(new Tag { Name = "Widget" });
         await db.SaveChangesAsync();
-        await using var node = new SluiceNode();
 
         Task<Tag> ReadWidget(SluiceReads read, CancellationToken ct) =>
             read.Entity(db.Tags, "WIDGET").SingleAsync(ct);
@@ -45,10 +45,10 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     [Fact]
     public async Task A_strongly_typed_key_folds_the_value_its_converter_stores()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         db.Products.Add(new Product { Sku = new Sku("Tea-1"), Name = "Tea" });
         await db.SaveChangesAsync();
-        await using var node = new SluiceNode();
 
         Task<Product> ReadTea(SluiceReads read, CancellationToken ct) =>
             read.Entity(db.Products, new Sku("TEA-1")).SingleAsync(ct);

@@ -3,7 +3,7 @@ using Sluice.EntityFrameworkCore;
 
 namespace Sluice;
 
-/// <summary>Connects a <see cref="DbContext"/>'s tracked writes to Sluice.</summary>
+/// <summary>Connects a <see cref="DbContext"/>'s reads and tracked writes to Sluice.</summary>
 public static class SluiceDbContextOptionsBuilderExtensions
 {
     /// <summary>
@@ -12,7 +12,9 @@ public static class SluiceDbContextOptionsBuilderExtensions
     /// completes. A save that fails or is cancelled still invalidates, since an earlier batch may have committed.
     /// Writes the change tracker doesn't see (<c>ExecuteUpdate</c>, <c>ExecuteDelete</c>, raw SQL) need
     /// <see cref="DbSetDependencyExtensions"/> and
-    /// <see cref="SluiceCache.InvalidateAsync(IEnumerable{Dependency})"/>.
+    /// <see cref="SluiceCache.InvalidateAsync(IEnumerable{Dependency})"/>. Also makes reads strict: inside a compute,
+    /// the context runs only queries built by the <see cref="SluiceReadsExtensions"/> helpers, and a helper's query
+    /// reads only its own rows. The helpers refuse a context without it.
     /// </summary>
     /// <param name="builder">The context's options.</param>
     /// <param name="services">
@@ -21,6 +23,19 @@ public static class SluiceDbContextOptionsBuilderExtensions
     /// </param>
     /// <returns><paramref name="builder"/>, for chaining.</returns>
     /// <remarks>
+    /// <para>
+    /// Strict reads, inside a compute: a query not built by a read helper throws <see cref="InvalidOperationException"/>
+    /// when it runs, so lazy loading, explicit loading, <c>FromSql</c>, compiled queries and writes can't be used
+    /// there, nor can a helper's query run inside a transaction. Inside a compute or not, a helper's query that joins
+    /// or subqueries another set, uses a navigation other than an owned type's (<c>Include</c>, <c>o.Customer.Name</c>,
+    /// <c>c.Orders.Count</c>) or calls <c>AsTracking()</c> throws when EF compiles it. Read related rows with their own
+    /// helper call. Commands run outside a compute aren't checked.
+    /// </para>
+    /// <para>
+    /// The query check is an EF singleton interceptor, shared by every Sluice context, so a context that also calls
+    /// <c>UseInternalServiceProvider</c> can't use Sluice: EF refuses singleton interceptors from
+    /// <c>AddInterceptors</c> there.
+    /// </para>
     /// <para>
     /// Relational providers only: Sluice reads each save's transaction from the context's relational connection. A
     /// context on any other provider throws <see cref="NotSupportedException"/> when it saves, before it writes.
@@ -67,7 +82,7 @@ public static class SluiceDbContextOptionsBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(services);
 
-        return builder.AddInterceptors(SluiceInterceptor.For(services));
+        return builder.AddInterceptors(SluiceInterceptor.For(services), StrictReads.Instance);
     }
 
     /// <inheritdoc cref="UseSluice(DbContextOptionsBuilder, IServiceProvider)"/>

@@ -13,8 +13,23 @@ internal static class ActiveCompute
     }
 
     /// <summary>
-    /// Whether the current flow is inside a compute. The one internal <c>Sluice.EntityFrameworkCore</c> uses,
-    /// which is why that package depends on this exact core version.
+    /// Records a guard violation on the compute running in the current flow, so that call caches nothing and throws
+    /// it even if the compute catches it, and returns it for the caller to throw. Returns null, without building the
+    /// violation, when no compute is running, so a check on a hot path costs nothing outside computes.
     /// </summary>
-    internal static bool IsActive => Current is not null;
+    /// <remarks>
+    /// The one internal <c>Sluice.EntityFrameworkCore</c> uses (its strict reads record their violations here), which
+    /// is why that package depends on this exact core version.
+    /// </remarks>
+    internal static Exception? Violate(Func<Exception> violation)
+    {
+        if (Current is not { } reads)
+        {
+            return null;
+        }
+
+        var exception = violation();
+        reads.Violate(exception);
+        return exception;
+    }
 }

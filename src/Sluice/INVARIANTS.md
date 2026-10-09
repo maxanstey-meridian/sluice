@@ -54,10 +54,10 @@ The cache defaults are checked when `SluiceCache` is first resolved, and a `Quer
 
 ## SLUICE-CORE-007 A value is cached only with the dependencies its compute recorded
 
-**Rule:** a compute that records no dependency, or that calls `GetOrSetAsync` itself, makes the call throw `InvalidOperationException` and stores nothing. The guard returns from the FusionCache factory with memory, L2 and backplane writes skipped, and rethrows after `GetOrSetAsync` returns. A nested call marks the outer compute, so swallowing the exception doesn't help.
+**Rule:** a compute that records no dependency, or that calls `GetOrSetAsync` itself, makes the call throw `InvalidOperationException` and stores nothing. The guard returns from the FusionCache factory with memory, L2 and backplane writes skipped, and rethrows after `GetOrSetAsync` returns. A nested call marks the outer compute, so swallowing the exception doesn't help. The EF package's strict-read checks mark the compute the same way, through `ActiveCompute.Violate` (SLUICE-CORE-012).
 **Why:** a value with no dependencies is never invalidated, and a nested hit hides the inner value's dependencies from the outer entry. Throwing from the factory instead would let fail-safe serve a stale value and hide the bug.
 **Owner:** `SluiceCache.GetOrSetAsync` and `SluiceCache.ComputeAsync`.
-**Proof:** `ComputeGuardTests.A_compute_that_records_no_reads_throws_and_caches_nothing`, `A_compute_that_records_no_reads_stores_nothing_another_node_can_read` (L2), `A_compute_that_records_no_reads_evicts_nothing_on_another_node` (backplane), `Calling_GetOrSetAsync_inside_a_compute_throws`, `The_zero_reads_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`, `The_nesting_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`.
+**Proof:** `ComputeGuardTests.A_compute_that_records_no_reads_throws_and_caches_nothing`, and for a strict-read violation the compute catches, the EF tests' `StrictReadTests.A_compute_that_catches_a_strict_read_violation_caches_nothing_and_its_caller_still_gets_it`, `A_compute_that_records_no_reads_stores_nothing_another_node_can_read` (L2), `A_compute_that_records_no_reads_evicts_nothing_on_another_node` (backplane), `Calling_GetOrSetAsync_inside_a_compute_throws`, `The_zero_reads_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`, `The_nesting_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry`.
 
 ## SLUICE-CORE-008 No recorded read is lost
 
@@ -88,3 +88,11 @@ The cache defaults are checked when `SluiceCache` is first resolved, and a `Quer
 **Why:** a compute that catches the fetch's failure and returns a fallback caches that fallback; recording only on success would leave it with no dependency to evict it but the TTL.
 **Owner:** `SluiceReads.From<T>(IEnumerable<Dependency>, Func<CancellationToken, Task<T>>)`.
 **Proof:** `DependencyTrackingTests.A_fallback_for_a_failed_fused_fetch_is_evicted_by_its_dependency`, `A_failed_fused_fetch_that_escapes_reaches_the_caller_unchanged_and_caches_nothing`, `A_fused_read_returns_the_fetch_result_with_the_compute_token_and_records_the_dependency`.
+
+## SLUICE-CORE-012 The EF package uses exactly one core internal
+
+**Rule:** `InternalsVisibleTo Sluice.EntityFrameworkCore` exists for `ActiveCompute.Violate` alone: it records a guard violation on the compute running in the current flow and returns it, or returns null without building it when no compute runs. The EF package uses no other internal, and pins the exact core version it was built with.
+**Why:** an internal is a contract the compiler doesn't hold across packages, so a mismatched pair fails at runtime with `MissingMethodException`. One narrow member keeps that contract small enough to review, and the pin keeps NuGet from pairing mismatched versions.
+**Accepts:** `InternalsVisibleTo` exposes every core internal to the EF package, so "only `Violate`" is kept by review, not by the compiler.
+**Owner:** `ActiveCompute.Violate`, and the `InternalsVisibleTo` item and the EF package's `PinSluiceCoreVersion` target.
+**Proof:** none automated; kept by review.

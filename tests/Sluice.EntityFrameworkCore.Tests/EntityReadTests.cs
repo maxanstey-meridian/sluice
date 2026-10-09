@@ -24,10 +24,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task An_entity_read_returns_its_row_and_is_evicted_by_its_key_and_by_AllDependencies_only()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         var ada = await AddCustomer(db, "Ada");
         var bob = await AddCustomer(db, "Bob");
-        await using var node = new SluiceNode();
 
         var read = await node.Cache.GetOrSetAsync(
             _customer,
@@ -47,9 +47,9 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task A_read_that_finds_nothing_still_depends_on_its_key()
     {
-        await using var db = postgres.CreateDb();
-        const int missing = -1;
         await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        const int missing = -1;
 
         var read = await node.Cache.GetOrSetAsync(
             _customer,
@@ -71,7 +71,8 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task An_All_read_is_evicted_by_any_key_of_its_set_and_by_AllDependencies_but_not_by_another_set()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         var ada = await AddCustomer(db, "Ada");
 
         Task ReadAll(SluiceReads read, CancellationToken ct) =>
@@ -86,7 +87,8 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task An_EF_dependency_and_a_declared_one_invalidate_together_in_one_batch()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         var ada = await AddCustomer(db, "Ada");
         Dependency[] batch = [db.Customers.Dependency(ada), _greetings.For("ada")];
 
@@ -111,9 +113,9 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task A_compute_mixing_an_EF_read_with_a_declared_source_is_evicted_by_either_side()
     {
-        await using var db = postgres.CreateDb();
-        var ada = await AddCustomer(db, "Ada");
         await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var ada = await AddCustomer(db, "Ada");
         var runs = 0;
 
         Task<string> Dashboard() =>
@@ -152,7 +154,8 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task A_strongly_typed_id_with_a_value_converter_reads_its_row_and_is_evicted_by_the_same_id()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         db.Users.AddRange(
             new User { Id = new UserId(7), Name = "Grace" },
             new User { Id = new UserId(8), Name = "Alan" }
@@ -162,7 +165,6 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         Task<User> ReadGrace(SluiceReads read, CancellationToken ct) =>
             read.Entity(db.Users, new UserId(7)).SingleAsync(ct);
 
-        await using var node = new SluiceNode();
         var grace = await node.Cache.GetOrSetAsync(_user, 7, ReadGrace);
         grace.Name.Should().Be("Grace");
         (await Eviction.IsEvictedBy(ReadGrace, db.Users.Dependency(new UserId(7))))
@@ -176,7 +178,8 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task A_typed_id_without_an_equality_operator_reads_its_row_and_is_evicted_by_the_same_id()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         db.Invoices.AddRange(
             new Invoice { No = new InvoiceNo(41), Payee = "Ada" },
             new Invoice { No = new InvoiceNo(42), Payee = "Bob" }
@@ -186,7 +189,6 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         Task<Invoice> ReadInvoice(SluiceReads read, CancellationToken ct) =>
             read.Entity(db.Invoices, new InvoiceNo(41)).SingleAsync(ct);
 
-        await using var node = new SluiceNode();
         var invoice = await node.Cache.GetOrSetAsync(_invoice, 41, ReadInvoice);
         invoice.Payee.Should().Be("Ada");
         (await Eviction.IsEvictedBy(ReadInvoice, db.Invoices.Dependency(new InvoiceNo(41))))
@@ -200,7 +202,8 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task A_derived_type_shares_its_root_type_dependencies()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         var rex = new Dog { Name = "Rex", Fetches = true };
         db.Dogs.Add(rex);
         await db.SaveChangesAsync();
@@ -226,7 +229,8 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task Reads_do_not_track_so_an_unsaved_edit_on_the_callers_context_is_not_cached()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         var customer = new Customer { Name = "Ada" };
         db.Customers.Add(customer);
         await db.SaveChangesAsync();
@@ -235,7 +239,6 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         db.ChangeTracker.Clear();
         var tracked = await db.Customers.SingleAsync(c => c.Id == customer.Id);
         tracked.Name = "Unsaved";
-        await using var node = new SluiceNode();
 
         var cached = await node.Cache.GetOrSetAsync(
             _customer,
@@ -256,7 +259,8 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     [Fact]
     public async Task Cancelling_the_caller_cancels_its_running_EF_query()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         var ada = await AddCustomer(db, "Ada");
 
         // Another connection holds the table, so the compute's query blocks until it's cancelled.
@@ -266,7 +270,6 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             "LOCK TABLE \"Customers\" IN ACCESS EXCLUSIVE MODE"
         );
 
-        await using var node = new SluiceNode();
         using var caller = new CancellationTokenSource();
         var querying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var call = node
@@ -315,7 +318,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
                 }
             })
         );
-        await using var db = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node);
         var ada = await AddCustomer(db, "Ada");
         Task<Customer?> ReadAda(SluiceReads read, CancellationToken ct) =>
             read.Entity(db.Customers, ada).SingleOrDefaultAsync(ct);

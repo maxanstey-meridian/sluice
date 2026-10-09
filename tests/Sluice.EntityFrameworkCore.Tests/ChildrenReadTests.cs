@@ -40,9 +40,9 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
     [Fact]
     public async Task Each_Children_form_reads_the_rows_of_its_principal()
     {
-        await using var db = postgres.CreateDb();
-        var (ada, _) = await AddCustomersWithOrdersAndNotes(db);
         await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await AddCustomersWithOrdersAndNotes(db);
 
         var items = await node.Cache.GetOrSetAsync(
             _items,
@@ -72,7 +72,8 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
     [Fact]
     public async Task Each_Children_form_depends_on_the_foreign_key_value_it_reads()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         var (ada, bob) = await AddCustomersWithOrdersAndNotes(db);
 
         Task ByProperty(SluiceReads read, CancellationToken ct) =>
@@ -93,7 +94,8 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
     [Fact]
     public async Task A_Children_read_is_evicted_by_AllDependencies_of_its_set_but_not_by_its_principal()
     {
-        await using var db = postgres.CreateDb();
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
         var (ada, _) = await AddCustomersWithOrdersAndNotes(db);
 
         Task Orders(SluiceReads read, CancellationToken ct) =>

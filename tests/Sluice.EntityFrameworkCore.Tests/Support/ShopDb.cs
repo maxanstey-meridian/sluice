@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 
 namespace Sluice.EntityFrameworkCore.Tests.Support;
 
@@ -11,7 +12,13 @@ public sealed class Customer
     public List<Coupon> Coupons { get; set; } = [];
 }
 
-public sealed class Order
+/// <summary>What generic repository code would constrain a type parameter to.</summary>
+public interface IHasCustomer
+{
+    public Customer? Customer { get; }
+}
+
+public sealed class Order : IHasCustomer
 {
     public int Id { get; set; }
     public int CustomerId { get; set; }
@@ -171,6 +178,36 @@ public sealed class RecentOrder
     public int Id { get; set; }
 }
 
+/// <summary>
+/// Loads its customer lazily, through the <see cref="ILazyLoader"/> EF passes its constructor, and its order eagerly,
+/// as an auto-included navigation.
+/// </summary>
+public sealed class Review
+{
+    private readonly ILazyLoader? _loader;
+    private Customer? _customer;
+
+    public Review() { }
+
+    public Review(ILazyLoader loader) => _loader = loader;
+
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+
+    public Customer? Customer
+    {
+        get
+        {
+            _loader?.Load(this);
+            return _customer;
+        }
+        set => _customer = value;
+    }
+
+    public int OrderId { get; set; }
+    public Order? Order { get; set; }
+}
+
 public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options)
 {
     public DbSet<Customer> Customers => Set<Customer>();
@@ -196,6 +233,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<ActiveCustomer> ActiveCustomers => Set<ActiveCustomer>();
     public DbSet<TopCustomer> TopCustomers => Set<TopCustomer>();
     public DbSet<RecentOrder> RecentOrders => Set<RecentOrder>();
+    public DbSet<Review> Reviews => Set<Review>();
 
     /// <summary>Adds two customers, Ada and Bob, then forgets them, so later queries load them afresh.</summary>
     public async Task<(int Ada, int Bob)> AddCustomers()
@@ -294,6 +332,8 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
                 coupon => coupon.HasOne(typeof(Coupon)).WithMany().HasForeignKey("CouponId"),
                 customer => customer.HasOne(typeof(Customer)).WithMany().HasForeignKey("CustomerId")
             );
+
+        model.Entity<Review>().Navigation(review => review.Order).AutoInclude();
 
         model.Entity<Supplier>().ToTable("Suppliers").ToView("supplier_names");
         model.Entity<CustomerTotal>().HasNoKey().ToView("customer_totals");

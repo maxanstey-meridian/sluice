@@ -13,12 +13,8 @@ namespace Sluice.EntityFrameworkCore.Tests;
 /// that doesn't enlist, so they run inside a scope too.
 /// </summary>
 [Collection(PostgresCollection.Name)]
-public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposable
+public sealed class AmbientTransactionTests(PostgresFixture postgres)
 {
-    private readonly ShopDb _reader = postgres.CreateDb(enlist: false);
-
-    public void Dispose() => _reader.Dispose();
-
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -27,8 +23,9 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
     )
     {
         await using var node = new SluiceNode();
-        var (ada, _) = await _reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
+        await using var reader = postgres.CreateDb(node, enlist: false);
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         Task completed;
 
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
@@ -45,7 +42,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
         }
 
         await completed;
-        (await _reader.NameOf(ada)).Should().Be(complete ? "Ada Lovelace" : "Ada");
+        (await reader.NameOf(ada)).Should().Be(complete ? "Ada Lovelace" : "Ada");
         (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
@@ -57,8 +54,9 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
     )
     {
         await using var node = new SluiceNode();
-        var (ada, _) = await _reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
+        await using var reader = postgres.CreateDb(node, enlist: false);
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         using var transaction = new CommittableTransaction();
         await using var db = postgres.CreateDb(node);
         await db.Database.OpenConnectionAsync();
@@ -78,7 +76,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
         }
 
         await completed;
-        (await _reader.NameOf(ada)).Should().Be(commit ? "Ada Lovelace" : "Ada");
+        (await reader.NameOf(ada)).Should().Be(commit ? "Ada Lovelace" : "Ada");
         (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
@@ -86,9 +84,10 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
     public async Task Contexts_saving_inside_one_TransactionScope_are_all_evicted_when_it_completes()
     {
         await using var node = new SluiceNode();
-        var (ada, bob) = await _reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
-        var bobRead = await CachedRead.Customer(node.Cache, _reader, bob);
+        await using var reader = postgres.CreateDb(node, enlist: false);
+        var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, reader, bob);
         Task completed;
 
         // One connection, so the scope needs no distributed transaction.
@@ -116,8 +115,9 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
     public async Task With_Enlist_false_a_save_inside_a_TransactionScope_is_evicted_at_once_and_outlives_the_scope()
     {
         await using var node = new SluiceNode();
-        var (ada, _) = await _reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
+        await using var reader = postgres.CreateDb(node, enlist: false);
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
 
         using (new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
         {
@@ -127,7 +127,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
             (await adaRead.WasEvicted()).Should().BeTrue("EF committed the save at once");
         }
 
-        (await _reader.NameOf(ada))
+        (await reader.NameOf(ada))
             .Should()
             .Be("Ada Lovelace", "the aborted scope didn't hold the save");
     }
@@ -136,13 +136,14 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
     public async Task A_save_left_behind_by_a_conflict_in_a_disposed_TransactionScope_is_evicted_by_the_next_save_without_failing_it()
     {
         await using var node = new SluiceNode();
-        var (ada, bob) = await _reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
+        await using var reader = postgres.CreateDb(node, enlist: false);
+        var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         await using var db = postgres.CreateDb(node);
         Task completed;
 
         var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
-        await _reader.Customers.Where(c => c.Id == bob).ExecuteDeleteAsync();
+        await reader.Customers.Where(c => c.Id == bob).ExecuteDeleteAsync();
         customers.ForEach(c => c.Name += " (edited)");
 
         // The conflict ends the save without an event, so Sluice still holds it when the scope is disposed.
@@ -174,8 +175,9 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IDisposa
                 .WithSerializer(new FusionCacheSystemTextJsonSerializer())
                 .WithDistributedCache(new SyncOnlyDistributedCache())
         );
-        var (ada, _) = await _reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
+        await using var reader = postgres.CreateDb(node, enlist: false);
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, reader, ada);
         Task completed;
 
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))

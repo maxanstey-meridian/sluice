@@ -4,18 +4,18 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 
 ## SLUICE-EF-001 EF reads never track
 
-**Rule:** `read.Entity`, `read.Children` and `read.All` return `AsNoTracking()` queries.
+**Rule:** `read.Entity`, `read.Children` and `read.All` return `AsNoTracking()` queries, and `AsTracking()` on one throws (SLUICE-EF-016).
 **Why:** a tracked query hands back the context's existing instance, so the cache would store the caller's unsaved edits, or a stale identity-resolved value, for every caller.
 **Accepts:** cached entities are detached; callers who want to edit one load it again on their own context.
-**Owner:** `SluiceReadsExtensions.WhereEquals` and `SluiceReadsExtensions.All`.
+**Owner:** `StrictReads.Query`, which every helper's query starts from.
 **Proof:** `EntityReadTests.Reads_do_not_track_so_an_unsaved_edit_on_the_callers_context_is_not_cached`.
 
 ## SLUICE-EF-002 EF reads refuse to run inside a transaction
 
 **Rule:** `read.Entity`, `read.Children` and `read.All` throw `InvalidOperationException` when the context's connection has a current EF transaction, an enlisted transaction or an ambient one: the inputs EF's batch executor checks, so a `TransactionScope` over a connection with `Enlist=false` doesn't count, as it doesn't for EF.
 **Why:** a compute inside a transaction caches rows other callers can't see yet (and that may roll back), or an old snapshot under RepeatableRead or Serializable, and serves them to everyone.
-**Accepts:** the check runs when the helper is called, not when its query executes. Generic-path computes aren't checked; "don't compute inside your own open transaction" is documentation there.
-**Owner:** `SluiceReadsExtensions.EnsureNoTransaction`, through `ContextTransaction.Of`, which the write side (SLUICE-EF-007) uses too.
+**Accepts:** generic-path computes aren't checked; "don't compute inside your own open transaction" is documentation there. A query built outside a transaction and run inside one is caught when it runs (SLUICE-EF-017).
+**Owner:** `SluiceReadsExtensions.EnsureContext`, through `ContextTransaction.Of`, which the write side (SLUICE-EF-007) uses too.
 **Proof:** `ReadGuardTests.Reads_throw_inside_an_EF_transaction_and_run_again_after_it_commits`, `Reads_throw_inside_an_enlisted_transaction`, `Reads_throw_inside_a_TransactionScope`, `Reads_run_inside_a_TransactionScope_when_the_connection_does_not_enlist`.
 
 ## SLUICE-EF-003 EF reads and dependencies refuse types not mapped to a table
@@ -110,3 +110,33 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 **Accepts:** two kinds of save end without an event, so their capture stays on the context: one whose concurrency conflict nobody suppressed, and one an interceptor added after Sluice threw from in `SavingChanges` (EF raises `SavingChanges` outside its try, so no failure event fires). The leftover holds that lease's tracked objects until the instance's next save, on the same lease or a later one, publishes it at once, and again from its transaction if that's still live (SLUICE-EF-008); either only over-invalidates, and a transaction that has since been disposed is skipped.
 **Owner:** `SluiceInterceptor`.
 **Proof:** `PoolingTests.Each_lease_evicts_what_it_commits_and_nothing_an_earlier_lease_left_uncommitted` (all three registrations; it asserts the pools hand the second lease the same instance); for a leftover, `AmbientTransactionTests.A_save_left_behind_by_a_conflict_in_a_disposed_TransactionScope_is_evicted_by_the_next_save_without_failing_it`.
+
+## SLUICE-EF-015 Inside a compute, every EF command comes from a read helper
+
+**Rule:** the read helpers tag their queries with `StrictReads.Marker`, which EF writes at the head of their SQL. While a compute runs, every command a `UseSluice` context executes, on the reader, scalar and non-query paths, sync and async, throws `InvalidOperationException` unless its SQL carries the marker: a plain query, lazy or explicit loading, `FromSql`, `SqlQuery`, a compiled query, raw SQL and writes (`SaveChanges`, `ExecuteUpdate`). The violation is recorded on the compute too (SLUICE-CORE-007), so the call throws it and caches nothing even if the compute catches it. Outside a compute nothing is checked.
+**Why:** a read the compute didn't make through a helper records no dependency, so no write ever invalidates the value built from it; it goes stale until its duration ends, silently.
+**Accepts:** `FromSql`, compiled queries, navigations and lazy loading can't be used inside a compute; related rows are read with their own helper call. A context without `UseSluice` isn't checked (the helpers refuse one, SLUICE-EF-018, but a plain query on one goes through). A helper query built in one compute and run inside another passes, recording its dependency on the first. Every command, outside computes too, pays a search of its SQL for the marker.
+**Owner:** `StrictReads`'s six command methods and `StrictReads.Check`; `StrictReads.Query` adds the marker.
+**Proof:** `StrictReadTests.A_query_not_built_by_a_read_helper_throws_inside_a_compute_and_runs_outside_one` (a query, a scalar and a non-query, each sync and async, `FromSql`, a compiled query and a save), `Lazy_and_explicit_loading_throw_inside_a_compute_and_run_outside_one`, `A_compute_that_catches_a_strict_read_violation_caches_nothing_and_its_caller_still_gets_it`.
+
+## SLUICE-EF-016 A read helper's query reads only its own rows, and doesn't track
+
+**Rule:** when EF compiles a query carrying the marker, it throws `InvalidOperationException` if the query reads beyond the helper's own rows: a second query root (a join, a subquery, a set operation with another set, `FromSql`), `Include` or `ThenInclude`, or any navigation that isn't an ownership (member access such as `o.Customer.Name`, collection aggregates, many-to-many skip navigations, `EF.Property` naming a navigation, a navigation reached through a cast or interface); or if it calls `AsTracking()`. Owned types and JSON columns are allowed (an owned collection read with `AsSplitQuery()` too: EF tags every command of a split query), as is `AsNoTrackingWithIdentityResolution()`, whose identity resolution doesn't use the context's tracker. The helpers also call `IgnoreAutoIncludes()`, so auto-included navigations aren't loaded. The check runs inside a compute or not, and a violation inside one is recorded on it.
+**Why:** each of those reads rows the helper's dependency doesn't cover, so the value would be cached with no dependency on them; a tracked query hands back the caller's live instances (SLUICE-EF-001). EF runs the interceptor only when it compiles a query, and serves an already compiled query from its cache without it, so a check that ran only inside computes would let a tree first compiled outside one through. A tree the check rejects throws before EF caches it, so it's checked again next time; the marker is a constant in the tree, so a marked query never shares a cache entry with an unmarked one of the same shape.
+**Accepts:** the check is an EF singleton interceptor, one instance for the process: EF builds an internal service provider (with its own model and compiled-query cache) per distinct set of singleton interceptors and throws after twenty, so it can't live on `SluiceInterceptor`, which is one per cache. EF refuses singleton interceptors from `AddInterceptors` when the context calls `UseInternalServiceProvider`, so such a context can't use Sluice. `ExecuteUpdate` and `ExecuteDelete` on a helper's query aren't refused, though they're writes.
+**Owner:** `StrictReads.QueryCompilationStarting` and its `ShapeCheck`; `StrictReads.Query` for `IgnoreAutoIncludes()`.
+**Proof:** `StrictReadTests.A_read_helper_query_that_reads_beyond_its_own_rows_or_tracks_throws_inside_a_compute` (one case per shape), `A_read_helper_query_may_read_owned_values_and_shape_its_own_rows`, `A_read_helper_does_not_load_auto_included_navigations`, `The_shape_check_runs_outside_a_compute_too_and_a_rejected_query_is_never_cached`.
+
+## SLUICE-EF-017 A read helper's query refuses to run inside a transaction
+
+**Rule:** while a compute runs, a command carrying the marker throws `InvalidOperationException` if the context is in a transaction when it executes, read through `ContextTransaction.Of` as SLUICE-EF-002 reads it, whatever the context's state when the helper built the query.
+**Why:** a helper's query can be built outside a transaction and run inside one (`BeginTransaction` between the two, or a `TransactionScope` the connection enlists in when it opens), and would then cache uncommitted rows or an old snapshot. The command's own `Transaction` only carries an EF transaction; an enlisted or ambient one is carried by the connection, so it's read from the context.
+**Owner:** `StrictReads.Check`.
+**Proof:** `StrictReadTests.A_read_helper_query_built_outside_a_transaction_throws_when_it_runs_inside_one` (an EF transaction and a `TransactionScope`).
+
+## SLUICE-EF-018 The read helpers refuse a context without UseSluice
+
+**Rule:** `read.Entity`, `read.Children` and `read.All` throw `InvalidOperationException` unless the context's options carry the strict-read interceptor, which `UseSluice` adds.
+**Why:** the strict-read checks (SLUICE-EF-015 to 017) live in that interceptor, so on a context without it a helper would read with them silently off.
+**Owner:** `StrictReads.EnsureOn`, called from `SluiceReadsExtensions.EnsureContext`.
+**Proof:** `ReadGuardTests.Reads_on_a_context_without_UseSluice_throw`.

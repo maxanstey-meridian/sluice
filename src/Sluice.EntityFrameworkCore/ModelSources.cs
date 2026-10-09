@@ -62,7 +62,10 @@ internal static class ModelSources
     /// Resolves <paramref name="selector"/> (an FK property, <c>EF.Property</c> on a shadow FK, or a reference
     /// navigation) to a single-column foreign key of <paramref name="entityType"/>.
     /// </summary>
-    /// <exception cref="ArgumentException">The selector doesn't name a single-column foreign key.</exception>
+    /// <exception cref="ArgumentException">
+    /// The selector doesn't name a single-column foreign key, or names it through <c>EF.Property</c> with a property
+    /// name that isn't a constant.
+    /// </exception>
     internal static IForeignKey ResolveForeignKey(
         IEntityType entityType,
         LambdaExpression selector,
@@ -78,8 +81,16 @@ internal static class ModelSources
             MethodCallExpression
             {
                 Method.Name: nameof(EF.Property),
-                Arguments: [ParameterExpression, ConstantExpression { Value: string property }],
-            } call when call.Method.DeclaringType == typeof(EF) => property,
+                Arguments: [ParameterExpression, var property],
+            } call when call.Method.DeclaringType == typeof(EF) => property
+                is ConstantExpression { Value: string constant }
+                ? constant
+                : throw new ArgumentException(
+                    $"'{selector}' names its property with '{property}'. The property name passed to EF.Property "
+                        + "must be a constant string (o => EF.Property<int>(o, \"CustomerId\")), so the foreign key "
+                        + "can be found from the expression without running it.",
+                    parameterName
+                ),
             _ => null,
         };
 

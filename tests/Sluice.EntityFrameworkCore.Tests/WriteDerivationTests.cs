@@ -5,7 +5,7 @@ using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
 
-/// <summary>What a tracked save evicts. Reads run on their own context; writes on one wired with <c>UseSluice</c>.</summary>
+/// <summary>What a tracked save evicts. Reads run on a context of their own, and writes on another.</summary>
 [Collection(PostgresCollection.Name)]
 public sealed class WriteDerivationTests : IAsyncLifetime
 {
@@ -15,7 +15,7 @@ public sealed class WriteDerivationTests : IAsyncLifetime
 
     public WriteDerivationTests(PostgresFixture postgres)
     {
-        _reader = postgres.CreateDb();
+        _reader = postgres.CreateDb(_node);
         _db = postgres.CreateDb(_node);
     }
 
