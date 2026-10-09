@@ -7,18 +7,20 @@ namespace Sluice.EntityFrameworkCore.Tests;
 
 /// <summary>What a tracked save evicts. Reads run on their own context; writes on one wired with <c>UseSluice</c>.</summary>
 [Collection(PostgresCollection.Name)]
-public sealed class WriteDerivationTests(PostgresFixture postgres) : IAsyncLifetime
+public sealed class WriteDerivationTests : IAsyncLifetime
 {
     private readonly SluiceNode _node = new();
-    private ShopDb _reader = null!;
-    private ShopDb _db = null!;
+    private readonly ShopDb _reader;
+    private readonly ShopDb _db;
 
-    public Task InitializeAsync()
+    public WriteDerivationTests(PostgresFixture postgres)
     {
         _reader = postgres.CreateDb();
         _db = postgres.CreateDb(_node);
-        return Task.CompletedTask;
     }
+
+    // xUnit 2 disposes a test class through IAsyncLifetime, never through IAsyncDisposable.
+    public Task InitializeAsync() => Task.CompletedTask;
 
     public async Task DisposeAsync()
     {
@@ -43,18 +45,10 @@ public sealed class WriteDerivationTests(PostgresFixture postgres) : IAsyncLifet
         return order;
     }
 
-    private Task<CachedRead> ReadCustomer(int id) =>
-        CachedRead.Of(
-            _node.Cache,
-            (read, ct) => read.Entity(_reader.Customers, id).SingleOrDefaultAsync(ct)
-        );
+    private Task<CachedRead> ReadCustomer(int id) => CachedRead.Customer(_node.Cache, _reader, id);
 
     private Task<CachedRead> ReadOrdersOf(int customerId) =>
-        CachedRead.Of(
-            _node.Cache,
-            (read, ct) =>
-                read.Children(_reader.Orders, o => o.CustomerId, customerId).ToListAsync(ct)
-        );
+        CachedRead.OrdersOf(_node.Cache, _reader, customerId);
 
     [Fact]
     public async Task Saving_an_entity_evicts_readers_of_its_key_and_only_those()
@@ -117,6 +111,63 @@ public sealed class WriteDerivationTests(PostgresFixture postgres) : IAsyncLifet
         (await adaOrders.WasEvicted()).Should().BeTrue("the order left Ada");
         (await bobOrders.WasEvicted()).Should().BeTrue("the order joined Bob");
         (await cyOrders.WasEvicted()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Removing_a_row_that_was_never_loaded_evicts_Children_readers_of_its_parent()
+    {
+        var ada = await AddCustomer("Ada");
+        var tea = await AddOrder(ada, "Tea");
+        var adaOrders = await ReadOrdersOf(ada.Id);
+        _db.ChangeTracker.Clear();
+
+        _db.Orders.Remove(new Order { Id = tea.Id });
+        await _db.SaveChangesAsync();
+
+        (await _reader.Orders.AnyAsync(o => o.Id == tea.Id)).Should().BeFalse();
+        (await adaOrders.WasEvicted()).Should().BeTrue("Ada's order was deleted");
+    }
+
+    [Fact]
+    public async Task Updating_a_row_from_an_object_that_was_never_loaded_evicts_Children_readers_of_its_old_parent()
+    {
+        var ada = await AddCustomer("Ada");
+        var bob = await AddCustomer("Bob");
+        var tea = await AddOrder(ada, "Tea");
+        var adaOrders = await ReadOrdersOf(ada.Id);
+        var bobOrders = await ReadOrdersOf(bob.Id);
+        _db.ChangeTracker.Clear();
+
+        _db.Orders.Update(
+            new Order
+            {
+                Id = tea.Id,
+                CustomerId = bob.Id,
+                Item = "Tea",
+            }
+        );
+        await _db.SaveChangesAsync();
+
+        (await _reader.Orders.SingleAsync(o => o.Id == tea.Id)).CustomerId.Should().Be(bob.Id);
+        (await adaOrders.WasEvicted()).Should().BeTrue("the order left Ada");
+        (await bobOrders.WasEvicted()).Should().BeTrue("the order joined Bob");
+    }
+
+    [Fact]
+    public async Task A_partial_update_of_a_row_that_was_never_loaded_evicts_Children_readers_of_its_parent()
+    {
+        var ada = await AddCustomer("Ada");
+        var tea = await AddOrder(ada, "Tea");
+        var adaOrders = await ReadOrdersOf(ada.Id);
+        _db.ChangeTracker.Clear();
+
+        var stub = new Order { Id = tea.Id, Item = "Green tea" };
+        _db.Orders.Attach(stub);
+        _db.Entry(stub).Property(o => o.Item).IsModified = true;
+        await _db.SaveChangesAsync();
+
+        (await _reader.Orders.SingleAsync(o => o.Id == tea.Id)).Item.Should().Be("Green tea");
+        (await adaOrders.WasEvicted()).Should().BeTrue("Ada's order was edited");
     }
 
     [Fact]
@@ -386,6 +437,8 @@ public sealed class WriteDerivationTests(PostgresFixture postgres) : IAsyncLifet
     [Fact]
     public async Task Inserting_rows_evicts_earlier_not_found_reads_of_their_generated_keys()
     {
+        var existing = await AddCustomer("Bob");
+        var existingRead = await ReadCustomer(existing.Id);
         var next = await _reader.NextCustomerId();
         var customerRead = await ReadCustomer(next);
         var ordersRead = await ReadOrdersOf(next);
@@ -398,27 +451,34 @@ public sealed class WriteDerivationTests(PostgresFixture postgres) : IAsyncLifet
         customer.Id.Should().Be(next, "the test predicted the generated key");
         (await customerRead.WasEvicted()).Should().BeTrue();
         (await ordersRead.WasEvicted()).Should().BeTrue();
+        (await existingRead.WasEvicted())
+            .Should()
+            .BeFalse("only the new customer's key was written");
     }
 
     [Fact]
     public async Task A_write_through_a_value_converter_evicts_readers_of_the_same_id()
     {
-        var grace = new User { Id = new UserId(1007), Name = "Grace" };
-        var alan = new User { Id = new UserId(1008), Name = "Alan" };
-        var tea = new Product { Sku = new Sku("Tea-7"), Name = "Tea" };
+        var graceId = new UserId(Random.Shared.Next(1_000_000, int.MaxValue));
+        var alanId = new UserId(graceId.Value - 1);
+        var sku = $"Tea-{Guid.NewGuid():N}";
+        var grace = new User { Id = graceId, Name = "Grace" };
+        var alan = new User { Id = alanId, Name = "Alan" };
+        var tea = new Product { Sku = new Sku(sku), Name = "Tea" };
         _db.AddRange(grace, alan, tea);
         await _db.SaveChangesAsync();
         var graceRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Users, new UserId(1007)).SingleAsync(ct)
+            (read, ct) => read.Entity(_reader.Users, graceId).SingleAsync(ct)
         );
         var alanRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Users, new UserId(1008)).SingleAsync(ct)
+            (read, ct) => read.Entity(_reader.Users, alanId).SingleAsync(ct)
         );
         var teaRead = await CachedRead.Of(
             _node.Cache,
-            (read, ct) => read.Entity(_reader.Products, new Sku("TEA-7")).SingleAsync(ct)
+            (read, ct) =>
+                read.Entity(_reader.Products, new Sku(sku.ToUpperInvariant())).SingleAsync(ct)
         );
 
         grace.Name = "Grace Hopper";
@@ -427,7 +487,9 @@ public sealed class WriteDerivationTests(PostgresFixture postgres) : IAsyncLifet
 
         (await graceRead.WasEvicted()).Should().BeTrue();
         (await alanRead.WasEvicted()).Should().BeFalse();
-        (await teaRead.WasEvicted()).Should().BeTrue("citext compares TEA-7 and Tea-7 as equal");
+        (await teaRead.WasEvicted())
+            .Should()
+            .BeTrue("citext compares the SKU in either case as equal");
     }
 
     [Fact]

@@ -30,7 +30,8 @@ public static class SluiceReadsExtensions
     /// <param name="key">The primary key, of its CLR type in the EF model.</param>
     /// <exception cref="ArgumentException"><paramref name="key"/> isn't of the primary key's CLR type.</exception>
     /// <exception cref="NotSupportedException">
-    /// <typeparamref name="T"/> isn't mapped to a table (keyless, a view, a function or a SQL query), or its primary key is composite.
+    /// <typeparamref name="T"/> isn't mapped to a table (keyless, a view, a function or a SQL query), its primary key is
+    /// composite, or the context's provider isn't relational.
     /// </exception>
     /// <exception cref="InvalidOperationException">The context is in a transaction.</exception>
     public static IQueryable<T> Entity<T>(this SluiceReads read, DbSet<T> set, object key)
@@ -65,7 +66,9 @@ public static class SluiceReadsExtensions
     /// <paramref name="foreignKey"/> doesn't name a single-column foreign key, or <paramref name="principalKey"/>
     /// isn't of its CLR type.
     /// </exception>
-    /// <exception cref="NotSupportedException"><typeparamref name="T"/> isn't mapped to a table.</exception>
+    /// <exception cref="NotSupportedException">
+    /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
+    /// </exception>
     /// <exception cref="InvalidOperationException">The context is in a transaction.</exception>
     public static IQueryable<T> Children<T>(
         this SluiceReads read,
@@ -100,7 +103,9 @@ public static class SluiceReadsExtensions
     /// </summary>
     /// <param name="read">The compute's reads.</param>
     /// <param name="set">The set to read.</param>
-    /// <exception cref="NotSupportedException"><typeparamref name="T"/> isn't mapped to a table.</exception>
+    /// <exception cref="NotSupportedException">
+    /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
+    /// </exception>
     /// <exception cref="InvalidOperationException">The context is in a transaction.</exception>
     public static IQueryable<T> All<T>(this SluiceReads read, DbSet<T> set)
         where T : class

@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+
 namespace Sluice.EntityFrameworkCore.Tests.Support;
 
 /// <summary>A value cached on a node by a compute that runs one read, so a test can ask whether a write evicted it.</summary>
@@ -25,6 +27,18 @@ public sealed class CachedRead
         await cached.Get();
         return cached;
     }
+
+    /// <summary>A cached read of customer <paramref name="id"/> through <paramref name="reader"/>.</summary>
+    public static Task<CachedRead> Customer(SluiceCache cache, ShopDb reader, int id) =>
+        Of(cache, (read, ct) => read.Entity(reader.Customers, id).SingleOrDefaultAsync(ct));
+
+    /// <summary>A cached read of the orders of customer <paramref name="customerId"/> through <paramref name="reader"/>.</summary>
+    public static Task<CachedRead> OrdersOf(SluiceCache cache, ShopDb reader, int customerId) =>
+        Of(
+            cache,
+            (read, ct) =>
+                read.Children(reader.Orders, o => o.CustomerId, customerId).ToListAsync(ct)
+        );
 
     /// <summary>Reads the value again: true if it had been evicted and was recomputed (and so is cached again).</summary>
     public async Task<bool> WasEvicted()

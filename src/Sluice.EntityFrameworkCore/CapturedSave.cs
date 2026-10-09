@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -17,7 +18,13 @@ internal sealed class CapturedSave
     private CapturedSave() { }
 
     /// <summary>Captures what <paramref name="context"/> is about to save, without changing what EF saves.</summary>
-    internal static CapturedSave Capture(DbContext context)
+    /// <param name="context">The context about to save.</param>
+    /// <param name="unfinished">
+    /// A save on the same context that hasn't completed: the save this one runs inside (an interceptor that saves
+    /// again), or one a concurrency conflict left behind. Its rows are carried into this save and published with
+    /// it, since EF reports the end of the inner save before the outer one's, and the outer one then finds nothing.
+    /// </param>
+    internal static CapturedSave Capture(DbContext context, CapturedSave? unfinished)
     {
         var tracker = context.ChangeTracker;
 
@@ -36,6 +43,11 @@ internal sealed class CapturedSave
         }
 
         var save = new CapturedSave();
+        if (unfinished is not null)
+        {
+            save._changes.AddRange(unfinished._changes);
+            save._originals.AddRange(unfinished._originals);
+        }
 
         // Entries() detects changes only when AutoDetectChangesEnabled, exactly as SaveChanges is about to.
         var entries = tracker.Entries().ToList();
@@ -67,15 +79,15 @@ internal sealed class CapturedSave
     /// <summary>
     /// Everything the save may have changed: each row's key, and its foreign keys before and after. A deleted row
     /// also invalidates every foreign key that points at it, so database cascades evict <c>Children</c> readers.
-    /// A foreign key value still temporary (pointing at a row a failed save inserted) is skipped.
     /// </summary>
     internal List<Dependency> Dependencies()
     {
         var dependencies = new List<Dependency>(_originals);
         foreach (var (entry, state) in _changes)
         {
-            // A failed save's generated key is temporary again, though an earlier batch may have committed the
-            // row under it. Which row is unknown, so the whole type is invalidated.
+            // A failed save's generated keys are temporary again, though an earlier batch may have committed the
+            // row under one. Which row is unknown, so the whole type is invalidated, and so is the whole of each
+            // foreign key still pointing at such a row.
             var entityType = entry.Metadata;
             var source = ModelSources.WrittenEntity(entityType);
             dependencies.Add(
@@ -84,7 +96,18 @@ internal sealed class CapturedSave
                     : source.All
             );
 
-            dependencies.AddRange(ForeignKeys(entry, Current));
+            foreach (var foreignKey in entityType.GetForeignKeys())
+            {
+                var foreignKeySource = ModelSources.ForeignKey(foreignKey);
+                if (foreignKey.Properties.Any(property => entry.Property(property).IsTemporary))
+                {
+                    dependencies.Add(foreignKeySource.All);
+                }
+                else if (KeyOf(entry, foreignKey.Properties, Current) is { } principal)
+                {
+                    dependencies.Add(foreignKeySource.For(principal));
+                }
+            }
 
             if (state is EntityState.Deleted)
             {
@@ -104,11 +127,48 @@ internal sealed class CapturedSave
     private void Add(EntityEntry entry, EntityState state)
     {
         _changes.Add((entry, state));
-        if (state is not EntityState.Added)
+        if (state is EntityState.Added)
         {
-            _originals.AddRange(ForeignKeys(entry, property => property.OriginalValue));
+            return;
+        }
+
+        foreach (var foreignKey in entry.Metadata.GetForeignKeys())
+        {
+            var source = ModelSources.ForeignKey(foreignKey);
+            if (OriginalIsUnknown(entry, foreignKey))
+            {
+                _originals.Add(source.All);
+            }
+            else if (KeyOf(entry, foreignKey.Properties, Original) is { } key)
+            {
+                _originals.Add(source.For(key));
+            }
         }
     }
+
+    // A row saved without being loaded (attached, removed or updated from an object the context didn't query) has
+    // no original values from the database, so the parent it had is unknown. Two signs give it away: Update() marks
+    // every property modified with its original value equal to its current one, and a stub's foreign key holds a
+    // value the database can't (null in a required key, or the default of a non-nullable type, such as 0). A
+    // nullable foreign key left null on a stub looks like a row with no parent, and can't be told apart.
+    private static bool OriginalIsUnknown(EntityEntry entry, IForeignKey foreignKey) =>
+        foreignKey.Properties.Any(property =>
+        {
+            var value = entry.Property(property);
+            return (
+                    value.IsModified
+                    && property.GetValueComparer().Equals(value.OriginalValue, value.CurrentValue)
+                )
+                || (
+                    value.OriginalValue is { } original
+                        ? property.ClrType.IsValueType
+                            && Nullable.GetUnderlyingType(property.ClrType) is null
+                            && original.Equals(
+                                RuntimeHelpers.GetUninitializedObject(property.ClrType)
+                            )
+                        : foreignKey.IsRequired
+                );
+        });
 
     // The non-owned entry an owned one belongs to, through any owned owners in between. An owned entry is only
     // tracked with its owner, which is found by the ownership's key.
@@ -130,22 +190,11 @@ internal sealed class CapturedSave
         return owner.Metadata.IsOwned() ? OwnerOf(owner, entries) : owner;
     }
 
+    // A temporary value is unknown: it isn't what the database holds.
     private static object? Current(PropertyEntry property) =>
         property.IsTemporary ? null : property.CurrentValue;
 
-    private static IEnumerable<Dependency> ForeignKeys(
-        EntityEntry entry,
-        Func<PropertyEntry, object?> value
-    )
-    {
-        foreach (var foreignKey in entry.Metadata.GetForeignKeys())
-        {
-            if (KeyOf(entry, foreignKey.Properties, value) is { } key)
-            {
-                yield return ModelSources.ForeignKey(foreignKey).For(key);
-            }
-        }
-    }
+    private static object? Original(PropertyEntry property) => property.OriginalValue;
 
     // The key a model source takes: the value itself, or an array of the values of a composite key.
     // Null when any part is null (a foreign key that points nowhere) or unknown.

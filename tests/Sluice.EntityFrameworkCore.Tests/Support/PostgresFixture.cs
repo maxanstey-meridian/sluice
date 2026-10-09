@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Infrastructure;
@@ -25,15 +26,40 @@ public sealed class PostgresFixture : IAsyncLifetime
         SluiceNode node,
         Action<NpgsqlDbContextOptionsBuilder>? npgsql = null,
         params IInterceptor[] interceptors
-    )
-    {
-        var options = new DbContextOptionsBuilder<ShopDb>();
-        options
-            .UseNpgsql(ConnectionString, npgsql)
-            .AddInterceptors(interceptors)
-            .UseSluice(node.Services);
-        return new(options.Options);
-    }
+    ) =>
+        new(
+            new DbContextOptionsBuilder<ShopDb>()
+                .UseNpgsql(ConnectionString, npgsql)
+                .AddInterceptors(interceptors)
+                .UseSluice(node.Services)
+                .Options
+        );
+
+    /// <summary>
+    /// A context whose tracked writes invalidate <paramref name="node"/>'s cache, with <paramref name="interceptors"/>
+    /// added after Sluice, so they run after it.
+    /// </summary>
+    public ShopDb CreateDbWithInterceptorsAfterSluice(
+        SluiceNode node,
+        Action<NpgsqlDbContextOptionsBuilder>? npgsql,
+        params IInterceptor[] interceptors
+    ) =>
+        new(
+            new DbContextOptionsBuilder<ShopDb>()
+                .UseNpgsql(ConnectionString, npgsql)
+                .UseSluice(node.Services)
+                .AddInterceptors(interceptors)
+                .Options
+        );
+
+    /// <summary>A context on <paramref name="connection"/> whose tracked writes invalidate <paramref name="node"/>'s cache.</summary>
+    public ShopDb CreateDb(SluiceNode node, DbConnection connection) =>
+        new(
+            new DbContextOptionsBuilder<ShopDb>()
+                .UseNpgsql(connection)
+                .UseSluice(node.Services)
+                .Options
+        );
 
     /// <summary>
     /// A context whose tracked writes invalidate <paramref name="node"/>'s cache, and whose connection string sets

@@ -4,7 +4,8 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 namespace Sluice.EntityFrameworkCore.Tests.Support;
 
 /// <summary>
-/// Once armed, fails the next command, or the next commit, with an error a retrying execution strategy retries.
+/// Once armed, fails the next async command, or the next async commit, with an error a retrying execution strategy
+/// retries. Sync calls pass through.
 /// </summary>
 public sealed class FailOnceTransiently(bool atCommit)
     : DbCommandInterceptor,

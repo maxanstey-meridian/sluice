@@ -102,7 +102,10 @@ public sealed class Truck : Vehicle
     public int Axles { get; set; }
 }
 
-/// <summary>Owns its address in its own row (the address owns its contact in turn) and its stops in another table.</summary>
+/// <summary>
+/// Owns an address (which owns a contact in turn), stored in the parcel's own row but tracked as entries of their own,
+/// and stops, stored in a table of their own.
+/// </summary>
 public sealed class Parcel
 {
     public int Id { get; set; }
@@ -183,7 +186,6 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Animal> Animals => Set<Animal>();
     public DbSet<Dog> Dogs => Set<Dog>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
-    public DbSet<Truck> Trucks => Set<Truck>();
     public DbSet<Parcel> Parcels => Set<Parcel>();
     public DbSet<Warehouse> Warehouses => Set<Warehouse>();
     public DbSet<Bin> Bins => Set<Bin>();
@@ -194,6 +196,28 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<ActiveCustomer> ActiveCustomers => Set<ActiveCustomer>();
     public DbSet<TopCustomer> TopCustomers => Set<TopCustomer>();
     public DbSet<RecentOrder> RecentOrders => Set<RecentOrder>();
+
+    /// <summary>Adds two customers, Ada and Bob, then forgets them, so later queries load them afresh.</summary>
+    public async Task<(int Ada, int Bob)> AddCustomers()
+    {
+        var ada = new Customer { Name = "Ada" };
+        var bob = new Customer { Name = "Bob" };
+        Customers.AddRange(ada, bob);
+        await SaveChangesAsync();
+        ChangeTracker.Clear();
+        return (ada.Id, bob.Id);
+    }
+
+    /// <summary>Loads customer <paramref name="id"/>, renames it and saves.</summary>
+    public async Task Rename(int id, string name)
+    {
+        (await Customers.SingleAsync(c => c.Id == id)).Name = name;
+        await SaveChangesAsync();
+    }
+
+    /// <summary>Customer <paramref name="id"/>'s name as the database holds it now.</summary>
+    public Task<string> NameOf(int id) =>
+        Customers.AsNoTracking().Where(c => c.Id == id).Select(c => c.Name).SingleAsync();
 
     /// <summary>The key the next inserted customer gets, as long as nothing else inserts one first.</summary>
     public Task<int> NextCustomerId() =>

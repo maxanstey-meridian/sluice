@@ -15,40 +15,12 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLifetime
 {
-    private ShopDb _reader = null!;
+    private readonly ShopDb _reader = postgres.CreateDb(enlist: false);
 
-    public Task InitializeAsync()
-    {
-        _reader = postgres.CreateDb(enlist: false);
-        return Task.CompletedTask;
-    }
+    // xUnit 2 disposes a test class through IAsyncLifetime, never through IAsyncDisposable.
+    public Task InitializeAsync() => Task.CompletedTask;
 
     public Task DisposeAsync() => _reader.DisposeAsync().AsTask();
-
-    private async Task<(int Ada, int Bob)> AddCustomers()
-    {
-        var ada = new Customer { Name = "Ada" };
-        var bob = new Customer { Name = "Bob" };
-        _reader.Customers.AddRange(ada, bob);
-        await _reader.SaveChangesAsync();
-        _reader.ChangeTracker.Clear();
-        return (ada.Id, bob.Id);
-    }
-
-    private Task<CachedRead> ReadCustomer(SluiceNode node, int id) =>
-        CachedRead.Of(
-            node.Cache,
-            (read, ct) => read.Entity(_reader.Customers, id).SingleOrDefaultAsync(ct)
-        );
-
-    private static async Task Rename(ShopDb db, int id, string name)
-    {
-        (await db.Customers.SingleAsync(c => c.Id == id)).Name = name;
-        await db.SaveChangesAsync();
-    }
-
-    private Task<string> NameOf(int id) =>
-        _reader.Customers.AsNoTracking().Where(c => c.Id == id).Select(c => c.Name).SingleAsync();
 
     [Theory]
     [InlineData(true)]
@@ -58,14 +30,14 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
     )
     {
         await using var node = new SluiceNode();
-        var (ada, _) = await AddCustomers();
-        var adaRead = await ReadCustomer(node, ada);
+        var (ada, _) = await _reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
         Task completed;
 
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
         {
             await using var db = postgres.CreateDb(node);
-            await Rename(db, ada, "Ada Lovelace");
+            await db.Rename(ada, "Ada Lovelace");
             completed = Completion.Of(Transaction.Current!);
             (await adaRead.WasEvicted()).Should().BeFalse("the scope hasn't completed");
 
@@ -76,7 +48,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
         }
 
         await completed;
-        (await NameOf(ada)).Should().Be(complete ? "Ada Lovelace" : "Ada");
+        (await _reader.NameOf(ada)).Should().Be(complete ? "Ada Lovelace" : "Ada");
         (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
@@ -88,14 +60,14 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
     )
     {
         await using var node = new SluiceNode();
-        var (ada, _) = await AddCustomers();
-        var adaRead = await ReadCustomer(node, ada);
+        var (ada, _) = await _reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
         using var transaction = new CommittableTransaction();
         await using var db = postgres.CreateDb(node);
         await db.Database.OpenConnectionAsync();
         db.Database.EnlistTransaction(transaction);
 
-        await Rename(db, ada, "Ada Lovelace");
+        await db.Rename(ada, "Ada Lovelace");
         var completed = Completion.Of(transaction);
         (await adaRead.WasEvicted()).Should().BeFalse("the transaction hasn't completed");
 
@@ -109,7 +81,7 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
         }
 
         await completed;
-        (await NameOf(ada)).Should().Be(commit ? "Ada Lovelace" : "Ada");
+        (await _reader.NameOf(ada)).Should().Be(commit ? "Ada Lovelace" : "Ada");
         (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
@@ -117,9 +89,9 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
     public async Task Contexts_saving_inside_one_TransactionScope_are_all_evicted_when_it_completes()
     {
         await using var node = new SluiceNode();
-        var (ada, bob) = await AddCustomers();
-        var adaRead = await ReadCustomer(node, ada);
-        var bobRead = await ReadCustomer(node, bob);
+        var (ada, bob) = await _reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, _reader, bob);
         Task completed;
 
         // One connection, so the scope needs no distributed transaction.
@@ -127,18 +99,10 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
         {
             await connection.OpenAsync();
-
-            ShopDb OnTheConnection()
-            {
-                var options = new DbContextOptionsBuilder<ShopDb>();
-                options.UseNpgsql(connection).UseSluice(node.Services);
-                return new(options.Options);
-            }
-
-            await using var first = OnTheConnection();
-            await using var second = OnTheConnection();
-            await Rename(first, ada, "Ada Lovelace");
-            await Rename(second, bob, "Bob Babbage");
+            await using var first = postgres.CreateDb(node, connection);
+            await using var second = postgres.CreateDb(node, connection);
+            await first.Rename(ada, "Ada Lovelace");
+            await second.Rename(bob, "Bob Babbage");
             completed = Completion.Of(Transaction.Current!);
             (await adaRead.WasEvicted()).Should().BeFalse("the scope hasn't completed");
             (await bobRead.WasEvicted()).Should().BeFalse("the scope hasn't completed");
@@ -155,18 +119,20 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
     public async Task With_Enlist_false_a_save_inside_a_TransactionScope_is_evicted_at_once_and_outlives_the_scope()
     {
         await using var node = new SluiceNode();
-        var (ada, _) = await AddCustomers();
-        var adaRead = await ReadCustomer(node, ada);
+        var (ada, _) = await _reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
 
         using (new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
         {
             await using var db = postgres.CreateDb(node, enlist: false);
-            await Rename(db, ada, "Ada Lovelace");
+            await db.Rename(ada, "Ada Lovelace");
 
             (await adaRead.WasEvicted()).Should().BeTrue("EF committed the save at once");
         }
 
-        (await NameOf(ada)).Should().Be("Ada Lovelace", "the aborted scope didn't hold the save");
+        (await _reader.NameOf(ada))
+            .Should()
+            .Be("Ada Lovelace", "the aborted scope didn't hold the save");
     }
 
     [Fact]
@@ -178,14 +144,14 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres) : IAsyncLi
                 .WithSerializer(new FusionCacheSystemTextJsonSerializer())
                 .WithDistributedCache(new SyncOnlyDistributedCache())
         );
-        var (ada, _) = await AddCustomers();
-        var adaRead = await ReadCustomer(node, ada);
+        var (ada, _) = await _reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, _reader, ada);
         Task completed;
 
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
         {
             await using var db = postgres.CreateDb(node);
-            await Rename(db, ada, "Ada Lovelace");
+            await db.Rename(ada, "Ada Lovelace");
             completed = Completion.Of(Transaction.Current!);
             node.Logs.Clear();
             scope.Complete();

@@ -1,6 +1,5 @@
 using System.Data.Common;
 using System.Runtime.CompilerServices;
-using System.Transactions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
@@ -33,12 +32,6 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
     // rollback raises no event, and committed nothing.
     private readonly ConditionalWeakTable<DbTransaction, List<Dependency>> _pending = new();
 
-    // What saves inside an enlisted or ambient transaction wrote, published when it completes, whatever the outcome.
-    // Contexts in one TransactionScope see the same Transaction, so they publish one batch. Locked, because contexts
-    // on other threads can save into one transaction, and it can complete on another thread.
-    private readonly ConditionalWeakTable<Transaction, List<Dependency>> _completing = new();
-    private readonly Lock _completingLock = new();
-
     private SluiceInterceptor(SluiceCache cache, ILogger<SluiceInterceptor> logger)
     {
         _cache = cache;
@@ -57,7 +50,7 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
         InterceptionResult<int> result
     )
     {
-        Capture(eventData);
+        Capture(eventData.Context);
         return result;
     }
 
@@ -67,13 +60,13 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
         CancellationToken cancellationToken = default
     )
     {
-        Capture(eventData);
+        Capture(eventData.Context);
         return new(result);
     }
 
     public int SavedChanges(SaveChangesCompletedEventData eventData, int result)
     {
-        Publish(Complete(eventData, keep: false));
+        Complete(eventData.Context, keep: false);
         return result;
     }
 
@@ -84,27 +77,27 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
         CancellationToken cancellationToken = default
     )
     {
-        await PublishAsync(Complete(eventData, keep: false)).ConfigureAwait(false);
+        await CompleteAsync(eventData.Context, keep: false).ConfigureAwait(false);
         return result;
     }
 
     // A failed or cancelled save may have committed earlier batches (without a transaction, or under
     // AutoTransactionBehavior.Never), so it publishes too.
     public void SaveChangesFailed(DbContextErrorEventData eventData) =>
-        Publish(Complete(eventData, keep: false));
+        Complete(eventData.Context, keep: false);
 
     public Task SaveChangesFailedAsync(
         DbContextErrorEventData eventData,
         CancellationToken cancellationToken = default
-    ) => PublishAsync(Complete(eventData, keep: false));
+    ) => CompleteAsync(eventData.Context, keep: false);
 
     public void SaveChangesCanceled(DbContextEventData eventData) =>
-        Publish(Complete(eventData, keep: false));
+        Complete(eventData.Context, keep: false);
 
     public Task SaveChangesCanceledAsync(
         DbContextEventData eventData,
         CancellationToken cancellationToken = default
-    ) => PublishAsync(Complete(eventData, keep: false));
+    ) => CompleteAsync(eventData.Context, keep: false);
 
     // EF reports a concurrency failure here and not through SaveChangesFailed. The save is kept: if an interceptor
     // suppresses the exception, the save goes on and publishes again when it completes.
@@ -113,7 +106,7 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
         InterceptionResult result
     )
     {
-        Publish(Complete(eventData, keep: true));
+        Complete(eventData.Context, keep: true);
         return result;
     }
 
@@ -123,7 +116,7 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
         CancellationToken cancellationToken = default
     )
     {
-        await PublishAsync(Complete(eventData, keep: true)).ConfigureAwait(false);
+        await CompleteAsync(eventData.Context, keep: true).ConfigureAwait(false);
         return result;
     }
 
@@ -153,50 +146,79 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
     public void TransactionCommitted(
         DbTransaction transaction,
         TransactionEndEventData eventData
-    ) => Publish(TakePending(transaction));
+    ) => PublishPending(transaction, keep: false);
 
     public Task TransactionCommittedAsync(
         DbTransaction transaction,
         TransactionEndEventData eventData,
         CancellationToken cancellationToken = default
-    ) => PublishAsync(TakePending(transaction));
+    ) => PublishPendingAsync(transaction, keep: false);
 
-    // A rollback or a failed commit publishes too: over-invalidating is safe, and a failed commit's outcome is
-    // unknown.
+    // A rollback publishes too: over-invalidating is safe.
     public void TransactionRolledBack(
         DbTransaction transaction,
         TransactionEndEventData eventData
-    ) => Publish(TakePending(transaction));
+    ) => PublishPending(transaction, keep: false);
 
     public Task TransactionRolledBackAsync(
         DbTransaction transaction,
         TransactionEndEventData eventData,
         CancellationToken cancellationToken = default
-    ) => PublishAsync(TakePending(transaction));
+    ) => PublishPendingAsync(transaction, keep: false);
 
+    // A failed commit's outcome is unknown, so it publishes. EF also reports a savepoint that failed to release
+    // here and carries on, and the transaction may still commit more after it, so the pending writes are kept for
+    // its commit or rollback to publish again.
     public void TransactionFailed(DbTransaction transaction, TransactionErrorEventData eventData) =>
-        Publish(TakePending(transaction));
+        PublishPending(transaction, keep: true);
 
     public Task TransactionFailedAsync(
         DbTransaction transaction,
         TransactionErrorEventData eventData,
         CancellationToken cancellationToken = default
-    ) => PublishAsync(TakePending(transaction));
+    ) => PublishPendingAsync(transaction, keep: true);
 
-    private void Capture(DbContextEventData eventData)
+    // Refuses a provider it can't see transactions for here, before anything is written: afterwards, a throw would
+    // make the caller retry a write that committed.
+    private void Capture(DbContext? context)
     {
-        if (eventData.Context is { } context)
+        if (context is null)
         {
-            _saves.AddOrUpdate(context, CapturedSave.Capture(context));
+            return;
+        }
+
+        ContextTransaction.EnsureRelational(context);
+        _saves.TryGetValue(context, out var unfinished);
+        _saves.AddOrUpdate(context, CapturedSave.Capture(context, unfinished));
+    }
+
+    private void Complete(DbContext? context, bool keep)
+    {
+        if (
+            context is not null
+            && Take(context, keep) is { } save
+            && !WaitsForTransaction(context, save)
+        )
+        {
+            Publish(save.Dependencies);
         }
     }
 
-    // The save's dependencies to publish now, or null when there are none or they wait for a transaction. Inside a
-    // transaction they're derived here, before the commit (where a throw is safe), because the entries can change
-    // again before it. Otherwise they're derived as they're published, where a failure is logged.
-    private Func<List<Dependency>>? Complete(DbContextEventData eventData, bool keep)
+    private async Task CompleteAsync(DbContext? context, bool keep)
     {
-        if (eventData.Context is not { } context || !_saves.TryGetValue(context, out var save))
+        if (
+            context is not null
+            && Take(context, keep) is { } save
+            && !WaitsForTransaction(context, save)
+        )
+        {
+            await PublishAsync(save.Dependencies).ConfigureAwait(false);
+        }
+    }
+
+    private CapturedSave? Take(DbContext context, bool keep)
+    {
+        if (!_saves.TryGetValue(context, out var save))
         {
             return null;
         }
@@ -206,104 +228,101 @@ internal sealed partial class SluiceInterceptor : ISaveChangesInterceptor, IDbTr
             _saves.Remove(context);
         }
 
+        return save;
+    }
+
+    // Hands the save to the transaction it ran in, if any, to publish when that ends. Its dependencies are derived
+    // now, before the commit, where a throw is still safe, because the entries can change again before it.
+    private bool WaitsForTransaction(DbContext context, CapturedSave save)
+    {
         var transaction = ContextTransaction.Of(context);
         if (transaction.Ef is { } ef)
         {
             // A transaction's connection runs one command at a time, so its saves never add here concurrently.
             _pending.GetValue(ef, _ => []).AddRange(save.Dependencies());
-            return null;
+            return true;
         }
 
         if (transaction.Ambient is { } ambient)
         {
-            AddCompleting(ambient, save.Dependencies());
-            return null;
+            var dependencies = save.Dependencies();
+
+            // Raised synchronously, maybe on another thread, and at once if the transaction has already completed.
+            // So it publishes with the sync Invalidate and never throws: a throw skips the handlers after it, and
+            // escapes into whatever completed the transaction.
+            ambient.TransactionCompleted += (_, _) => Publish(() => dependencies);
+            return true;
         }
 
-        return save.Dependencies;
+        return false;
     }
 
-    private void AddCompleting(Transaction transaction, List<Dependency> dependencies)
+    private void PublishPending(DbTransaction transaction, bool keep)
     {
-        lock (_completingLock)
+        if (TakePending(transaction, keep) is { } pending)
         {
-            if (_completing.TryGetValue(transaction, out var completing))
-            {
-                completing.AddRange(dependencies);
-                return;
-            }
-
-            _completing.Add(transaction, dependencies);
+            Publish(() => pending);
         }
-
-        // Raised synchronously, maybe on another thread, and at once if the transaction has already completed. So
-        // it publishes with the sync Invalidate and never throws: a throw skips the handlers after it, and escapes
-        // into whatever completed the transaction.
-        transaction.TransactionCompleted += (_, _) => Publish(TakeCompleting(transaction));
     }
 
-    private Func<List<Dependency>>? TakeCompleting(Transaction transaction)
+    private async Task PublishPendingAsync(DbTransaction transaction, bool keep)
     {
-        lock (_completingLock)
+        if (TakePending(transaction, keep) is { } pending)
         {
-            if (!_completing.TryGetValue(transaction, out var completing))
-            {
-                return null;
-            }
-
-            _completing.Remove(transaction);
-            return () => completing;
+            await PublishAsync(() => pending).ConfigureAwait(false);
         }
     }
 
-    private Func<List<Dependency>>? TakePending(DbTransaction transaction)
+    private List<Dependency>? TakePending(DbTransaction transaction, bool keep)
     {
         if (!_pending.TryGetValue(transaction, out var pending))
         {
             return null;
         }
 
-        _pending.Remove(transaction);
-        return () => pending;
-    }
-
-    private void Publish(Func<List<Dependency>>? dependencies)
-    {
-        if (dependencies is null)
+        if (!keep)
         {
-            return;
+            _pending.Remove(transaction);
         }
 
+        return pending;
+    }
+
+    // Takes the dependencies as a function so that deriving them, after a commit without a transaction, fails
+    // into the log too.
+    private void Publish(Func<List<Dependency>> derive)
+    {
+        List<Dependency>? dependencies = null;
         try
         {
-            _cache.Invalidate(dependencies());
+            dependencies = derive();
+            _cache.Invalidate(dependencies);
         }
         catch (Exception exception)
         {
-            LogPublishFailed(exception);
+            LogPublishFailed(exception, dependencies?.Count);
         }
     }
 
-    private async Task PublishAsync(Func<List<Dependency>>? dependencies)
+    private async Task PublishAsync(Func<List<Dependency>> derive)
     {
-        if (dependencies is null)
-        {
-            return;
-        }
-
+        List<Dependency>? dependencies = null;
         try
         {
-            await _cache.InvalidateAsync(dependencies()).ConfigureAwait(false);
+            dependencies = derive();
+            await _cache.InvalidateAsync(dependencies).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
-            LogPublishFailed(exception);
+            LogPublishFailed(exception, dependencies?.Count);
         }
     }
 
+    // The count is null when deriving the dependencies failed.
     [LoggerMessage(
+        EventId = 1,
         Level = LogLevel.Error,
-        Message = "Sluice couldn't invalidate the cached values that depend on a committed EF write. They stay cached until their duration ends."
+        Message = "Sluice couldn't invalidate the cached values that depend on an EF write once it ended, whether it committed, rolled back or failed. They stay cached until their duration ends. Dependencies to invalidate: {DependencyCount}."
     )]
-    private partial void LogPublishFailed(Exception exception);
+    private partial void LogPublishFailed(Exception exception, int? dependencyCount);
 }

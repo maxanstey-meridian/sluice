@@ -4,31 +4,42 @@ using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
 
-/// <summary>Pooled contexts, whose options are built once and whose instances serve one lease after another.</summary>
+/// <summary>
+/// Pooled contexts and context factories, whose options are built once, and pooled instances, which serve one lease
+/// after another.
+/// </summary>
 [Collection(PostgresCollection.Name)]
 public sealed class PoolingTests(PostgresFixture postgres)
 {
+    public enum Registration
+    {
+        DbContextPool,
+        PooledDbContextFactory,
+        DbContextFactory,
+    }
+
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_pooled_context_evicts_what_each_lease_commits_and_nothing_an_earlier_lease_left_uncommitted(
-        bool factory
+    [InlineData(Registration.DbContextPool)]
+    [InlineData(Registration.PooledDbContextFactory)]
+    [InlineData(Registration.DbContextFactory)]
+    public async Task Each_lease_evicts_what_it_commits_and_nothing_an_earlier_lease_left_uncommitted(
+        Registration registration
     )
     {
         var services = new ServiceCollection().AddFakeLogging().AddSluice();
-        if (factory)
+        void Configure(IServiceProvider sp, DbContextOptionsBuilder options) =>
+            options.UseNpgsql(postgres.ConnectionString).UseSluice(sp);
+        switch (registration)
         {
-            services.AddPooledDbContextFactory<ShopDb>(
-                (sp, options) => options.UseNpgsql(postgres.ConnectionString).UseSluice(sp),
-                poolSize: 1
-            );
-        }
-        else
-        {
-            services.AddDbContextPool<ShopDb>(
-                (sp, options) => options.UseNpgsql(postgres.ConnectionString).UseSluice(sp),
-                poolSize: 1
-            );
+            case Registration.DbContextPool:
+                services.AddDbContextPool<ShopDb>(Configure, poolSize: 1);
+                break;
+            case Registration.PooledDbContextFactory:
+                services.AddPooledDbContextFactory<ShopDb>(Configure, poolSize: 1);
+                break;
+            case Registration.DbContextFactory:
+                services.AddDbContextFactory<ShopDb>(Configure);
+                break;
         }
 
         await using var provider = services.BuildServiceProvider();
@@ -50,7 +61,7 @@ public sealed class PoolingTests(PostgresFixture postgres)
         // A leased context, and what returns it to the pool.
         (ShopDb Db, IAsyncDisposable Return) Lease()
         {
-            if (factory)
+            if (registration is not Registration.DbContextPool)
             {
                 var created = provider
                     .GetRequiredService<IDbContextFactory<ShopDb>>()
@@ -74,9 +85,13 @@ public sealed class PoolingTests(PostgresFixture postgres)
         (db, lease) = Lease();
         await using (lease)
         {
-            db.ContextId.InstanceId.Should()
-                .Be(first.InstanceId, "the pool hands out the same instance");
-            db.ContextId.Lease.Should().NotBe(first.Lease);
+            if (registration is not Registration.DbContextFactory)
+            {
+                db.ContextId.InstanceId.Should()
+                    .Be(first.InstanceId, "the pool hands out the same instance");
+                db.ContextId.Lease.Should().NotBe(first.Lease);
+            }
+
             (await db.Customers.SingleAsync(c => c.Id == bob.Id)).Name = "Bob Babbage";
             await db.SaveChangesAsync();
         }
