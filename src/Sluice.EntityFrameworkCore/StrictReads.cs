@@ -5,7 +5,6 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Query;
-using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Sluice.EntityFrameworkCore;
 
@@ -23,7 +22,7 @@ namespace Sluice.EntityFrameworkCore;
 /// its own model and compiled-query cache) per distinct set of them, throwing after twenty. Nothing here depends on
 /// the cache. Each violation is also recorded on the running compute, so a compute that catches it still caches
 /// nothing and its caller still gets it. A fused <c>read.From(dependency, fetch)</c> fetch is a declared read, so the
-/// command checks don't apply inside it.
+/// origin check lets its commands through while it runs; the other checks still apply there.
 /// </remarks>
 internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInterceptor
 {
@@ -59,14 +58,7 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
             );
         }
 
-        if (context.Instance.GetService(typeof(IRelationalConnection)) is null)
-        {
-            throw new NotSupportedException(
-                "Sluice supports relational EF providers only. Its checks that a compute reads only through the read "
-                    + "helpers run on the context's SQL commands, and this context's provider has none."
-            );
-        }
-
+        ContextTransaction.Connection(context);
         return set.TagWith(Marker).AsNoTracking().IgnoreAutoIncludes();
     }
 
@@ -148,44 +140,39 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
             && ShapeCheck.Violation(context.Model, queryExpression) is { } violation
         )
         {
-            ActiveCompute.Violate(violation, static violation => violation);
+            ActiveCompute.Violate(violation, static (violation, _) => violation);
             throw violation;
         }
 
         return queryExpression;
     }
 
-    // Outside a compute, and inside a fused fetch, Violate returns without calling ViolationOf, so the app's own
-    // commands pay nothing.
+    // Outside a compute, Violate returns without calling ViolationOf, so the app's own commands pay nothing.
     private static void Check(DbCommand command, CommandEventData eventData)
     {
-        if (ActiveCompute.Violate((command, eventData.Context), ViolationOf) is { } violation)
+        if (ActiveCompute.Violate((command, eventData), ViolationOf) is { } violation)
         {
             throw violation;
         }
     }
 
-    // A command a read helper didn't build, or a helper's command inside a transaction, where a compute would cache
-    // rows other callers can't see yet, or an old snapshot under RepeatableRead or Serializable. The transaction is
-    // read as the write side reads it, from EF's own inputs: the command's own transaction would miss an enlisted or
-    // ambient one, which the connection carries instead.
+    // A command a read helper didn't build, unless it runs in a fused fetch, whose declared dependencies cover it. Or a
+    // helper's command inside a transaction (in a fetch too), where a compute would cache rows other callers can't see
+    // yet, or an old snapshot under RepeatableRead or Serializable. The transaction is read as the write side reads it,
+    // from EF's own inputs: the command's own transaction would miss an enlisted or ambient one, which the connection
+    // carries instead.
     private static InvalidOperationException? ViolationOf(
-        (DbCommand Command, DbContext? Context) execution
+        (DbCommand Command, CommandEventData Event) execution,
+        bool inFetch
     )
     {
-        var (command, context) = execution;
+        var (command, eventData) = execution;
         if (!command.CommandText.Contains(MarkerComment, StringComparison.Ordinal))
         {
-            return new(
-                $"An EF command that wasn't built by a Sluice read helper ran inside a compute ({Statement(command)}), "
-                    + "so nothing recorded what it read and no write would invalidate the cached value. Read through "
-                    + "read.Entity, read.Children or read.All, or run it in the fetch of read.From(dependency, fetch) "
-                    + "with a declared Source. Lazy and explicit loading, FromSql, compiled queries and writes can't run "
-                    + "anywhere else inside a compute."
-            );
+            return inFetch ? null : NotFromHelper(command, eventData.CommandSource);
         }
 
-        if (context is not null && !ContextTransaction.Of(context).IsNone)
+        if (eventData.Context is { } context && !ContextTransaction.Of(context).IsNone)
         {
             return new(
                 "Sluice's EF reads can't run inside a transaction: the compute would cache rows other callers can't "
@@ -196,8 +183,30 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
         return null;
     }
 
-    // The command's first line after its tags, so the message says which command it was. EF sends the values a query
-    // uses as parameters, so it shows none of them.
+    // EF reports ExecuteDelete's command as ExecuteUpdate too.
+    private static InvalidOperationException NotFromHelper(
+        DbCommand command,
+        CommandSource source
+    ) =>
+        source
+            is CommandSource.SaveChanges
+                or CommandSource.ExecuteSqlRaw
+                or CommandSource.ExecuteUpdate
+            ? new(
+                $"An EF write ran inside a compute ({Statement(command)}). Writes can't run inside a compute, which "
+                    + "is a read: run them before or after GetOrSetAsync."
+            )
+            : new(
+                $"An EF command that wasn't built by a Sluice read helper ran inside a compute ({Statement(command)}), "
+                    + "so nothing recorded what it read and no write would invalidate the cached value. Read through "
+                    + "read.Entity, read.Children or read.All, or run it in the fetch of read.From(dependency, fetch) "
+                    + "with a declared Source. Lazy and explicit loading, FromSql and compiled queries can't run "
+                    + "anywhere else inside a compute."
+            );
+
+    // The command's first line after its tags, so the message says which command it was. A LINQ query's captured
+    // values go to the database as parameters and don't show, but constants inlined in a query and the text of raw
+    // SQL do.
     private static string Statement(DbCommand command)
     {
         foreach (var line in command.CommandText.AsSpan().EnumerateLines())
@@ -300,9 +309,10 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
                 }
                 else
                 {
+                    // SqlQuery's is the only other kind EF has built by now.
                     var name = root is EntityQueryRootExpression entity
                         ? entity.EntityType.DisplayName()
-                        : $"{root.ElementType.Name} rows";
+                        : $"SqlQuery<{root.ElementType.Name}>";
                     Reject(
                         $"A Sluice read helper's query also reads {name} (a join, a subquery, a set operation, "
                             + "FromSql or SqlQuery), so only the helper's own dependency would be recorded. Read "
@@ -465,10 +475,12 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
             _filter = null;
         }
 
-        // A cached entity that loads lazily would read related rows later, through its context, outside any compute.
-        // The result is checked by type: the element of a sequence, a single result, and what those hold through
-        // generic arguments (anonymous types and tuples included) and arrays. An entity inside a class of your own
-        // isn't seen; an object-typed value is taken for one.
+        // A cached entity must stand alone: one that loads lazily would read related rows later, through its context,
+        // outside any compute, and one that holds its context keeps that context, and all it tracks, in the cache.
+        // Owned values are materialised with their owner, so an owner is refused for what it owns too. The result is
+        // checked by type: the element of a sequence, a single result, and what those hold through generic arguments
+        // (anonymous types and tuples included) and arrays. An entity inside a class of your own isn't seen; an
+        // object-typed value is taken for one.
         private void CheckResult(Type result)
         {
             if (_root is null)
@@ -476,27 +488,48 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
                 return;
             }
 
-            var lazy = _root.GetDerivedTypesInclusive().Where(LoadsLazily).ToList();
-            if (lazy.Count > 0)
+            List<(Type Type, string Message)> refused = [];
+            foreach (var entityType in _root.GetDerivedTypesInclusive().SelectMany(WithOwned))
             {
-                CheckResult(result, lazy, []);
+                foreach (var part in WithOwned(entityType))
+                {
+                    if (Holds(part) is { } holds)
+                    {
+                        var subject =
+                            part == entityType
+                                ? $"{entityType.DisplayName()} entities, which"
+                                : $"{entityType.DisplayName()} entities, whose owned {part.ClrType.Name} values";
+                        refused.Add(
+                            (
+                                entityType.ClrType,
+                                $"A Sluice read helper's query returns {subject} {holds}. Select the values you need "
+                                    + "instead."
+                            )
+                        );
+                        break;
+                    }
+                }
+            }
+
+            if (refused.Count > 0)
+            {
+                CheckResult(result, refused);
             }
         }
 
-        private void CheckResult(Type type, List<IEntityType> lazy, HashSet<Type> seen)
+        private void CheckResult(Type type, List<(Type Type, string Message)> refused)
         {
-            if (_violation is not null || !seen.Add(type))
+            if (_violation is not null)
             {
                 return;
             }
 
-            if (lazy.Find(entityType => type.IsAssignableFrom(entityType.ClrType)) is { } entity)
+            if (
+                refused.Find(entity => type.IsAssignableFrom(entity.Type)) is
+                { Message: { } message }
+            )
             {
-                _violation = new(
-                    $"A Sluice read helper's query returns {entity.DisplayName()} entities, which load their "
-                        + "navigations lazily, so a cached one would read related rows later, outside the compute and "
-                        + "with no dependency recorded. Select the values you need instead."
-                );
+                _violation = new(message);
                 return;
             }
 
@@ -505,16 +538,51 @@ internal sealed class StrictReads : IDbCommandInterceptor, IQueryExpressionInter
                 var inner in type.IsArray ? [type.GetElementType()!] : type.GetGenericArguments()
             )
             {
-                CheckResult(inner, lazy, seen);
+                CheckResult(inner, refused);
             }
         }
 
-        // EF keeps a service property for every lazy loader it injects, whether into a property, a constructor (as the
-        // loader or its delegate) or a lazy-loading proxy.
-        private static bool LoadsLazily(IEntityType entityType) =>
+        // The type and every type it owns, at any depth.
+        private static IEnumerable<IEntityType> WithOwned(IEntityType entityType) =>
             entityType
+                .GetNavigations()
+                .Where(navigation =>
+                    navigation is { ForeignKey.IsOwnership: true, IsOnDependent: false }
+                )
+                .SelectMany(navigation => WithOwned(navigation.TargetEntityType))
+                .Prepend(entityType);
+
+        // What EF injects into the type that a cached instance mustn't keep: a lazy loader (into a service property,
+        // which is how lazy-loading proxies get theirs, or a constructor, as the loader or as its delegate, which has
+        // no property) or the context itself.
+        private static string? Holds(IEntityType entityType)
+        {
+            var services = entityType
                 .GetServiceProperties()
-                .Any(property => property.ParameterBinding.ServiceType == typeof(ILazyLoader));
+                .Select(property => property.ParameterBinding.ServiceType)
+                .Concat(
+                    entityType
+                        .ConstructorBinding?.ParameterBindings.OfType<ServiceParameterBinding>()
+                        .Select(binding => binding.ServiceType)
+                        ?? []
+                );
+            foreach (var service in services)
+            {
+                if (service == typeof(ILazyLoader))
+                {
+                    return "load their navigations lazily, so a cached one would read related rows later, outside "
+                        + "the compute and with no dependency recorded";
+                }
+
+                if (typeof(DbContext).IsAssignableFrom(service))
+                {
+                    return "hold the context that loaded them, so a cached one would keep that context, and what it "
+                        + "tracks, alive and shared by every caller";
+                }
+            }
+
+            return null;
+        }
 
         private void Reject(string message) =>
             _violation ??= new(

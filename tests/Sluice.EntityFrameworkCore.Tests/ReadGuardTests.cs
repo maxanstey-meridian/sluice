@@ -7,7 +7,7 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class ReadGuardTests(PostgresFixture postgres)
 {
-    private const string InTransaction = "*can't run inside a transaction*";
+    internal const string InTransaction = "*can't run inside a transaction*";
 
     [Fact]
     public async Task A_key_of_the_wrong_type_throws_naming_the_expected_type()

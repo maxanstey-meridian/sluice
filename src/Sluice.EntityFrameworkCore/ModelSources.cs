@@ -135,16 +135,7 @@ internal static class ModelSources
     /// <exception cref="NotSupportedException">The type isn't mapped to a table.</exception>
     internal static void EnsureTable(IEntityType entityType)
     {
-        var reason =
-            entityType.FindPrimaryKey() is null ? "is keyless"
-            : entityType.GetViewName() is { } view ? $"is mapped to the view '{view}'"
-            : entityType.GetFunctionName() is { } function
-                ? $"is mapped to the function '{function}'"
-            : entityType.GetSqlQuery() is not null ? "is mapped to a SQL query"
-            : entityType.GetTableName() is null ? "isn't mapped to a table"
-            : null;
-
-        if (reason is not null)
+        if (Unmapped(entityType) is { } reason)
         {
             throw new NotSupportedException(
                 $"{entityType.DisplayName()} {reason}, so no tracked write can invalidate a cached read of it. "
@@ -153,6 +144,21 @@ internal static class ModelSources
             );
         }
     }
+
+    // Why the type's rows aren't all in tables, if they aren't. An abstract type with no table of its own (the root of
+    // a TPC hierarchy) has no rows but those of its concrete types, so it's mapped when each of them is.
+    private static string? Unmapped(IEntityType entityType) =>
+        entityType.FindPrimaryKey() is null ? "is keyless"
+        : entityType.GetViewName() is { } view ? $"is mapped to the view '{view}'"
+        : entityType.GetFunctionName() is { } function ? $"is mapped to the function '{function}'"
+        : entityType.GetSqlQuery() is not null ? "is mapped to a SQL query"
+        : entityType.GetTableName() is not null
+        || entityType.IsAbstract()
+            && entityType
+                .GetDerivedTypes()
+                .All(derived => derived.IsAbstract() || Unmapped(derived) is null)
+            ? null
+        : "isn't mapped to a table";
 
     // A composite key, which only writes produce, arrives as an array of its values in key order.
     private static Source<object> Build(string name, IReadOnlyList<IProperty> properties) =>

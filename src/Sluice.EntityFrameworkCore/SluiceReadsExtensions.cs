@@ -19,9 +19,10 @@ namespace Sluice;
 /// must come from a read helper: a plain query, lazy or explicit loading, <c>FromSql</c>, a compiled query or a write
 /// throws <see cref="InvalidOperationException"/> when it runs, and so does a helper's query that runs inside a
 /// transaction. To run any other EF query, run it in the fetch of <c>read.From(dependency, fetch)</c> with a declared
-/// <see cref="Source{TKey}"/>: the fetch is a declared read, so it isn't checked. Reads that run no SQL aren't
-/// checked either: <c>Find</c> of an entity the context already tracks, <c>Local</c>, and navigations already loaded
-/// hand back what the context holds, edits included, so don't use them inside a compute.
+/// <see cref="Source{TKey}"/>: the fetch is a declared read, so its other queries aren't checked until its task
+/// completes, though a helper's query in it still is. Reads that run no SQL aren't checked either: <c>Find</c> of an
+/// entity the context already tracks, <c>Local</c>, and navigations already loaded hand back what the context holds,
+/// edits included, so don't use them inside a compute.
 /// </para>
 /// <para>
 /// A helper's query may be filtered, ordered, paged and projected. One that reads anything beyond its own rows throws
@@ -30,9 +31,10 @@ namespace Sluice;
 /// many-to-many navigations, through a cast or an interface too), a database function you mapped, or a query filter
 /// that does any of those or reads the context's state (a tenant filter); <c>IgnoreQueryFilters()</c> leaves the
 /// filters out. So does one that calls <c>AsTracking()</c>, <c>ExecuteUpdate</c> or <c>ExecuteDelete</c>, or that
-/// returns entities that load lazily. Owned types and JSON columns are part of their owner's row, so they're fine,
-/// and auto-included navigations aren't loaded. Read related rows with their own helper call. The call that ran the
-/// compute throws the violation, and caches nothing, even if the compute catches it.
+/// returns entities that load lazily or hold their context (or own a value that does). Owned types and JSON columns
+/// are part of their owner's row, so they're fine, and auto-included navigations aren't loaded. Read related rows
+/// with their own helper call. The call that ran the compute throws the violation, and caches nothing, even if the
+/// compute catches it.
 /// </para>
 /// </remarks>
 public static class SluiceReadsExtensions

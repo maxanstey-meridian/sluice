@@ -205,7 +205,8 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
         var rex = new Dog { Name = "Rex", Fetches = true };
-        db.Dogs.Add(rex);
+        var circle = new Circle { Radius = 1 };
+        db.AddRange(rex, circle);
         await db.SaveChangesAsync();
 
         (
@@ -220,6 +221,22 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             await Eviction.IsEvictedBy(
                 (read, ct) => read.All(db.Animals).ToListAsync(ct),
                 db.Dogs.Dependency(rex.Id)
+            )
+        )
+            .Should()
+            .BeTrue();
+        (
+            await Eviction.IsEvictedBy(
+                (read, ct) => read.Entity(db.Circles, circle.Id).SingleAsync(ct),
+                db.Shapes.Dependency(circle.Id)
+            )
+        )
+            .Should()
+            .BeTrue("an abstract TPC root has no table, but each of its concrete types does");
+        (
+            await Eviction.IsEvictedBy(
+                (read, ct) => read.All(db.Shapes).ToListAsync(ct),
+                db.Circles.AllDependencies()
             )
         )
             .Should()

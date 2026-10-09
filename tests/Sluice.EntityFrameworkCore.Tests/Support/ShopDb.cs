@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 
@@ -112,6 +113,17 @@ public sealed class Truck : Vehicle
     public int Axles { get; set; }
 }
 
+/// <summary>Mapped table-per-concrete-type: the abstract shape has no table; each concrete shape has its own.</summary>
+public abstract class Shape
+{
+    public int Id { get; set; }
+}
+
+public sealed class Circle : Shape
+{
+    public int Radius { get; set; }
+}
+
 /// <summary>
 /// Owns an address (which owns a contact in turn), stored in the parcel's own row but tracked as entries of their own,
 /// stops, stored in a table of their own, and a label, stored as a JSON column.
@@ -211,6 +223,72 @@ public sealed class Review
     }
 }
 
+/// <summary>Loads its customer lazily, through the lazy loader delegate EF passes its constructor.</summary>
+public sealed class Rating
+{
+    private readonly Action<object, string>? _lazyLoader;
+    private Customer? _customer;
+
+    public Rating() { }
+
+    public Rating(Action<object, string> lazyLoader) => _lazyLoader = lazyLoader;
+
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+
+    public Customer? Customer
+    {
+        get
+        {
+            _lazyLoader?.Invoke(this, nameof(Customer));
+            return _customer;
+        }
+        set => _customer = value;
+    }
+}
+
+/// <summary>Owns a signature that loads its signer lazily, though the delivery itself loads nothing lazily.</summary>
+public sealed class Delivery
+{
+    public int Id { get; set; }
+    public Signature Signature { get; set; } = new();
+}
+
+public sealed class Signature
+{
+    private readonly ILazyLoader? _loader;
+    private Customer? _signer;
+
+    public Signature() { }
+
+    public Signature(ILazyLoader loader) => _loader = loader;
+
+    public int? SignerId { get; set; }
+
+    public Customer? Signer
+    {
+        get
+        {
+            _loader?.Load(this);
+            return _signer;
+        }
+        set => _signer = value;
+    }
+}
+
+/// <summary>Holds the context that loaded it, which EF passes its constructor.</summary>
+public sealed class Basket
+{
+    public Basket() { }
+
+    public Basket(DbContext context) => Context = context;
+
+    public int Id { get; set; }
+
+    [NotMapped]
+    public DbContext? Context { get; }
+}
+
 /// <summary>Gets a lazy loader through a service property, as lazy-loading proxies do.</summary>
 public sealed class Receipt
 {
@@ -273,6 +351,11 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Memo> Memos => Set<Memo>();
     public DbSet<Account> Accounts => Set<Account>();
     public DbSet<Receipt> Receipts => Set<Receipt>();
+    public DbSet<Rating> Ratings => Set<Rating>();
+    public DbSet<Delivery> Deliveries => Set<Delivery>();
+    public DbSet<Basket> Baskets => Set<Basket>();
+    public DbSet<Shape> Shapes => Set<Shape>();
+    public DbSet<Circle> Circles => Set<Circle>();
 
     /// <summary>The tenant <see cref="Account"/>'s query filter reads.</summary>
     public int TenantId { get; init; }
@@ -364,10 +447,18 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
 
         model.Entity<Vehicle>().UseTptMappingStrategy();
         model.Entity<Truck>();
+        model.Entity<Shape>().UseTpcMappingStrategy();
         model.Entity<Parcel>().HasOne<Customer>().WithMany().HasForeignKey(p => p.CustomerId);
         model.Entity<Parcel>().OwnsOne(p => p.Address, address => address.OwnsOne(a => a.Contact));
         model.Entity<Parcel>().OwnsMany(p => p.Stops);
         model.Entity<Parcel>().OwnsOne(p => p.Label, label => label.ToJson());
+        model
+            .Entity<Delivery>()
+            .OwnsOne(
+                d => d.Signature,
+                signature =>
+                    signature.HasOne(s => s.Signer).WithMany().HasForeignKey(s => s.SignerId)
+            );
         model
             .Entity<Bin>()
             .HasOne<Warehouse>()

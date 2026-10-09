@@ -32,13 +32,16 @@ public sealed class CoreInternalsTests
             )
             .Select(member => module.ResolveMember(MetadataTokens.GetToken(member))!)
             .Where(member => !IsPublic(member))
-            .Select(member => $"{member.DeclaringType!.Name}.{member.Name}");
+            .Select(member => $"{member.DeclaringType!.Name}: {member}");
 
         types
             .Concat(members)
             .Distinct()
             .Should()
-            .BeEquivalentTo("ActiveCompute", "ActiveCompute.Violate");
+            .BeEquivalentTo(
+                "ActiveCompute",
+                "ActiveCompute: System.Exception Violate[TState](TState, System.Func`3[TState,System.Boolean,System.Exception])"
+            );
     }
 
     // A type the core declares, referenced directly, nested, or as the generic type of an instantiation.

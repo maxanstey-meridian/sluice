@@ -396,11 +396,12 @@ public sealed class WriteDerivationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Editing_a_derived_row_evicts_readers_of_its_root_type_with_TPH_or_TPT()
+    public async Task Editing_a_derived_row_evicts_readers_of_its_root_type_with_TPH_TPT_or_TPC()
     {
         var rex = new Dog { Name = "Rex" };
         var truck = new Truck { Plate = "AB12 CDE", Axles = 2 };
-        _db.AddRange(rex, truck);
+        var circle = new Circle { Radius = 1 };
+        _db.AddRange(rex, truck, circle);
         await _db.SaveChangesAsync();
         var rexRead = await CachedRead.Of(
             _node.Cache,
@@ -418,6 +419,14 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             _node.Cache,
             (read, ct) => read.All(_reader.Vehicles).ToListAsync(ct)
         );
+        var circleRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(_reader.Shapes, circle.Id).SingleAsync(ct)
+        );
+        var shapes = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.All(_reader.Shapes).ToListAsync(ct)
+        );
 
         rex.Fetches = true;
         await _db.SaveChangesAsync();
@@ -430,6 +439,14 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         (await truckRead.WasEvicted()).Should().BeTrue("a column in the truck's own table changed");
         (await vehicles.WasEvicted()).Should().BeTrue("a column in the truck's own table changed");
         (await animals.WasEvicted()).Should().BeFalse();
+
+        circle.Radius = 2;
+        await _db.SaveChangesAsync();
+        (await circleRead.WasEvicted())
+            .Should()
+            .BeTrue("a column in the circle's own table changed");
+        (await shapes.WasEvicted()).Should().BeTrue("a column in the circle's own table changed");
+        (await vehicles.WasEvicted()).Should().BeFalse();
     }
 
     [Fact]

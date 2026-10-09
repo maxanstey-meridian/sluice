@@ -276,6 +276,49 @@ public sealed class DependencyTrackingTests
     }
 
     [Fact]
+    public async Task A_fused_read_of_no_dependencies_throws_before_the_fetch_runs()
+    {
+        await using var node = new SluiceNode();
+        var fetched = false;
+
+        Task<string> Fetch(CancellationToken ct)
+        {
+            fetched = true;
+            return Task.FromResult("fetched");
+        }
+
+        var fused = () =>
+            node
+                .Cache.GetOrSetAsync(_invoiceSummary, "fused", (read, _) => read.From([], Fetch))
+                .AsTask();
+        var recordOnly = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _invoiceSummary,
+                    "record-only",
+                    (read, _) =>
+                    {
+                        read.From([]);
+                        return Task.FromResult("recorded nothing");
+                    }
+                )
+                .AsTask();
+
+        await fused
+            .Should()
+            .ThrowExactlyAsync<ArgumentException>()
+            .WithMessage("*must declare what it reads*");
+        fetched.Should().BeFalse();
+        await recordOnly
+            .Should()
+            .ThrowExactlyAsync<InvalidOperationException>()
+            .WithMessage(
+                "*recorded no dependencies*",
+                "recording nothing is allowed, and counts as no read"
+            );
+    }
+
+    [Fact]
     public async Task A_fallback_for_a_failed_fused_fetch_is_evicted_by_its_dependency()
     {
         await using var node = new SluiceNode();

@@ -46,9 +46,8 @@ public sealed class SluiceCache
     /// has ended. Waiting on another caller's compute for the same key can't be cancelled.
     /// </param>
     /// <exception cref="InvalidOperationException">
-    /// The compute recorded no dependencies, or this was called from inside another compute (other than inside a
-    /// fused <c>read.From(dependency, fetch)</c> fetch, whose declared dependency covers it). Nothing is cached in
-    /// either case.
+    /// The compute recorded no dependencies, or this was called from inside another compute, a fused
+    /// <c>read.From(dependency, fetch)</c> fetch included. Nothing is cached in either case.
     /// </exception>
     /// <exception cref="OperationCanceledException">
     /// The compute was cancelled, or <paramref name="ct"/> was already cancelled, in which case no cached value is
@@ -65,9 +64,9 @@ public sealed class SluiceCache
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(compute);
 
-        // On a hit the outer compute couldn't learn the inner value's dependencies, so they'd be lost. Inside a
-        // fused fetch the outer compute declared them, so Violate lets it through.
-        if (ActiveCompute.Violate(query.Name, Nested) is { } nested)
+        // On a hit the outer compute couldn't learn the inner value's dependencies, so they'd be lost. That holds
+        // inside a fused fetch too, so this ignores whether the call is in one.
+        if (ActiveCompute.Violate(query.Name, static (name, _) => Nested(name)) is { } nested)
         {
             throw nested;
         }
