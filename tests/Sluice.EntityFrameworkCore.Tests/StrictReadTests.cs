@@ -18,11 +18,13 @@ public sealed class StrictReadTests(PostgresFixture postgres)
 
     private static readonly Query<string, int> _caught = new("ef-strict-caught");
 
+    private static readonly Source<int> _totals = new("ef-customer-totals");
+
     private static readonly Func<ShopDb, int, Task<int>> _ordersOf = EF.CompileAsyncQuery(
         (ShopDb db, int customerId) => db.Orders.Count(o => o.CustomerId == customerId)
     );
 
-    // Queries not built by a read helper, one per command path EF has, sync and async.
+    // Commands not built by a read helper, one per command path EF has, sync and async.
     private static readonly Dictionary<string, Func<ShopDb, CancellationToken, Task>> _plain = new()
     {
         ["query"] = (db, _) => Task.FromResult(db.Orders.ToList()),
@@ -33,15 +35,22 @@ public sealed class StrictReadTests(PostgresFixture postgres)
         ["non-query async"] = (db, ct) => db.Database.ExecuteSqlRawAsync("select 1", ct),
         ["FromSql"] = (db, ct) =>
             db.Orders.FromSqlRaw("""select * from "Orders" """).ToListAsync(ct),
+        ["SqlQuery"] = (db, ct) =>
+            db.Database.SqlQueryRaw<int>("""select 1 as "Value" """).ToListAsync(ct),
         ["compiled query"] = (db, _) => _ordersOf(db, 1),
         ["save"] = (db, ct) =>
         {
             db.Customers.Add(new Customer { Name = "Cy" });
             return db.SaveChangesAsync(ct);
         },
+        ["ExecuteUpdate"] = (db, ct) =>
+            db
+                .Customers.Where(c => c.Id == -1)
+                .ExecuteUpdateAsync(set => set.SetProperty(c => c.Name, "Cy"), ct),
     };
 
-    // Helper queries that read beyond their own rows, or track, each with the message it must fail with.
+    // Helper queries that read beyond their own rows, track, write or return lazily loading entities, each with the
+    // message it must fail with.
     private static readonly Dictionary<
         string,
         (Func<ShopDb, SluiceReads, CancellationToken, Task> Read, string Message)
@@ -65,9 +74,33 @@ public sealed class StrictReadTests(PostgresFixture postgres)
                     .ToListAsync(ct),
             "*navigation Order.Customer*"
         ),
+        ["derived type's navigation through EF.Property"] = (
+            (db, r, ct) =>
+                r.All(db.Animals)
+                    .Select(a => EF.Property<Customer>(a, "Owner").Name)
+                    .ToListAsync(ct),
+            "*navigation Dog.Owner*"
+        ),
+        ["navigation through a property bag indexer"] = (
+            (db, r, ct) => r.All(db.CustomerCoupons).Select(cc => cc["Coupon"]).ToListAsync(ct),
+            "*navigation CustomerCoupons*.Coupon*"
+        ),
         ["navigation through an interface"] = (
             (db, r, ct) => CustomerNames(r.All(db.Orders)).ToListAsync(ct),
             "*navigation Order.Customer*"
+        ),
+        ["navigation through Cast to an interface"] = (
+            (db, r, ct) =>
+                r.All(db.Orders).Cast<IHasCustomer>().Select(o => o.Customer!.Name).ToListAsync(ct),
+            "*navigation Order.Customer*"
+        ),
+        ["navigation through a cast to a derived type"] = (
+            (db, r, ct) => r.All(db.Animals).Select(a => ((Dog)a).Owner!.Name).ToListAsync(ct),
+            "*navigation Dog.Owner*"
+        ),
+        ["navigation through as to a derived type"] = (
+            (db, r, ct) => r.All(db.Animals).Select(a => (a as Dog)!.Owner!.Name).ToListAsync(ct),
+            "*navigation Dog.Owner*"
         ),
         ["many-to-many navigation aggregate"] = (
             (db, r, ct) => r.Entity(db.Customers, 1).Select(c => c.Coupons.Count).ToListAsync(ct),
@@ -114,6 +147,37 @@ public sealed class StrictReadTests(PostgresFixture postgres)
                     .ToListAsync(ct),
             "*also reads Order*"
         ),
+        ["SqlQuery in a subquery"] = (
+            (db, r, ct) =>
+                r.All(db.Orders)
+                    .Where(o =>
+                        db.Database.SqlQueryRaw<int>("""select 1 as "Value" """)
+                            .Contains(o.CustomerId)
+                    )
+                    .ToListAsync(ct),
+            "*also reads Int32 rows*"
+        ),
+        ["database function of the app's"] = (
+            (db, r, ct) =>
+                r.All(db.Orders).Select(o => ShopDb.CustomerName(o.CustomerId)).ToListAsync(ct),
+            "*database function customer_name*"
+        ),
+        ["query filter with a navigation"] = (
+            (db, r, ct) => r.All(db.Tickets).ToListAsync(ct),
+            "*navigation Ticket.Customer*Ticket's query filter*"
+        ),
+        ["query filter another filter's name doesn't ignore"] = (
+            (db, r, ct) => r.All(db.Tickets).IgnoreQueryFilters(["open"]).ToListAsync(ct),
+            "*navigation Ticket.Customer*Ticket's query filter*"
+        ),
+        ["query filter with a subquery"] = (
+            (db, r, ct) => r.All(db.Memos).ToListAsync(ct),
+            "*also reads Customer*Memo's query filter*"
+        ),
+        ["query filter reading the context"] = (
+            (db, r, ct) => r.All(db.Accounts).ToListAsync(ct),
+            "*Account's query filter, which reads the context's state*"
+        ),
         ["AsTracking"] = (
             (db, r, ct) => r.All(db.Orders).AsTracking().ToListAsync(ct),
             "*tracking*"
@@ -123,7 +187,38 @@ public sealed class StrictReadTests(PostgresFixture postgres)
                 r.All(db.Orders).AsTracking(QueryTrackingBehavior.TrackAll).ToListAsync(ct),
             "*tracking*"
         ),
+        ["ExecuteUpdate"] = (
+            (db, r, ct) =>
+                r.All(db.Customers)
+                    .Where(c => c.Id == -1)
+                    .ExecuteUpdateAsync(set => set.SetProperty(c => c.Name, "Cy"), ct),
+            "*used for ExecuteUpdate*"
+        ),
+        ["ExecuteDelete"] = (
+            (db, r, ct) => r.Entity(db.Coupons, -1).ExecuteDeleteAsync(ct),
+            "*used for ExecuteDelete*"
+        ),
+        ["lazily loading entities"] = (
+            (db, r, ct) => r.All(db.Reviews).ToListAsync(ct),
+            "*returns Review entities, which load their navigations lazily*"
+        ),
+        ["a lazily loading entity"] = (
+            (db, r, ct) => r.Entity(db.Reviews, -1).SingleOrDefaultAsync(ct),
+            "*returns Review entities*"
+        ),
+        ["entities with a lazy loader property"] = (
+            (db, r, ct) => r.All(db.Receipts).ToListAsync(ct),
+            "*returns Receipt entities*"
+        ),
+        ["lazily loading entities in an anonymous type"] = (
+            (db, r, ct) => r.All(db.Reviews).Select(x => new { x.Id, Review = x }).ToListAsync(ct),
+            "*returns Review entities*"
+        ),
     };
+
+    public static TheoryData<string> PlainCommands => new(_plain.Keys);
+
+    public static TheoryData<string> ShapesBeyondOwnRows => new(_beyondOwnRows.Keys);
 
     // Generic code reaches the navigation through the interface its type parameter is constrained to.
     private static IQueryable<string> CustomerNames<T>(IQueryable<T> rows)
@@ -143,27 +238,19 @@ public sealed class StrictReadTests(PostgresFixture postgres)
         );
 
     [Theory]
-    [InlineData("query")]
-    [InlineData("query async")]
-    [InlineData("scalar")]
-    [InlineData("scalar async")]
-    [InlineData("non-query")]
-    [InlineData("non-query async")]
-    [InlineData("FromSql")]
-    [InlineData("compiled query")]
-    [InlineData("save")]
-    public async Task A_query_not_built_by_a_read_helper_throws_inside_a_compute_and_runs_outside_one(
+    [MemberData(nameof(PlainCommands))]
+    public async Task A_command_not_built_by_a_read_helper_throws_inside_a_compute_and_runs_outside_one(
         string kind
     )
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
-        var query = _plain[kind];
+        var command = _plain[kind];
 
-        var inside = () => InCompute.Run((_, ct) => query(db, ct));
+        var inside = () => CachedRead.Of(node.Cache, (_, ct) => command(db, ct));
 
         await inside.Should().ThrowAsync<InvalidOperationException>().WithMessage(NotFromHelper);
-        await query.Invoking(q => q(db, CancellationToken.None)).Should().NotThrowAsync();
+        await command.Invoking(c => c(db, CancellationToken.None)).Should().NotThrowAsync();
     }
 
     [Fact]
@@ -174,9 +261,12 @@ public sealed class StrictReadTests(PostgresFixture postgres)
         var reviewId = await AddReview(db);
         var review = await db.Reviews.SingleAsync(r => r.Id == reviewId);
 
-        var lazy = () => InCompute.Run((_, _) => Task.FromResult(review.Customer));
+        var lazy = () => CachedRead.Of(node.Cache, (_, _) => Task.FromResult(review.Customer));
         var explicitly = () =>
-            InCompute.Run((_, ct) => db.Entry(review).Reference(r => r.Customer).LoadAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (_, ct) => db.Entry(review).Reference(r => r.Customer).LoadAsync(ct)
+            );
 
         await lazy.Should().ThrowAsync<InvalidOperationException>().WithMessage(NotFromHelper);
         await explicitly
@@ -227,20 +317,8 @@ public sealed class StrictReadTests(PostgresFixture postgres)
     }
 
     [Theory]
-    [InlineData("navigation in a projection")]
-    [InlineData("navigation in a filter")]
-    [InlineData("navigation through EF.Property")]
-    [InlineData("navigation through an interface")]
-    [InlineData("many-to-many navigation aggregate")]
-    [InlineData("Include")]
-    [InlineData("Include by name")]
-    [InlineData("subquery")]
-    [InlineData("join")]
-    [InlineData("union with another set")]
-    [InlineData("FromSql in a subquery")]
-    [InlineData("AsTracking")]
-    [InlineData("AsTracking(TrackAll)")]
-    public async Task A_read_helper_query_that_reads_beyond_its_own_rows_or_tracks_throws_inside_a_compute(
+    [MemberData(nameof(ShapesBeyondOwnRows))]
+    public async Task A_read_helper_query_that_reads_beyond_its_own_rows_tracks_writes_or_returns_lazy_entities_throws_inside_a_compute(
         string shape
     )
     {
@@ -248,7 +326,7 @@ public sealed class StrictReadTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
         var (read, message) = _beyondOwnRows[shape];
 
-        var inside = () => InCompute.Run((r, ct) => read(db, r, ct));
+        var inside = () => CachedRead.Of(node.Cache, (r, ct) => read(db, r, ct));
 
         await inside.Should().ThrowAsync<InvalidOperationException>().WithMessage(message);
     }
@@ -268,19 +346,22 @@ public sealed class StrictReadTests(PostgresFixture postgres)
                 Contact = new Contact { Phone = "555" },
             },
             Stops = [new Stop { Place = "Depot" }, new Stop { Place = "Door" }],
+            Label = new Label { Text = "Fragile" },
         };
         db.Parcels.Add(parcel);
         await db.SaveChangesAsync();
+        var reviewId = await AddReview(db);
         string[] read = [];
 
-        await InCompute.Run(
+        await CachedRead.Of(
+            node.Cache,
             async (r, ct) =>
             {
                 var whole = await r.Entity(db.Parcels, parcel.Id).SingleAsync(ct);
                 var owned = await r.Children(db.Parcels, p => p.CustomerId, ada)
                     .Where(p => p.Address.Street != "")
                     .OrderBy(p => p.Id)
-                    .Select(p => $"{p.Address.Contact.Phone}/{p.Stops.Count}")
+                    .Select(p => $"{p.Address.Contact.Phone}/{p.Stops.Count}/{p.Label.Text}")
                     .SingleAsync(ct);
                 var resolved = await r.All(db.Parcels)
                     .AsNoTrackingWithIdentityResolution()
@@ -293,18 +374,71 @@ public sealed class StrictReadTests(PostgresFixture postgres)
                     .Take(1)
                     .CountAsync(ct);
                 var split = await r.Entity(db.Parcels, parcel.Id).AsSplitQuery().SingleAsync(ct);
+                var reviewed = await r.Entity(db.Reviews, reviewId)
+                    .Select(x => new { x.CustomerId })
+                    .SingleAsync(ct);
+                int[] ids = [ada];
+                var named = await r.All(db.Customers)
+                    .Where(c => ids.Contains(c.Id) && new[] { ada, -1 }.Contains(c.Id))
+                    .Select(c => ShopDb.Upper(c.Name))
+                    .SingleAsync(ct);
                 read =
                 [
                     whole.Address.Street,
+                    whole.Label.Text,
                     owned,
                     resolved,
                     $"{untracked}",
                     $"{split.Stops.Count}",
+                    $"{reviewed.CustomerId > 0}",
+                    named,
                 ];
             }
         );
 
-        read.Should().Equal("1 Loop Rd", "555/2", "Depot", "1", "2");
+        read.Should()
+            .Equal("1 Loop Rd", "Fragile", "555/2/Fragile", "Depot", "1", "2", "True", "ADA");
+    }
+
+    [Fact]
+    public async Task A_read_helper_query_may_keep_query_filters_on_its_own_columns_or_ignore_them()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        db.Tickets.AddRange(
+            new Ticket { CustomerId = ada },
+            new Ticket { CustomerId = ada, Closed = true }
+        );
+        db.Memos.Add(new Memo { CustomerId = ada });
+        var account = new Account { TenantId = 7 };
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+        int[] read = [];
+
+        await CachedRead.Of(
+            node.Cache,
+            async (r, ct) =>
+                read = [
+                    await r.Children(db.Tickets, t => t.CustomerId, ada)
+                        .IgnoreQueryFilters(["customer"])
+                        .CountAsync(ct),
+                    await r.Children(db.Tickets, t => t.CustomerId, ada)
+                        .IgnoreQueryFilters()
+                        .CountAsync(ct),
+                    await r.All(db.Memos)
+                        .IgnoreQueryFilters()
+                        .Where(m => m.CustomerId == ada)
+                        .CountAsync(ct),
+                    await r.Entity(db.Accounts, account.Id)
+                        .IgnoreQueryFilters()
+                        .Where(a => a.TenantId == 7)
+                        .CountAsync(ct),
+                ]
+        );
+
+        read.Should()
+            .Equal([1, 2, 1, 1], "the open filter, on the ticket's own column, still applies");
     }
 
     [Fact]
@@ -312,30 +446,41 @@ public sealed class StrictReadTests(PostgresFixture postgres)
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
-        var reviewId = await AddReview(db);
-        Review? read = null;
+        var (ada, _) = await db.AddCustomers();
+        var rex = new Dog { Name = "Rex", OwnerId = ada };
+        db.Dogs.Add(rex);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        Dog? read = null;
 
-        await InCompute.Run(
-            async (r, ct) => read = await r.Entity(db.Reviews, reviewId).SingleAsync(ct)
+        await CachedRead.Of(
+            node.Cache,
+            async (r, ct) => read = await r.Entity(db.Dogs, rex.Id).SingleAsync(ct)
         );
 
-        read!.Order.Should().BeNull("the helper reads only the review's own row");
-        (await db.Reviews.AsNoTracking().SingleAsync(r => r.Id == reviewId))
-            .Order.Should()
+        read!.Owner.Should().BeNull("the helper reads only the dog's own row");
+        (await db.Dogs.AsNoTracking().SingleAsync(d => d.Id == rex.Id))
+            .Owner.Should()
             .NotBeNull("a plain query does auto-include it");
     }
 
     [Fact]
-    public async Task The_shape_check_runs_outside_a_compute_too_and_a_rejected_query_is_never_cached()
+    public async Task A_read_helper_query_that_reads_beyond_its_own_rows_throws_outside_a_compute_too_and_every_time_it_runs()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
         IQueryable<Order>? escaped = null;
 
-        // The same shape without the marker compiles and is cached; the marked query must not share its entry.
-        await db.Orders.AsNoTracking().IgnoreAutoIncludes().Include(o => o.Customer).ToListAsync();
+        // The same shape with another tag compiles and is cached; the marked query must not share its entry.
+        await db
+            .Orders.TagWith("other tag")
+            .AsNoTracking()
+            .IgnoreAutoIncludes()
+            .Include(o => o.Customer)
+            .ToListAsync();
         var inside = () =>
-            InCompute.Run(
+            CachedRead.Of(
+                node.Cache,
                 (r, ct) => (escaped = r.All(db.Orders)).Include(o => o.Customer).ToListAsync(ct)
             );
         var outside = () => escaped!.Include(o => o.Customer).ToListAsync();
@@ -361,7 +506,8 @@ public sealed class StrictReadTests(PostgresFixture postgres)
         var (ada, _) = await db.AddCustomers();
 
         var read = () =>
-            InCompute.Run(
+            CachedRead.Of(
+                node.Cache,
                 async (r, ct) =>
                 {
                     var query = r.Entity(db.Customers, ada);
@@ -380,17 +526,93 @@ public sealed class StrictReadTests(PostgresFixture postgres)
                 }
             );
 
-        await read.Should().ThrowAsync<InvalidOperationException>().WithMessage("*transaction*");
+        await read.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("*can't run inside a transaction*");
     }
 
-    // A review of Ada's order, saved and then forgotten, so it's loaded afresh.
+    [Fact]
+    public async Task A_query_run_in_a_fused_fetch_is_cached_and_evicted_by_its_declared_dependency()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+
+        var totals = await CachedRead.Of(
+            node.Cache,
+            (read, ct) => read.From(_totals.All, fetchCt => db.CustomerTotals.ToListAsync(fetchCt))
+        );
+
+        (await totals.WasEvicted()).Should().BeFalse("the fetch's value was cached");
+        await node.Cache.InvalidateAsync(_totals.All);
+        (await totals.WasEvicted()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_plain_query_after_a_read_From_that_only_records_still_throws()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+
+        var call = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, ct) =>
+                {
+                    read.From(_totals.All);
+                    return db.CustomerTotals.ToListAsync(ct);
+                }
+            );
+
+        await call.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage($"{NotFromHelper}(SELECT *", "the message names the command");
+    }
+
+    [Fact]
+    public async Task Fused_fetches_run_side_by_side_are_each_exempt_only_inside_their_own_fetch()
+    {
+        await using var node = new SluiceNode();
+        await using var first = postgres.CreateDb(node);
+        await using var second = postgres.CreateDb(node);
+        await using var plain = postgres.CreateDb(node);
+        int[] fetched = [];
+
+        var call = () =>
+            CachedRead.Of(
+                node.Cache,
+                async (read, ct) =>
+                {
+                    var release = new TaskCompletionSource();
+                    var waiting = read.From(
+                        _totals.All,
+                        async fetchCt =>
+                        {
+                            await release.Task;
+                            return await first.Customers.CountAsync(fetchCt);
+                        }
+                    );
+                    var running = read.From(
+                        _totals.All,
+                        fetchCt => second.Customers.CountAsync(fetchCt)
+                    );
+
+                    // Runs in the compute's own flow while both fetches are in flight.
+                    var outside = plain.Customers.CountAsync(ct);
+                    release.SetResult();
+                    fetched = await Task.WhenAll(waiting, running);
+                    await outside;
+                }
+            );
+
+        await call.Should().ThrowAsync<InvalidOperationException>().WithMessage(NotFromHelper);
+        fetched.Should().HaveCount(2, "each fetch ran its own plain query");
+    }
+
+    // A review of Ada, saved and then forgotten, so it's loaded afresh.
     private static async Task<int> AddReview(ShopDb db)
     {
         var (ada, _) = await db.AddCustomers();
-        var order = new Order { CustomerId = ada, Item = "Tea" };
-        db.Orders.Add(order);
-        await db.SaveChangesAsync();
-        var review = new Review { CustomerId = ada, OrderId = order.Id };
+        var review = new Review { CustomerId = ada };
         db.Reviews.Add(review);
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();

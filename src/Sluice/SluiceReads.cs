@@ -22,6 +22,11 @@ public sealed class SluiceReads
     /// compute's token and returns its result. If the fetch throws, the dependency stays recorded, so a fallback
     /// the compute returns instead is still evicted by it. Safe to call from concurrent tasks inside one compute.
     /// </summary>
+    /// <remarks>
+    /// The fetch is a declared read: the dependency covers whatever it reads, so Sluice's guards don't check what
+    /// runs inside it (the EF package's strict reads let it run plain EF queries). They still check the rest of the
+    /// compute, including a compute it starts.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">The compute has already returned; the fetch doesn't run.</exception>
     public Task<T> From<T>(Dependency dependency, Func<CancellationToken, Task<T>> fetch)
     {
@@ -34,6 +39,11 @@ public sealed class SluiceReads
     /// compute's token and returns its result. If the fetch throws, the dependencies stay recorded.
     /// Safe to call from concurrent tasks inside one compute.
     /// </summary>
+    /// <remarks>
+    /// The fetch is a declared read: the dependencies cover whatever it reads, so Sluice's guards don't check what
+    /// runs inside it (the EF package's strict reads let it run plain EF queries). They still check the rest of the
+    /// compute, including a compute it starts.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">The compute has already returned; the fetch doesn't run.</exception>
     public Task<T> From<T>(
         IEnumerable<Dependency> dependencies,
@@ -42,7 +52,7 @@ public sealed class SluiceReads
     {
         ArgumentNullException.ThrowIfNull(fetch);
         From(dependencies);
-        return fetch(_ct);
+        return ActiveCompute.Fetch(this, fetch, _ct);
     }
 
     /// <summary>

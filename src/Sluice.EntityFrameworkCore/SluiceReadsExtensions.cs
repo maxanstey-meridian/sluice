@@ -15,14 +15,24 @@ namespace Sluice;
 /// Cache projections or detached entities.
 /// </para>
 /// <para>
-/// Reads are strict, so a compute can't read a row its dependencies don't cover. Inside a compute, every EF query must
-/// come from a read helper: a plain query, lazy or explicit loading, <c>FromSql</c>, a compiled query or a write
-/// throws <see cref="InvalidOperationException"/>. A helper's query may be filtered, ordered, paged and projected, but
-/// reading anything beyond its own rows throws when it runs, inside a compute or not: a join, a subquery or set
-/// operation over another set, a navigation (<c>Include</c>, <c>o.Customer.Name</c>, <c>c.Orders.Count</c>,
-/// many-to-many navigations), or <c>AsTracking()</c>. Owned types and JSON columns are part of their owner's row, so
-/// they're fine, and auto-included navigations aren't loaded. Read related rows with their own helper call. The
-/// call that ran the compute throws the violation, and caches nothing, even if the compute catches it.
+/// Reads are strict, so a compute can't read a row its dependencies don't cover. Inside a compute, every EF command
+/// must come from a read helper: a plain query, lazy or explicit loading, <c>FromSql</c>, a compiled query or a write
+/// throws <see cref="InvalidOperationException"/> when it runs, and so does a helper's query that runs inside a
+/// transaction. To run any other EF query, run it in the fetch of <c>read.From(dependency, fetch)</c> with a declared
+/// <see cref="Source{TKey}"/>: the fetch is a declared read, so it isn't checked. Reads that run no SQL aren't
+/// checked either: <c>Find</c> of an entity the context already tracks, <c>Local</c>, and navigations already loaded
+/// hand back what the context holds, edits included, so don't use them inside a compute.
+/// </para>
+/// <para>
+/// A helper's query may be filtered, ordered, paged and projected. One that reads anything beyond its own rows throws
+/// when EF compiles it, which happens when it runs, inside a compute or not: a join, a subquery or set operation over
+/// another set or a <c>SqlQuery</c>, a navigation (<c>Include</c>, <c>o.Customer.Name</c>, <c>c.Orders.Count</c>,
+/// many-to-many navigations, through a cast or an interface too), a database function you mapped, or a query filter
+/// that does any of those or reads the context's state (a tenant filter); <c>IgnoreQueryFilters()</c> leaves the
+/// filters out. So does one that calls <c>AsTracking()</c>, <c>ExecuteUpdate</c> or <c>ExecuteDelete</c>, or that
+/// returns entities that load lazily. Owned types and JSON columns are part of their owner's row, so they're fine,
+/// and auto-included navigations aren't loaded. Read related rows with their own helper call. The call that ran the
+/// compute throws the violation, and caches nothing, even if the compute catches it.
 /// </para>
 /// </remarks>
 public static class SluiceReadsExtensions
@@ -46,8 +56,8 @@ public static class SluiceReadsExtensions
     /// composite, or the context's provider isn't relational.
     /// </exception>
     /// <exception cref="InvalidOperationException">
-    /// The context isn't configured with <c>UseSluice</c>, or is in a transaction. The query throws it too if it runs
-    /// inside a transaction.
+    /// The context isn't configured with <c>UseSluice</c>. Inside a compute, the query throws it when it runs inside
+    /// a transaction.
     /// </exception>
     public static IQueryable<T> Entity<T>(this SluiceReads read, DbSet<T> set, object key)
         where T : class
@@ -59,10 +69,10 @@ public static class SluiceReadsExtensions
         var source = ModelSources.Entity(set.EntityType);
         var property = ModelSources.KeyProperty(set.EntityType);
         ModelSources.EnsureKeyType(property, key, nameof(key));
-        EnsureContext(set);
+        var query = StrictReads.Query(set);
 
         read.From(source.For(key));
-        return WhereEquals(set, property, key);
+        return WhereEquals(query, property, key);
     }
 
     /// <summary>
@@ -86,8 +96,8 @@ public static class SluiceReadsExtensions
     /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
     /// </exception>
     /// <exception cref="InvalidOperationException">
-    /// The context isn't configured with <c>UseSluice</c>, or is in a transaction. The query throws it too if it runs
-    /// inside a transaction.
+    /// The context isn't configured with <c>UseSluice</c>. Inside a compute, the query throws it when it runs inside
+    /// a transaction.
     /// </exception>
     public static IQueryable<T> Children<T>(
         this SluiceReads read,
@@ -110,10 +120,10 @@ public static class SluiceReadsExtensions
         );
         var property = resolved.Properties[0];
         ModelSources.EnsureKeyType(property, principalKey, nameof(principalKey));
-        EnsureContext(set);
+        var query = StrictReads.Query(set);
 
         read.From(ModelSources.ForeignKey(resolved).For(principalKey));
-        return WhereEquals(set, property, principalKey);
+        return WhereEquals(query, property, principalKey);
     }
 
     /// <summary>
@@ -126,8 +136,8 @@ public static class SluiceReadsExtensions
     /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
     /// </exception>
     /// <exception cref="InvalidOperationException">
-    /// The context isn't configured with <c>UseSluice</c>, or is in a transaction. The query throws it too if it runs
-    /// inside a transaction.
+    /// The context isn't configured with <c>UseSluice</c>. Inside a compute, the query throws it when it runs inside
+    /// a transaction.
     /// </exception>
     public static IQueryable<T> All<T>(this SluiceReads read, DbSet<T> set)
         where T : class
@@ -136,28 +146,15 @@ public static class SluiceReadsExtensions
         ArgumentNullException.ThrowIfNull(set);
 
         var source = ModelSources.Entity(set.EntityType);
-        EnsureContext(set);
+        var query = StrictReads.Query(set);
 
         read.From(source.All);
-        return StrictReads.Query(set);
-    }
-
-    // Without UseSluice the strict-read checks wouldn't run. Inside a transaction a compute would cache uncommitted
-    // rows for every caller, or an old snapshot under RepeatableRead or Serializable; the query is checked again
-    // when it runs, since it can be run later than it's built.
-    private static void EnsureContext<T>(DbSet<T> set)
-        where T : class
-    {
-        StrictReads.EnsureOn(set);
-        if (!ContextTransaction.Of(set).IsNone)
-        {
-            throw StrictReads.InTransaction();
-        }
+        return query;
     }
 
     // e => Equals(EF.Property<TKey>(e, name), (TKey)key), with the key captured so EF sends it as a parameter.
     // object.Equals, as EF's own key lookups use, because a converted key type needn't define ==.
-    private static IQueryable<T> WhereEquals<T>(DbSet<T> set, IProperty property, object key)
+    private static IQueryable<T> WhereEquals<T>(IQueryable<T> query, IProperty property, object key)
         where T : class
     {
         var entity = Expression.Parameter(typeof(T), "e");
@@ -173,6 +170,6 @@ public static class SluiceReadsExtensions
             Expression.Convert(Expression.Convert(captured.Body, property.ClrType), typeof(object))
         );
 
-        return StrictReads.Query(set).Where(Expression.Lambda<Func<T, bool>>(equals, entity));
+        return query.Where(Expression.Lambda<Func<T, bool>>(equals, entity));
     }
 }

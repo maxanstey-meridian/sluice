@@ -148,7 +148,8 @@ internal static class ModelSources
         {
             throw new NotSupportedException(
                 $"{entityType.DisplayName()} {reason}, so no tracked write can invalidate a cached read of it. "
-                    + "Read it through read.From with a declared Source, and invalidate that source after it changes."
+                    + "Query it in the fetch of read.From(dependency, fetch), with a dependency on a Source you "
+                    + "declare, and invalidate that source after it changes."
             );
         }
     }

@@ -7,6 +7,8 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class ReadGuardTests(PostgresFixture postgres)
 {
+    private const string InTransaction = "*can't run inside a transaction*";
+
     [Fact]
     public async Task A_key_of_the_wrong_type_throws_naming_the_expected_type()
     {
@@ -14,11 +16,14 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
 
         var longForIntKey = () =>
-            InCompute.Run((r, ct) => r.Entity(db.Customers, 1L).ToListAsync(ct));
+            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Customers, 1L).ToListAsync(ct));
         var rawValueForTypedId = () =>
-            InCompute.Run((r, ct) => r.Entity(db.Users, 7).ToListAsync(ct));
+            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Users, 7).ToListAsync(ct));
         var stringForIntForeignKey = () =>
-            InCompute.Run((r, ct) => r.Children(db.Orders, o => o.CustomerId, "1").ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Children(db.Orders, o => o.CustomerId, "1").ToListAsync(ct)
+            );
         var longForIntDependency = () => db.Customers.Dependency(1L);
 
         await longForIntKey
@@ -46,7 +51,10 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
 
         var read = () =>
-            InCompute.Run((r, ct) => r.Children(db.OrderLines, l => l.CouponId, 1).ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Children(db.OrderLines, l => l.CouponId, 1).ToListAsync(ct)
+            );
 
         await read.Should().NotThrowAsync();
     }
@@ -58,11 +66,18 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
 
         var plainProperty = () =>
-            InCompute.Run((r, ct) => r.Children(db.Orders, o => o.Item, "Tea").ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Children(db.Orders, o => o.Item, "Tea").ToListAsync(ct)
+            );
         var primaryKey = () =>
-            InCompute.Run((r, ct) => r.Children(db.Orders, o => o.Id, 1).ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Children(db.Orders, o => o.Id, 1).ToListAsync(ct)
+            );
         var memberOfNavigation = () =>
-            InCompute.Run(
+            CachedRead.Of(
+                node.Cache,
                 (r, ct) => r.Children(db.Orders, o => o.Customer!.Name, "Ada").ToListAsync(ct)
             );
 
@@ -82,7 +97,8 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         var name = "CustomerId";
 
         var read = () =>
-            InCompute.Run(
+            CachedRead.Of(
+                node.Cache,
                 (r, ct) => r.Children(db.Notes, n => EF.Property<int>(n, name), 1).ToListAsync(ct)
             );
 
@@ -95,12 +111,17 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
     [Fact]
     public async Task Reads_on_a_context_without_UseSluice_throw()
     {
+        await using var node = new SluiceNode();
         await using var db = postgres.CreateDb();
 
-        var entity = () => InCompute.Run((r, ct) => r.Entity(db.Customers, 1).ToListAsync(ct));
+        var entity = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.Customers, 1).ToListAsync(ct));
         var children = () =>
-            InCompute.Run((r, ct) => r.Children(db.Orders, o => o.CustomerId, 1).ToListAsync(ct));
-        var all = () => InCompute.Run((r, ct) => r.All(db.Customers).ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Children(db.Orders, o => o.CustomerId, 1).ToListAsync(ct)
+            );
+        var all = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
 
         await entity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
         await children.Should().ThrowAsync<InvalidOperationException>().WithMessage("*UseSluice*");
@@ -113,9 +134,11 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
 
-        var read = () => InCompute.Run((r, ct) => r.Entity(db.OrderLines, 1).ToListAsync(ct));
+        var read = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.OrderLines, 1).ToListAsync(ct));
         var dependency = () => db.OrderLines.Dependency(1);
-        var readAll = () => InCompute.Run((r, ct) => r.All(db.OrderLines).ToListAsync(ct));
+        var readAll = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.All(db.OrderLines).ToListAsync(ct));
 
         await read.Should().ThrowAsync<NotSupportedException>().WithMessage("*composite*");
         dependency.Should().Throw<NotSupportedException>().WithMessage("*composite*");
@@ -134,19 +157,20 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         var transaction = await db.Database.BeginTransactionAsync();
 
         var entity = () =>
-            InCompute.Run((r, ct) => r.Entity(db.Customers, customer.Id).ToListAsync(ct));
+            CachedRead.Of(
+                node.Cache,
+                (r, ct) => r.Entity(db.Customers, customer.Id).ToListAsync(ct)
+            );
         var children = () =>
-            InCompute.Run(
+            CachedRead.Of(
+                node.Cache,
                 (r, ct) => r.Children(db.Orders, o => o.CustomerId, customer.Id).ToListAsync(ct)
             );
-        var all = () => InCompute.Run((r, ct) => r.All(db.Customers).ToListAsync(ct));
+        var all = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
 
-        await entity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*transaction*");
-        await children
-            .Should()
-            .ThrowAsync<InvalidOperationException>()
-            .WithMessage("*transaction*");
-        await all.Should().ThrowAsync<InvalidOperationException>().WithMessage("*transaction*");
+        await entity.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
+        await children.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
+        await all.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
 
         await transaction.CommitAsync();
         await transaction.DisposeAsync();
@@ -162,9 +186,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await db.Database.OpenConnectionAsync();
         db.Database.EnlistTransaction(transaction);
 
-        var read = () => InCompute.Run((r, ct) => r.All(db.Customers).ToListAsync(ct));
+        var read = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
 
-        await read.Should().ThrowAsync<InvalidOperationException>().WithMessage("*transaction*");
+        await read.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
     }
 
     [Fact]
@@ -174,9 +198,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
         using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
 
-        var read = () => InCompute.Run((r, ct) => r.All(db.Customers).ToListAsync(ct));
+        var read = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
 
-        await read.Should().ThrowAsync<InvalidOperationException>().WithMessage("*transaction*");
+        await read.Should().ThrowAsync<InvalidOperationException>().WithMessage(InTransaction);
     }
 
     [Fact]
@@ -186,7 +210,7 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node, enlist: false);
         using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
 
-        var read = () => InCompute.Run((r, ct) => r.All(db.Customers).ToListAsync(ct));
+        var read = () => CachedRead.Of(node.Cache, (r, ct) => r.All(db.Customers).ToListAsync(ct));
 
         await read.Should().NotThrowAsync();
     }
@@ -197,10 +221,14 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
 
-        var keylessView = () => InCompute.Run((r, ct) => r.All(db.CustomerTotals).ToListAsync(ct));
-        var view = () => InCompute.Run((r, ct) => r.Entity(db.ActiveCustomers, 1).ToListAsync(ct));
-        var sqlQuery = () => InCompute.Run((r, ct) => r.All(db.TopCustomers).ToListAsync(ct));
-        var function = () => InCompute.Run((r, ct) => r.All(db.RecentOrders).ToListAsync(ct));
+        var keylessView = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.All(db.CustomerTotals).ToListAsync(ct));
+        var view = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.Entity(db.ActiveCustomers, 1).ToListAsync(ct));
+        var sqlQuery = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.All(db.TopCustomers).ToListAsync(ct));
+        var function = () =>
+            CachedRead.Of(node.Cache, (r, ct) => r.All(db.RecentOrders).ToListAsync(ct));
 
         await keylessView.Should().ThrowAsync<NotSupportedException>().WithMessage("*keyless*");
         await view.Should()

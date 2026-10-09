@@ -115,6 +115,57 @@ public sealed class ComputeGuardTests
     }
 
     [Fact]
+    public async Task GetOrSetAsync_inside_a_fused_fetch_runs_and_the_compute_it_starts_is_checked_again()
+    {
+        await using var node = new SluiceNode();
+        var third = new Query<string, string>("guard-third");
+
+        var inFetch = await node.Cache.GetOrSetAsync(
+            _outer,
+            "fetch",
+            (read, ct) =>
+                read.From(
+                    _rows.For(1),
+                    fetchCt => node.Cache.GetOrSetAsync(_inner, "x", Good, fetchCt).AsTask()
+                )
+        );
+        var nestedInIt = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _outer,
+                    "fetch-nested",
+                    (read, ct) =>
+                        read.From(
+                            _rows.For(1),
+                            fetchCt =>
+                                node.Cache.GetOrSetAsync(
+                                        _inner,
+                                        "nested",
+                                        async (inner, innerCt) =>
+                                        {
+                                            inner.From(_rows.For(2));
+                                            return await node.Cache.GetOrSetAsync(
+                                                third,
+                                                "x",
+                                                Good,
+                                                innerCt
+                                            );
+                                        },
+                                        fetchCt
+                                    )
+                                    .AsTask()
+                        )
+                )
+                .AsTask();
+
+        inFetch.Should().Be("good#1", "the fetch is a declared read, so the nested call ran");
+        await nestedInIt
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("*'guard-third'*inside another compute*");
+    }
+
+    [Fact]
     public async Task The_zero_reads_guard_throws_and_stores_nothing_even_when_fail_safe_has_an_expired_entry()
     {
         await using var node = new SluiceNode(cache =>

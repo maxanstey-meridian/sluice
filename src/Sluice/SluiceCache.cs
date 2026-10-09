@@ -46,8 +46,9 @@ public sealed class SluiceCache
     /// has ended. Waiting on another caller's compute for the same key can't be cancelled.
     /// </param>
     /// <exception cref="InvalidOperationException">
-    /// The compute recorded no dependencies, or this was called from inside another compute.
-    /// Nothing is cached in either case.
+    /// The compute recorded no dependencies, or this was called from inside another compute (other than inside a
+    /// fused <c>read.From(dependency, fetch)</c> fetch, whose declared dependency covers it). Nothing is cached in
+    /// either case.
     /// </exception>
     /// <exception cref="OperationCanceledException">
     /// The compute was cancelled, or <paramref name="ct"/> was already cancelled, in which case no cached value is
@@ -64,14 +65,10 @@ public sealed class SluiceCache
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(compute);
 
-        if (ActiveCompute.Current is { } outer)
+        // On a hit the outer compute couldn't learn the inner value's dependencies, so they'd be lost. Inside a
+        // fused fetch the outer compute declared them, so Violate lets it through.
+        if (ActiveCompute.Violate(query.Name, Nested) is { } nested)
         {
-            // On a hit the outer compute couldn't learn the inner value's dependencies, so they'd be lost.
-            var nested = new InvalidOperationException(
-                $"SluiceCache.GetOrSetAsync for query '{query.Name}' was called from inside another compute. "
-                    + "Read the underlying data directly in the outer compute and record its dependencies there."
-            );
-            outer.Violate(nested);
             throw nested;
         }
 
@@ -152,6 +149,12 @@ public sealed class SluiceCache
         EntryLifetime.EnsureWithin(options, _tagOptions, $"Query '{query.Name}'");
         return options;
     }
+
+    private static InvalidOperationException Nested(string queryName) =>
+        new(
+            $"SluiceCache.GetOrSetAsync for query '{queryName}' was called from inside another compute. "
+                + "Read the underlying data directly in the outer compute and record its dependencies there."
+        );
 
     private static async Task<TValue> ComputeAsync<TValue>(
         SluiceReads reads,

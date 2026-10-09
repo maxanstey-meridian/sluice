@@ -44,12 +44,7 @@ public sealed class PoolingTests(PostgresFixture postgres)
 
         await using var provider = services.BuildServiceProvider();
         var cache = provider.GetRequiredService<SluiceCache>();
-        await using var reader = new ShopDb(
-            new DbContextOptionsBuilder<ShopDb>()
-                .UseNpgsql(postgres.ConnectionString)
-                .UseSluice(provider)
-                .Options
-        );
+        await using var reader = postgres.CreateDb(provider);
         var (ada, bob) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(cache, reader, ada);
         var bobRead = await CachedRead.Customer(cache, reader, bob);

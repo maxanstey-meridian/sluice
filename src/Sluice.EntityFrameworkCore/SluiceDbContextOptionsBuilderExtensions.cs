@@ -24,21 +24,24 @@ public static class SluiceDbContextOptionsBuilderExtensions
     /// <returns><paramref name="builder"/>, for chaining.</returns>
     /// <remarks>
     /// <para>
-    /// Strict reads, inside a compute: a query not built by a read helper throws <see cref="InvalidOperationException"/>
-    /// when it runs, so lazy loading, explicit loading, <c>FromSql</c>, compiled queries and writes can't be used
-    /// there, nor can a helper's query run inside a transaction. Inside a compute or not, a helper's query that joins
-    /// or subqueries another set, uses a navigation other than an owned type's (<c>Include</c>, <c>o.Customer.Name</c>,
-    /// <c>c.Orders.Count</c>) or calls <c>AsTracking()</c> throws when EF compiles it. Read related rows with their own
-    /// helper call. Commands run outside a compute aren't checked.
+    /// Strict reads, inside a compute: a command not built by a read helper throws
+    /// <see cref="InvalidOperationException"/> when it runs, so lazy loading, explicit loading, <c>FromSql</c>,
+    /// compiled queries and writes can't be used there outside the fetch of <c>read.From(dependency, fetch)</c>, nor
+    /// can a helper's query run inside a transaction. Inside a compute or not, a helper's query that reads beyond its
+    /// own rows (<see cref="SluiceReadsExtensions"/> lists how) throws when EF compiles it, which happens when it runs.
+    /// Commands run outside a compute aren't checked.
     /// </para>
     /// <para>
     /// The query check is an EF singleton interceptor, shared by every Sluice context, so a context that also calls
     /// <c>UseInternalServiceProvider</c> can't use Sluice: EF refuses singleton interceptors from
-    /// <c>AddInterceptors</c> there.
+    /// <c>AddInterceptors</c> there. It sees each query as the query expression interceptors added before it leave
+    /// it: one of your own added after <c>UseSluice</c>, or in the context's <c>OnConfiguring</c>, rewrites the query
+    /// after the check, so what it adds isn't checked.
     /// </para>
     /// <para>
     /// Relational providers only: Sluice reads each save's transaction from the context's relational connection. A
-    /// context on any other provider throws <see cref="NotSupportedException"/> when it saves, before it writes.
+    /// context on any other provider throws <see cref="NotSupportedException"/> when it saves, before it writes, and
+    /// the read helpers refuse it.
     /// </para>
     /// <para>
     /// Call <c>UseSluice</c> after adding any interceptor that changes entities in <c>SavingChanges</c> (soft delete,

@@ -92,9 +92,12 @@ public abstract class Animal
     public string Name { get; set; } = "";
 }
 
+/// <summary>Has a navigation its base type doesn't, which plain queries load automatically.</summary>
 public sealed class Dog : Animal
 {
     public bool Fetches { get; set; }
+    public int? OwnerId { get; set; }
+    public Customer? Owner { get; set; }
 }
 
 /// <summary>Mapped table-per-type: a truck's own columns live in a table of their own.</summary>
@@ -111,7 +114,7 @@ public sealed class Truck : Vehicle
 
 /// <summary>
 /// Owns an address (which owns a contact in turn), stored in the parcel's own row but tracked as entries of their own,
-/// and stops, stored in a table of their own.
+/// stops, stored in a table of their own, and a label, stored as a JSON column.
 /// </summary>
 public sealed class Parcel
 {
@@ -119,6 +122,7 @@ public sealed class Parcel
     public int CustomerId { get; set; }
     public Address Address { get; set; } = new();
     public List<Stop> Stops { get; set; } = [];
+    public Label Label { get; set; } = new();
 }
 
 public sealed class Address
@@ -135,6 +139,11 @@ public sealed class Contact
 public sealed class Stop
 {
     public string Place { get; set; } = "";
+}
+
+public sealed class Label
+{
+    public string Text { get; set; } = "";
 }
 
 /// <summary>Known to its bins by its code, an alternate key.</summary>
@@ -178,10 +187,7 @@ public sealed class RecentOrder
     public int Id { get; set; }
 }
 
-/// <summary>
-/// Loads its customer lazily, through the <see cref="ILazyLoader"/> EF passes its constructor, and its order eagerly,
-/// as an auto-included navigation.
-/// </summary>
+/// <summary>Loads its customer lazily, through the <see cref="ILazyLoader"/> EF passes its constructor.</summary>
 public sealed class Review
 {
     private readonly ILazyLoader? _loader;
@@ -203,9 +209,38 @@ public sealed class Review
         }
         set => _customer = value;
     }
+}
 
-    public int OrderId { get; set; }
-    public Order? Order { get; set; }
+/// <summary>Gets a lazy loader through a service property, as lazy-loading proxies do.</summary>
+public sealed class Receipt
+{
+    public int Id { get; set; }
+    public ILazyLoader? Loader { get; set; }
+}
+
+/// <summary>
+/// Has two named query filters: <c>open</c> on its own column, and <c>customer</c> through its customer navigation.
+/// </summary>
+public sealed class Ticket
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+    public Customer? Customer { get; set; }
+    public bool Closed { get; set; }
+}
+
+/// <summary>Has a query filter with a subquery over customers.</summary>
+public sealed class Memo
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+}
+
+/// <summary>Has a query filter on the context's tenant.</summary>
+public sealed class Account
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
 }
 
 public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options)
@@ -234,6 +269,21 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<TopCustomer> TopCustomers => Set<TopCustomer>();
     public DbSet<RecentOrder> RecentOrders => Set<RecentOrder>();
     public DbSet<Review> Reviews => Set<Review>();
+    public DbSet<Ticket> Tickets => Set<Ticket>();
+    public DbSet<Memo> Memos => Set<Memo>();
+    public DbSet<Account> Accounts => Set<Account>();
+    public DbSet<Receipt> Receipts => Set<Receipt>();
+
+    /// <summary>The tenant <see cref="Account"/>'s query filter reads.</summary>
+    public int TenantId { get; init; }
+
+    /// <summary>A database function of the app's, which could read any table.</summary>
+    [DbFunction("customer_name")]
+    public static string CustomerName(int id) => throw new NotSupportedException();
+
+    /// <summary>The database's own <c>upper</c>, mapped as a built-in function.</summary>
+    [DbFunction("upper", IsBuiltIn = true)]
+    public static string Upper(string text) => throw new NotSupportedException();
 
     /// <summary>Adds two customers, Ada and Bob, then forgets them, so later queries load them afresh.</summary>
     public async Task<(int Ada, int Bob)> AddCustomers()
@@ -317,6 +367,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Parcel>().HasOne<Customer>().WithMany().HasForeignKey(p => p.CustomerId);
         model.Entity<Parcel>().OwnsOne(p => p.Address, address => address.OwnsOne(a => a.Contact));
         model.Entity<Parcel>().OwnsMany(p => p.Stops);
+        model.Entity<Parcel>().OwnsOne(p => p.Label, label => label.ToJson());
         model
             .Entity<Bin>()
             .HasOne<Warehouse>()
@@ -329,11 +380,16 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .WithMany()
             .UsingEntity(
                 "CustomerCoupons",
-                coupon => coupon.HasOne(typeof(Coupon)).WithMany().HasForeignKey("CouponId"),
+                coupon =>
+                    coupon.HasOne(typeof(Coupon), "Coupon").WithMany().HasForeignKey("CouponId"),
                 customer => customer.HasOne(typeof(Customer)).WithMany().HasForeignKey("CustomerId")
             );
 
-        model.Entity<Review>().Navigation(review => review.Order).AutoInclude();
+        model.Entity<Dog>().Navigation(dog => dog.Owner).AutoInclude();
+        model.Entity<Ticket>().HasQueryFilter("open", ticket => !ticket.Closed);
+        model.Entity<Ticket>().HasQueryFilter("customer", ticket => ticket.Customer!.Name != "");
+        model.Entity<Memo>().HasQueryFilter(memo => Customers.Any(c => c.Id == memo.CustomerId));
+        model.Entity<Account>().HasQueryFilter(account => account.TenantId == TenantId);
 
         model.Entity<Supplier>().ToTable("Suppliers").ToView("supplier_names");
         model.Entity<CustomerTotal>().HasNoKey().ToView("customer_totals");
