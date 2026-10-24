@@ -407,6 +407,11 @@ Folding follows PostgreSQL's rules. The test suite runs on PostgreSQL, and other
 untested. One that stores dates less precisely, such as SQL Server's `datetime` (about 3 ms),
 could give the same row different key text on a read and a write, and miss an eviction.
 
+A value converter on a key, foreign key or unique column must round-trip: converting a stored
+value to .NET and back must give the stored value. A save reports what it would write for the
+values EF loaded, so a converter that loads `""` as null makes a save of that row report
+nothing for `""`, and a cached read by `""` is never evicted. Sluice can't detect this.
+
 ### Rows saved without loading them
 
 A row you attach, update or remove without loading it first has no original values, so Sluice
