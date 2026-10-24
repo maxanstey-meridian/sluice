@@ -265,7 +265,8 @@ public static class SluiceReadsExtensions
     /// stores it as null.
     /// </exception>
     /// <exception cref="NotSupportedException">
-    /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
+    /// The foreign key's value converter stores null as a value (<c>convertsNulls</c>), <typeparamref name="T"/> isn't
+    /// mapped to a table, or the context's provider isn't relational.
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// The context isn't configured with <c>UseSluice</c>, or a compute is running and <paramref name="read"/> isn't

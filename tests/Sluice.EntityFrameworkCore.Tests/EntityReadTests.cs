@@ -569,9 +569,6 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     public async Task A_unique_column_whose_converter_stores_null_as_a_value_is_refused()
     {
         await using var node = new SluiceNode();
-        await using var db = postgres.CreateDb(node);
-        db.Warehouses.Add(new Warehouse { Code = Fresh("WH") });
-        await db.SaveChangesAsync();
 
         var read = () =>
             CachedRead.Of(
@@ -584,6 +581,24 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await read.Should()
             .ThrowAsync<NotSupportedException>()
             .WithMessage("Warehouse.Region's value converter stores null as a value*");
+    }
+
+    // The same for a foreign key: a crate with no return warehouse stores an empty code, a child of "" to a reader.
+    [Fact]
+    public async Task A_foreign_key_whose_converter_stores_null_as_a_value_is_refused()
+    {
+        await using var node = new SluiceNode();
+
+        var read = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, ct) =>
+                    read.Children(read.Db<ShopDb>().Crates, c => c.ReturnCode, "").ToListAsync(ct)
+            );
+
+        await read.Should()
+            .ThrowAsync<NotSupportedException>()
+            .WithMessage("Crate.ReturnCode's value converter stores null as a value*");
     }
 
     [Fact]

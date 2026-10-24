@@ -28,8 +28,8 @@ scoped service, a lookup by a unique column, and keys from public input.
   doesn't evict it; one that gives a row the value, changes the row holding it, or moves the
   value off it, does, so a cached miss is evicted once a row gets the value. The column must be
   covered by a single-column unique index (a filtered one counts) or alternate key in the EF
-  model; anything else throws `ArgumentException`, a composite one `NotSupportedException`, as
-  does a column whose value converter stores null as a value (`convertsNulls`, internal in EF).
+  model; anything else throws `ArgumentException`, and a composite one, or one whose value
+  converter stores null as a value (`convertsNulls`, internal in EF), `NotSupportedException`.
   `ExecuteUpdate`, `ExecuteDelete`, `AllDependencies()` and database cascades evict these
   readers wherever they evict `read.Entity` by key. As with `Children` lists, a type without a
   row version evicts every reader by its unique columns on each update or delete, and the
@@ -55,7 +55,9 @@ scoped service, a lookup by a unique column, and keys from public input.
 - **Fixed: a foreign key its value converter stores as null.** A save of such a row threw while
   listing what to invalidate, and lost the save's invalidation; it now treats the key as null,
   as the database does. `read.Children` with such a key throws `ArgumentException` (it threw
-  `InvalidOperationException`).
+  `InvalidOperationException`). A foreign key whose converter stores null as a value
+  (`convertsNulls`) now makes `read.Children` throw `NotSupportedException`: a row with no
+  parent holds that value, and no save evicted its readers.
 
 ## 0.3.0 — breaking
 

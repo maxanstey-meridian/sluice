@@ -63,9 +63,9 @@ internal static class ModelSources
 
     /// <summary>
     /// The properties of <paramref name="entityType"/> and its base types that a single-column unique index (filtered
-    /// or not) or alternate key covers, other than a single-column primary key, whose rows <c>read.Entity</c> by a
-    /// unique column can read. The model's unique columns bound what a save publishes; uniqueness itself isn't needed
-    /// for correctness. Built once per type.
+    /// or not) or alternate key covers, other than a single-column primary key and any whose value converter stores
+    /// null as a value, whose rows <c>read.Entity</c> by a unique column can read. The model's unique columns bound
+    /// what a save publishes; uniqueness itself isn't needed for correctness. Built once per type.
     /// </summary>
     internal static IProperty[] UniqueColumns(IEntityType entityType) =>
         entityType.GetOrAddRuntimeAnnotationValue(
@@ -97,6 +97,21 @@ internal static class ModelSources
 
     private static bool ConvertsNulls(IProperty property) =>
         property.GetTypeMapping().Converter is { ConvertsNulls: true };
+
+    // A row whose value is null holds the converted value in the database, which a read by that value finds, but a
+    // save reports the null, so it evicts no such read.
+    private static NotSupportedException NullStoredAsValue(
+        IEntityType entityType,
+        IProperty property,
+        string reading,
+        string them
+    ) =>
+        new(
+            $"{entityType.DisplayName()}.{property.Name}'s value converter stores null as a value, so a row whose "
+                + $"{property.Name} is null holds a value that a read by that value finds, but no save evicts that "
+                + $"read. {reading} isn't supported; query {them} from read.Db<TContext>(), which depends on every "
+                + $"{entityType.DisplayName()} row."
+        );
 
     /// <summary>
     /// Resolves <paramref name="selector"/> (a property, or <c>EF.Property</c> on a shadow property) to a column of
@@ -143,14 +158,9 @@ internal static class ModelSources
         }
 
         var column = $"{entityType.DisplayName()}.{property.Name}";
-        if (IsSingleColumnUnique(property))
+        if (IsSingleColumnUnique(property) && ConvertsNulls(property))
         {
-            throw new NotSupportedException(
-                $"{column}'s value converter stores null as a value, so a row whose {property.Name} is null holds a "
-                    + "value a read by that value finds, and a save can't tell readers of it. Reading one row by such a "
-                    + $"column isn't supported; query it from read.Db<TContext>(), which depends on every "
-                    + $"{entityType.DisplayName()} row."
-            );
+            throw NullStoredAsValue(entityType, property, "Reading one row by such a column", "it");
         }
 
         if (
@@ -327,6 +337,7 @@ internal static class ModelSources
     /// The selector doesn't name a single-column foreign key, or names it through <c>EF.Property</c> with a property
     /// name that isn't a constant.
     /// </exception>
+    /// <exception cref="NotSupportedException">The foreign key's value converter stores null as a value.</exception>
     internal static IForeignKey ResolveForeignKey(
         IEntityType entityType,
         LambdaExpression selector,
@@ -348,14 +359,24 @@ internal static class ModelSources
                 ?.GetContainingForeignKeys()
                 .FirstOrDefault(foreignKey => foreignKey.Properties is [_]);
 
-        return foreignKey is { Properties: [_] }
-            ? foreignKey
-            : throw new ArgumentException(
+        if (foreignKey is not { Properties: [var property] })
+        {
+            throw new ArgumentException(
                 $"'{selector}' doesn't name a single-column foreign key of {entityType.DisplayName()}. Pass the FK "
                     + "property (o => o.CustomerId), a shadow FK (o => EF.Property<CustomerId>(o, \"CustomerId\")) or a "
                     + "reference navigation to the principal (o => o.Customer).",
                 parameterName
             );
+        }
+
+        return ConvertsNulls(property)
+            ? throw NullStoredAsValue(
+                entityType,
+                property,
+                "Reading children by such a foreign key",
+                "them"
+            )
+            : foreignKey;
     }
 
     // The name of the member a selector reads off its parameter, directly or through EF.Property with a constant

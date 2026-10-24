@@ -253,6 +253,13 @@ public sealed class Bin
     public string? OverflowCode { get; set; }
 }
 
+/// <summary>Never saved: its converter stores no return warehouse as an empty code, which no warehouse has.</summary>
+public sealed class Crate
+{
+    public int Id { get; set; }
+    public string? ReturnCode { get; set; }
+}
+
 /// <summary>Written to a table, read through a view, so the read helpers refuse it.</summary>
 public sealed class Supplier
 {
@@ -620,6 +627,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Parcel> Parcels => Set<Parcel>();
     public DbSet<Warehouse> Warehouses => Set<Warehouse>();
     public DbSet<Bin> Bins => Set<Bin>();
+    public DbSet<Crate> Crates => Set<Crate>();
     public DbSet<Page> Pages => Set<Page>();
     public DbSet<Dictionary<string, object>> CustomerCoupons =>
         Set<Dictionary<string, object>>("CustomerCoupons");
@@ -814,6 +822,22 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
                 new ValueConverter<string?, string>(
                     region => region ?? "",
                     region => region == "" ? null : region,
+                    convertsNulls: true
+                )
+            );
+        model
+            .Entity<Crate>()
+            .HasOne<Warehouse>()
+            .WithMany()
+            .HasForeignKey(crate => crate.ReturnCode)
+            .HasPrincipalKey(warehouse => warehouse.Code);
+        model
+            .Entity<Crate>()
+            .Property(crate => crate.ReturnCode)
+            .HasConversion(
+                new ValueConverter<string?, string>(
+                    code => code ?? "",
+                    code => code == "" ? null : code,
                     convertsNulls: true
                 )
             );

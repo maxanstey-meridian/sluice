@@ -220,7 +220,9 @@ uncached with [`read.DoNotCache()`](/guides/sources-and-queries#leaving-a-value-
   `Children`, or a plain query.
 - `Children`'s foreign key property may be nullable, but the key you pass can't be null: rows
   with no parent aren't anyone's children. A null throws `ArgumentNullException`, and a key its
-  value converter stores as null throws `ArgumentException`.
+  value converter stores as null throws `ArgumentException`. A foreign key whose converter
+  stores null as a value (EF's internal `convertsNulls`) throws `NotSupportedException`: a row
+  with no parent would hold a value a reader finds, but no save would report it.
 - `Children`'s foreign key can be the property (`o => o.CustomerId`), a shadow property named
   by a constant (`o => EF.Property<CustomerId>(o, "CustomerId")`), or a reference navigation to
   the parent (`o => o.Customer`). All three record the same dependency.
