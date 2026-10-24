@@ -369,6 +369,21 @@ internal static class ModelSources
         };
     }
 
+    /// <summary>Refuses a value its column's converter stores as null, which a read by value never finds.</summary>
+    /// <exception cref="ArgumentException">The converter stores <paramref name="value"/> as null.</exception>
+    internal static void EnsureStored(IProperty property, object value, string parameterName)
+    {
+        if (StoredValue(property, value) is null)
+        {
+            throw new ArgumentException(
+                $"The value converter of {property.DeclaringType.DisplayName()}.{property.Name} stores '{value}' as "
+                    + "null, which a read by value never finds. Read the rows whose column is null with a query on "
+                    + "read.Db<TContext>().",
+                parameterName
+            );
+        }
+    }
+
     /// <summary>Checks that <paramref name="key"/> has the CLR type of <paramref name="property"/>, ignoring nullability.</summary>
     /// <exception cref="ArgumentException">It doesn't.</exception>
     internal static void EnsureKeyType(
@@ -512,9 +527,9 @@ internal static class ModelSources
                     )
             );
 
-    // A unique column's value as its readers read it: null where the column holds null, as it does where the value
+    // A column's value as a read by value reads it: null where the column holds null, as it does where the value
     // converter stores the value as null, since no read by value finds a null.
-    internal static object? UniqueValue(IProperty property, object? value) =>
+    internal static object? StoredValue(IProperty property, object? value) =>
         value is not null
         && (
             property.GetTypeMapping().Converter is not { } converter

@@ -123,7 +123,7 @@ internal sealed class CapturedSave
                 {
                     dependencies.Add(uniqueSource.All);
                 }
-                else if (ModelSources.UniqueValue(property, value.CurrentValue) is { } current)
+                else if (ModelSources.StoredValue(property, value.CurrentValue) is { } current)
                 {
                     dependencies.Add(uniqueSource.For(current));
                 }
@@ -140,7 +140,13 @@ internal sealed class CapturedSave
                         dependencies.Add(foreignKeySource.All);
                     }
                     else if (
-                        KeyOf(entry, foreignKey.PrincipalKey.Properties, Current) is { } principal
+                        KeyOf(
+                            entry,
+                            foreignKey.PrincipalKey.Properties,
+                            Current,
+                            storedAs: foreignKey.Properties
+                        ) is
+                        { } principal
                     )
                     {
                         dependencies.Add(foreignKeySource.For(principal));
@@ -225,7 +231,7 @@ internal sealed class CapturedSave
                 _originals.Add(source.All);
             }
             else if (
-                ModelSources.UniqueValue(property, entry.Property(property).OriginalValue) is
+                ModelSources.StoredValue(property, entry.Property(property).OriginalValue) is
                 { } original
             )
             {
@@ -303,17 +309,25 @@ internal sealed class CapturedSave
     private static object? Original(PropertyEntry property) => property.OriginalValue;
 
     // The key a model source takes: the value itself, or an array of the values of a composite key.
-    // Null when any part is null (a foreign key that points nowhere) or unknown.
+    // Null when any part is null, or stored as null by its converter (a foreign key that points nowhere), or unknown.
+    // A principal's key, read for its dependents' source, is stored as their foreign key stores it: storedAs.
     private static object? KeyOf(
         EntityEntry entry,
         IReadOnlyList<IProperty> properties,
-        Func<PropertyEntry, object?> value
+        Func<PropertyEntry, object?> value,
+        IReadOnlyList<IProperty>? storedAs = null
     )
     {
         var values = new object[properties.Count];
         for (var i = 0; i < values.Length; i++)
         {
-            if (value(entry.Property(properties[i])) is not { } part)
+            if (
+                ModelSources.StoredValue(
+                    (storedAs ?? properties)[i],
+                    value(entry.Property(properties[i]))
+                )
+                is not { } part
+            )
             {
                 return null;
             }

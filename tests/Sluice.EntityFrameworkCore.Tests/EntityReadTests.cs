@@ -482,9 +482,41 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         (await cached.WasEvicted()).Should().BeTrue();
     }
 
-    // The converter stores an empty label as null, which no read by value finds and no save publishes.
+    // The converter stores an empty slug as null, which no read by value finds and no save publishes. With a row version
+    // the save trusts the slug a page had, so both the value it takes and the one it leaves go through that rule.
     [Fact]
     public async Task A_unique_value_its_converter_stores_as_null_is_refused_and_saves_without_losing_invalidation()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var page = await AddPage(db, "");
+        var slug = Fresh("named");
+
+        var refused = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, ct) => read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, "").SingleAsync(ct)
+            );
+        await refused
+            .Should()
+            .ThrowAsync<ArgumentException>()
+            .WithMessage("The value converter of Page.Slug stores '' as null*");
+
+        var named = await PageBySlug(node.Cache, slug);
+        page.Slug = slug;
+        await db.SaveChangesAsync();
+        (await named.WasEvicted()).Should().BeTrue("the page took the slug");
+
+        named = await PageBySlug(node.Cache, slug);
+        page.Slug = "";
+        await db.SaveChangesAsync();
+        (await named.WasEvicted()).Should().BeTrue("the page gave the slug up");
+        node.Logs.GetSnapshot().Should().NotContain(record => record.Level == LogLevel.Error);
+    }
+
+    // The same rule for a foreign key: a bin whose overflow code is stored as null points at no warehouse.
+    [Fact]
+    public async Task A_foreign_key_its_converter_stores_as_null_is_refused_and_saves_without_losing_invalidation()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
@@ -501,22 +533,18 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         var refused = () =>
             CachedRead.Of(
                 node.Cache,
-                (read, ct) => read.Entity(read.Db<ShopDb>().Bins, b => b.Label, "").SingleAsync(ct)
+                (read, ct) =>
+                    read.Children(read.Db<ShopDb>().Bins, b => b.OverflowCode, "").ToListAsync(ct)
             );
         await refused
             .Should()
             .ThrowAsync<ArgumentException>()
-            .WithMessage("The value converter of Bin.Label stores '' as null*");
+            .WithMessage("The value converter of Bin.OverflowCode stores '' as null*");
 
-        var bin = new Bin { WarehouseCode = warehouse.Code, Label = "" };
-        db.Bins.Add(bin);
-        await db.SaveChangesAsync();
-        bin.Label = Fresh("shelf");
-        await db.SaveChangesAsync();
-        db.Bins.Remove(bin);
+        db.Bins.Add(new Bin { WarehouseCode = warehouse.Code, OverflowCode = "" });
         await db.SaveChangesAsync();
 
-        (await bins.WasEvicted()).Should().BeTrue();
+        (await bins.WasEvicted()).Should().BeTrue("a bin joined the warehouse");
         node.Logs.GetSnapshot().Should().NotContain(record => record.Level == LogLevel.Error);
     }
 

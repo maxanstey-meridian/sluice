@@ -1,8 +1,5 @@
 #nullable enable
-static Sluice.SluiceReadsExtensions.Db<TContext>(this Sluice.SluiceReads! read) -> TContext!
-static Sluice.SluiceReadsExtensions.Db<TContext>(this Sluice.SluiceReads! read, System.Action<TContext!>! configure) -> TContext!
 static Sluice.SluiceReadsExtensions.Db<TContext>(this Sluice.SluiceReads! read, System.Action<TContext!, System.IServiceProvider!>! configure) -> TContext!
 static Sluice.SluiceReadsExtensions.Entity<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, System.Linq.Expressions.Expression<System.Func<T!, object?>!>! uniqueColumn, object! value) -> System.Linq.IQueryable<T!>!
 Sluice.SluiceContextStateAttribute
 Sluice.SluiceContextStateAttribute.SluiceContextStateAttribute() -> void
-*REMOVED*static Sluice.SluiceReadsExtensions.All<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set) -> System.Linq.IQueryable<T!>!

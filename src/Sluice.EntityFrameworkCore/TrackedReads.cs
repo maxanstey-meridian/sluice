@@ -1228,7 +1228,8 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
         // A query filter's read of more than its rows: the filter, what it reads, and whether that's the context's state.
         // A refused property of the context with a body, holding a plain value, names the context's type for the
-        // [SluiceContextState] remedy; marking can't help any other part.
+        // [SluiceContextState] remedy. Only a property read straight off the context is offered it, not one whose
+        // struct a filter reads a field of, though marking that would do too.
         private readonly record struct FilterRead(
             IEntityType Type,
             string? Name,

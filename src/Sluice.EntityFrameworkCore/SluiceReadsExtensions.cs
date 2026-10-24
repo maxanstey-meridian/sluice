@@ -99,9 +99,11 @@ public static class SluiceReadsExtensions
 
     /// <summary>
     /// The compute's own <typeparamref name="TContext"/>, set up by <paramref name="configure"/> as
-    /// <see cref="Db{TContext}(SluiceReads, Action{TContext})"/> does, with the compute's own DI scope beside it: the
-    /// scope the context was made in, so the configure can set a scoped service the context reads, such as the
-    /// tenant (<c>(db, services) =&gt; services.GetRequiredService&lt;TenantProvider&gt;().Set(tenantId)</c>).
+    /// <see cref="Db{TContext}(SluiceReads, Action{TContext})"/> does, with the compute's own DI scope beside it, so
+    /// the configure can set a scoped service the context reads, such as the tenant
+    /// (<c>(db, services) =&gt; services.GetRequiredService&lt;TenantProvider&gt;().Set(tenantId)</c>). On a context
+    /// <c>AddDbContext</c> or a scoped factory makes, that's the scope the context was made in, so the service is the one
+    /// it holds; a context leased straight from <c>AddDbContextPool</c> keeps whatever an earlier lease gave it.
     /// </summary>
     /// <remarks>
     /// A query filter may read such a service through a property of the context marked
@@ -224,15 +226,7 @@ public static class SluiceReadsExtensions
             nameof(uniqueColumn)
         );
         ModelSources.EnsureKeyType(property, value, nameof(value), "value");
-        if (ModelSources.UniqueValue(property, value) is null)
-        {
-            throw new ArgumentException(
-                $"The value converter of {entityType.DisplayName()}.{property.Name} stores '{value}' as null, which "
-                    + "a read by value never finds. Read the rows whose column is null with a query on read.Db<TContext>().",
-                nameof(value)
-            );
-        }
-
+        ModelSources.EnsureStored(property, value, nameof(value));
         var query = TrackedReads.Query(set);
 
         read.From(
@@ -266,7 +260,8 @@ public static class SluiceReadsExtensions
     /// <exception cref="ArgumentNullException"><paramref name="principalKey"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="foreignKey"/> doesn't name a single-column foreign key, names it through <c>EF.Property</c> with
-    /// a name that isn't a constant, or <paramref name="principalKey"/> isn't of its CLR type.
+    /// a name that isn't a constant, or <paramref name="principalKey"/> isn't of its CLR type, or its value converter
+    /// stores it as null.
     /// </exception>
     /// <exception cref="NotSupportedException">
     /// <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't relational.
@@ -296,6 +291,7 @@ public static class SluiceReadsExtensions
         );
         var property = resolved.Properties[0];
         ModelSources.EnsureKeyType(property, principalKey, nameof(principalKey));
+        ModelSources.EnsureStored(property, principalKey, nameof(principalKey));
         var query = TrackedReads.Query(set);
 
         read.From(ModelSources.ForeignKey(resolved).For(principalKey));

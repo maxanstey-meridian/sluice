@@ -6,7 +6,8 @@ Three gaps found while planning Casebridge's first cached reads: a tenant filter
 scoped service, a lookup by a unique column, and keys from public input.
 
 - **New: `read.Db<TContext>((db, services) => …)`.** The configure gets the compute's own DI
-  scope too, the one its context was made in, so it can set a scoped service the context reads:
+  scope too (on a context `AddDbContext` or a scoped factory makes, the one it was made in), so
+  it can set a scoped service the context reads:
   `read.Db<AppDb>((db, services) => services.GetRequiredService<TenantProvider>().Set(tenantId))`.
   It runs where `read.Db<TContext>(db => …)` runs (once, on the compute's first
   `read.Db<TContext>`, before any query) and fails the same way. The `db => …` overload stays.
@@ -16,8 +17,9 @@ scoped service, a lookup by a unique column, and keys from public input.
   a compute, exactly as it may read a settable field: only on a configured context, with the
   `-- Sluice reads the context's state: …` comment. Sluice doesn't read the body; the attribute is
   your promise, as the configure is. It must hold a plain value, have a body and not be virtual
-  or abstract (an interface's implementation is fine); it may be private. A marked auto-property
-  is refused. On a context leased straight from `AddDbContextPool`, see the pooling note in the
+  or abstract (an interface's implementation is fine); it may be private. The mark does nothing
+  on an auto-property: a settable one is already accepted, and a get-only or init-only one is
+  still refused. On a context leased straight from `AddDbContextPool`, see the pooling note in the
   guide. Unmarked properties with a body, methods and members of objects the
   context holds are still refused, and the refusal of an unmarked context property now says to
   mark it.
@@ -49,6 +51,10 @@ scoped service, a lookup by a unique column, and keys from public input.
   15.4 KB; without Sluice it's 10.2 µs either way. Cache misses are unchanged within noise
   (`read.Entity` 29.7 → 30.3 µs, a plain query 15.5 → 15.9 µs). A type without unique columns
   pays nothing more.
+- **Fixed: a foreign key its value converter stores as null.** A save of such a row threw while
+  listing what to invalidate, and lost the save's invalidation; it now treats the key as null,
+  as the database does. `read.Children` with such a key throws `ArgumentException` (it threw
+  `InvalidOperationException`).
 
 ## 0.3.0 — breaking
 

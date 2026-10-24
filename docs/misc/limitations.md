@@ -138,7 +138,9 @@ no longer than the entry's duration.
 - **`[SluiceContextState]` is taken on trust.** A filter may read a scoped tenant service
   through a context property marked with it, set by `read.Db<AppDb>((db, services) => …)`.
   Sluice doesn't read the property's body: one that reads anything the configure didn't set
-  caches one caller's rows for everyone with that key. See
+  caches one caller's rows for everyone with that key. On a context leased straight from
+  `AddDbContextPool`, the service the property reads may be an earlier lease's, not the one the
+  configure set. See
   [A tenant read through a scoped service](/guides/strict-reads#a-tenant-read-through-a-scoped-service).
 - **Invalidation isn't per tenant.** A write in one tenant evicts other tenants' cached reads
   of the same entity type, unless they read through `read.Children` on a tenant foreign key.

@@ -221,7 +221,7 @@ What Sluice does check: the filter must read the state where it's stored and whe
 configure can set it: a field that isn't readonly, or an auto-property that isn't virtual and has
 a setter that isn't `init`, of the context, holding a plain value (a string, number, `Guid`, enum or a struct of
 those). A filter that reads it through a tenant service the context holds
-(`i.TenantId == _tenants.TenantId`), a property with a body, a method, a `readonly` field, a
+(`i.TenantId == _tenants.TenantId`), an unmarked property with a body, a method, a `readonly` field, a
 virtual property, or a `{ get; }` or `{ get; init; }` property is refused even on a configured context, since the
 configure can't set it. Copy the value into a settable field or property in the constructor, and
 filter by that, or mark the property, below.
@@ -246,8 +246,8 @@ public sealed class AppDb(DbContextOptions<AppDb> options, TenantProvider tenant
 ```
 
 The configure then sets the service, not the context. Its second argument is the compute's own
-DI scope, the one the context was made in, so on a context `AddDbContext` or a scoped factory
-makes, the service it gets is the one the context holds:
+DI scope. On a context `AddDbContext` or a scoped factory makes, that's the scope the context
+was made in, so the service it gets is the one the context holds:
 
 ```csharp
 read.Db<AppDb>((db, services) => services.GetRequiredService<TenantProvider>().Set(tenantId))
@@ -258,9 +258,10 @@ configure sets". Sluice doesn't read the body. A marked property is treated exac
 settable field: the filter runs only on a configured context, and its queries carry the
 `-- Sluice reads the context's state: …` comment. If the body reads anything else (the clock, a
 static, a value the configure didn't set), one caller's rows are cached for everyone with that
-key. The property must hold a plain value, must have a body (a marked auto-property is refused:
-a settable one needs no mark, and a get-only one holds only what the constructor set) and mustn't
-be virtual or abstract, though an interface's implementation is fine; it may be private. Unmarked properties with a body, methods, and members of objects the context holds
+key. The property must hold a plain value, must have a body and mustn't be virtual or abstract,
+though an interface's implementation is fine; it may be private. The mark does nothing on an
+auto-property: a settable one is already accepted, and a get-only or init-only one is still
+refused, since it holds only what the constructor set. Unmarked properties with a body, methods, and members of objects the context holds
 (`_tenants.TenantId` written straight into the filter) are still refused, and the refusal of an
 unmarked property says how to mark it.
 

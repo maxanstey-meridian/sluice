@@ -223,8 +223,9 @@ public sealed class SluiceReads
     }
 
     // A read captured from another compute would record on that compute (or nowhere, once it has returned) what this
-    // one's value is built from, so this one would be cached without it. The running compute gets the violation, so it
-    // caches nothing even if it catches the exception.
+    // one's value is built from, so this one would be cached without it; its DoNotCache would leave that compute
+    // uncached instead of this one. The running compute gets the violation, so it caches nothing even if it catches
+    // the exception.
     private void ThrowIfAnotherCompute()
     {
         if (ActiveCompute.Reads is { } current && current != this)

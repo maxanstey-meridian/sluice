@@ -242,8 +242,11 @@ public sealed class Bin
     public int Id { get; set; }
     public string WarehouseCode { get; set; } = "";
 
-    /// <summary>Unique, and deleted with its warehouse; its converter stores an empty label as null.</summary>
+    /// <summary>Unique, and deleted with its warehouse.</summary>
     public string? Label { get; set; }
+
+    /// <summary>The warehouse that takes its overflow, if any; its converter stores an empty code as null.</summary>
+    public string? OverflowCode { get; set; }
 }
 
 /// <summary>Written to a table, read through a view, so the read helpers refuse it.</summary>
@@ -743,6 +746,10 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Page>().HasIndex(p => p.Slug).IsUnique().HasFilter("\"Slug\" is not null");
         model.Entity<Page>().HasIndex(p => new { p.Section, p.Number }).IsUnique();
         model.Entity<Page>().Property(p => p.Version).IsRowVersion();
+        model
+            .Entity<Page>()
+            .Property(p => p.Slug)
+            .HasConversion(slug => slug == "" ? null : slug, slug => slug);
         model.Entity<Shipment>().OwnsMany(s => s.Legs);
         model.Entity<Booking>().HasOne<Customer>().WithMany().HasForeignKey(b => b.CustomerId);
         model.Entity<OrderLine>().HasKey(line => new { line.OrderId, line.LineNumber });
@@ -795,8 +802,14 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Bin>().HasIndex(bin => bin.Label).IsUnique();
         model
             .Entity<Bin>()
-            .Property(bin => bin.Label)
-            .HasConversion(label => label == "" ? null : label, label => label);
+            .HasOne<Warehouse>()
+            .WithMany()
+            .HasForeignKey(bin => bin.OverflowCode)
+            .HasPrincipalKey(warehouse => warehouse.Code);
+        model
+            .Entity<Bin>()
+            .Property(bin => bin.OverflowCode)
+            .HasConversion(code => code == "" ? null : code, code => code);
         model
             .Entity<Customer>()
             .HasMany(c => c.Coupons)

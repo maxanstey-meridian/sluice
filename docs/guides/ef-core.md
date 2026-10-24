@@ -217,7 +217,8 @@ uncached with [`read.DoNotCache()`](/guides/sources-and-queries#leaving-a-value-
 - `Entity` doesn't support composite primary keys: it throws `NotSupportedException`. Use
   `Children`, or a plain query.
 - `Children`'s foreign key property may be nullable, but the key you pass can't be null: rows
-  with no parent aren't anyone's children. A null throws `ArgumentNullException`.
+  with no parent aren't anyone's children. A null throws `ArgumentNullException`, and a key its
+  value converter stores as null throws `ArgumentException`.
 - `Children`'s foreign key can be the property (`o => o.CustomerId`), a shadow property named
   by a constant (`o => EF.Property<CustomerId>(o, "CustomerId")`), or a reference navigation to
   the parent (`o => o.Customer`). All three record the same dependency.
