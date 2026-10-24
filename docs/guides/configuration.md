@@ -46,10 +46,11 @@ at its defaults, or call `SetToSafeStrings()` with its default special character
 - a `ClearRemoveTag` or `ClearExpireTag` with a `:` that has a name before it. `a:b` is also
   the tag of source `a`'s key `b`, so invalidating that key would clear the cache on every node.
 
-Every invalidation and clear is also published a second time, 5 s after the first, timed by the
+Every invalidation and clear is also published a second time, 5 to 6 s after the first (those due
+in the same second together, each tag once, on one timer), timed by the
 `TimeProvider` registered in DI (`TimeProvider.System` unless you register one). FusionCache 2.9
 can lose an invalidation that lands while the same server is checking that tag
-(FusionCache#659); the second publish restores it. A value cached in those 5 s is evicted again,
+(FusionCache#659); the second publish restores it. A value cached in between is evicted again,
 so a hot entry is computed once more per invalidation. Disposing the service provider publishes
 whatever is still waiting at once, and waits for it.
 

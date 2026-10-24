@@ -761,6 +761,58 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
         (await reader.NameOf(ada)).Should().Be(commit ? "Ada Lovelace" : "Ada");
     }
 
+    // Npgsql's DbTransaction object belongs to the physical connection, which its pool hands to whichever DbConnection
+    // opens next. A context on this flow still holds the object after the app commits it outside EF and closes the
+    // connection itself; another flow's transaction runs on the object now, and what that has written isn't this
+    // flow's. One physical connection, in a pool of its own, so the other flow's DbConnection gets it.
+    [Fact]
+    public async Task A_DbTransaction_object_Npgsql_hands_to_another_flow_s_connection_does_not_count_that_flow_s_writes_as_pending_here()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        var (ada, bob) = await reader.AddCustomers();
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        var onePhysical = new NpgsqlConnectionStringBuilder(postgres.ConnectionString)
+        {
+            MaxPoolSize = 1,
+            ApplicationName = $"sluice-handover-{Guid.NewGuid():N}",
+        }.ConnectionString;
+        await using var first = new NpgsqlConnection(onePhysical);
+        await using var second = new NpgsqlConnection(onePhysical);
+        await using var earlier = postgres.CreateDb(node, connection: first);
+        await using var later = postgres.CreateDb(node, connection: second);
+        using var flow = SluiceFlow.Begin();
+        await first.OpenAsync();
+        var transaction = await first.BeginTransactionAsync();
+        await earlier.Database.UseTransactionAsync(transaction);
+        await earlier.Rename(ada, "Ada Lovelace");
+        await transaction.CommitAsync();
+        await transaction.DisposeAsync();
+        await first.CloseAsync();
+
+        Task other;
+        using (ExecutionContext.SuppressFlow())
+        {
+            other = Task.Run(async () =>
+            {
+                await second.OpenAsync();
+                await later.Database.BeginTransactionAsync();
+                await later.Rename(bob, "Bob Babbage");
+            });
+        }
+
+        await other;
+        later
+            .Database.CurrentTransaction!.GetDbTransaction()
+            .Should()
+            .BeSameAs(transaction, "Npgsql hands out the physical connection's object again");
+        (await bobRead.WasEvicted())
+            .Should()
+            .BeFalse("the other flow's write isn't this flow's, and hasn't committed");
+        await later.Database.CommitTransactionAsync();
+        (await bobRead.WasEvicted()).Should().BeTrue("the other flow's commit published it");
+    }
+
     // A failed statement aborts a PostgreSQL transaction without ending it: it holds its writes until it's rolled back.
     [Fact]
     public async Task A_failed_statement_in_the_flow_s_transaction_keeps_its_writes_pending()

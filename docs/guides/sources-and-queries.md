@@ -68,9 +68,11 @@ With the EF Core package, the names it gives a model's dependencies are its own:
 `Orders[CustomerId]`, `Pages(Slug)` and the rest are named after tables (see
 [EF Core](/guides/ef-core)). A source of yours with one of those names would have its own key
 text, so a save through EF would miss its readers, and your writes would miss EF's. So it
-throws `ArgumentException`, whichever comes first: declaring your source after EF has used
-that dependency (in a read, a save or `set.Dependency`), or EF's first use of it after you
-declared your source. To invalidate a table's
+is refused, whichever comes first. Declaring your source throws `ArgumentException` once the
+model has claimed the name: in a read, `set.Dependency`, or a save or bulk write, which claims
+every name of the model, whatever table it writes. Declared first, your source makes the model's
+first use throw instead: a read or a bulk write the `ArgumentException`, a save a
+`DbUpdateException` wrapping it. To invalidate a table's
 dependencies after a write Sluice can't see, use `set.Dependency(key)` or
 `set.AllDependencies()` on its `DbSet`.
 
@@ -287,7 +289,9 @@ then stop evicting each other's entries until those entries expire.
 
 The constructors check names and key types, and throw `ArgumentException`. Declarations are
 `static readonly` fields, so that happens the first time the class is used, wrapped in a
-`TypeInitializationException`. One test per declaring class finds it first:
+`TypeInitializationException`. One test per declaring class finds it first (a clash with an EF
+dependency's name shows only once the model has been used too, so a test that also saves through
+each context finds that):
 
 ```csharp
 [Fact]

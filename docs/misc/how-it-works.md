@@ -21,7 +21,7 @@ Sluice maps each dependency to a pair of tags. For a source named `n` and a key 
 
 So invalidating a key evicts readers of that key and readers of the whole source; invalidating
 the whole source evicts every reader of anything in it. Every tag contains `:`, and Sluice refuses a
-clear tag with `:` after its first character, so none can collide with FusionCache's own clear
+clear tag with `:` after a non-blank start (`a:b`, not `:rem`), so none can collide with FusionCache's own clear
 markers. Two sources whose tags happen to coincide only
 share evictions.
 
@@ -49,8 +49,9 @@ memory write, the distributed write and the backplane message, and returns. `Get
 throws once FusionCache returns. The EF package's strict-read checks use the same route, so a
 compute that catches their exception still caches nothing. `read.DoNotCache()` takes the same
 route, skipping the three writes, but hands the value back instead of throwing. A package can
-also add a store check to the cache, run on every value about to be stored; the EF package's
-refuses one holding a lazy loader or a `DbContext`, and a refusal takes the guards' route too.
+also register a store check with the app's services, which the cache takes when it's built and
+runs on every value about to be stored; the EF package's refuses one holding a lazy loader or a
+`DbContext`, and a refusal takes the guards' route too.
 
 A compute also runs outside the caller's ambient transaction (`TransactionScope`), so a
 connection it opens can't see the caller's uncommitted rows. And it can hold resources for its
@@ -89,8 +90,10 @@ concurrently. With a distributed cache, each removal is a write to it and a back
 It takes no cancellation token and passes none, so an aborted request still invalidates.
 `Invalidate` is the same, synchronously, one tag at a time.
 
-Then it schedules the same removal again, 5 s later, on the `TimeProvider` registered in DI
-(`ClearAsync` does the same with its clear). FusionCache 2.9 writes a tag's marker without the
+Then it schedules the same removal again, on the `TimeProvider` registered in DI (`ClearAsync`
+does the same with its clear): in the window due at the first whole second at least 5 s ahead,
+timed on the provider's steady clock, so 5 to 6 s later. A window has one timer and a
+de-duplicated set of tags, published together when it fires. FusionCache 2.9 writes a tag's marker without the
 lock its tag check holds, so an invalidation landing in the middle of a check on the same server
 can be overwritten by what the check read (FusionCache#659). The check that won leaves its
 marker in memory, so the second removal sticks, unless a check's distributed cache read on that
@@ -142,8 +145,9 @@ Recording what a query reads is one EF interceptor for the whole process:
 
 A context without `UseSluice` has no Sluice interceptor, so the package also listens to EF's
 diagnostic events, which EF raises for every context, from `AddSluiceEntityFrameworkCore` on:
-inside a compute, a command on such a context throws when it's initialised, a write anywhere
-and a read outside a fused fetch.
+inside a compute, a command on such a context throws when it's initialised: a write anywhere,
+a read outside a fused fetch, and a read in one inside a transaction. A command with no context
+at all (a provider's own, such as a sequence generator's) throws anywhere inside a compute.
 
 `read.Entity` and `read.Children` record a narrower dependency, one row (by key, or by a unique
 column's value) or one parent's rows, then return the set as a no-tracking query with

@@ -71,6 +71,26 @@ internal readonly record struct ContextTransaction(
         }
     }
 
+    /// <summary>
+    /// Whether <paramref name="transaction"/> runs on <paramref name="connection"/>, as the provider has it now. A
+    /// provider may hand the <see cref="DbTransaction"/> object to another connection: Npgsql's belongs to the physical
+    /// connection, which its pool hands to whichever <see cref="DbConnection"/> opens next. So a context whose
+    /// connection the app closed and opened again itself, which EF raises no event for, may still hold the object
+    /// another connection's transaction runs on, and the context's commands run outside it.
+    /// </summary>
+    internal static bool On(DbTransaction transaction, DbConnection connection)
+    {
+        try
+        {
+            return ReferenceEquals(transaction.Connection, connection);
+        }
+        catch (InvalidOperationException)
+        {
+            // ObjectDisposedException included: the provider disposed it.
+            return false;
+        }
+    }
+
     /// <summary>Whether <paramref name="transaction"/> can still commit: it hasn't completed or been disposed.</summary>
     internal static bool Active(Transaction transaction)
     {

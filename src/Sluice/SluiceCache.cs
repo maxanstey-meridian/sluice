@@ -18,11 +18,12 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
 {
     internal const string CacheName = "sluice";
 
-    // How long after an invalidation or clear it's published again. FusionCache 2.9 writes a tag's marker without the
-    // lock its tag check holds, and the check writes what it read unconditionally, so an invalidation landing inside a
-    // check on the same node is overwritten (FusionCache#659). The losing check leaves its marker in memory, so a
-    // second publish sticks unless another check's distributed-cache read outlasts the delay: 5 s is StackExchange.Redis's
-    // default timeout, so such a read has failed by then.
+    // How long after an invalidation or clear it's published again, at least. FusionCache 2.9 writes a tag's marker
+    // without the lock its tag check holds, and the check writes what it read unconditionally, so an invalidation landing
+    // inside a check on the same node is overwritten (FusionCache#659). The losing check leaves its marker in memory, so
+    // a second publish sticks unless another check's distributed-cache read outlasts the delay: 5 s is
+    // StackExchange.Redis's default timeout, so such a read has failed by then. Re-publishes are batched by the whole
+    // second they're due at (see PublishAgainLater), so each waits up to a second more.
     internal static readonly TimeSpan RepublishDelay = TimeSpan.FromSeconds(5);
 
     private readonly IFusionCache _cache;
@@ -33,10 +34,13 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     private volatile Func<Transaction, IReadOnlyCollection<Dependency>>? _ambientWrites;
     private readonly Func<object, Exception?>[] _storeChecks;
 
-    // Cancelled on dispose, which ends every re-publish's wait at once. Each re-publish waiting or running, completed
-    // when it has, so dispose can wait for them before FusionCache is disposed after it.
-    private readonly CancellationTokenSource _disposing = new();
-    private readonly HashSet<Task> _republishing = [];
+    // Each re-publish window waiting or publishing, removed once it has published, so dispose can fire them and wait
+    // for them before FusionCache is disposed after it; the latest, which an invalidation due at the same second joins
+    // until it fires; and whether dispose has begun, after which a window opened fires at once. All guarded by locking
+    // the set.
+    private readonly HashSet<RepublishWindow> _republishing = [];
+    private RepublishWindow? _joinable;
+    private bool _disposed;
 
     internal SluiceCache(
         IFusionCache cache,
@@ -276,8 +280,9 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     /// cache write that fails doesn't make this throw: FusionCache writes the tag again once the cache is back
     /// (auto-recovery). A slow one makes this wait, since FusionCache puts no timeout on writes, so bound it with the
     /// Redis client's own timeout and FusionCache's circuit breakers. Once it returns, the invalidation is published
-    /// again 5 s later in the background, since FusionCache 2.9 can lose one that lands while the same server checks
-    /// those dependencies; a value cached in between is evicted again, and disposing the cache publishes it at once.
+    /// again 5 to 6 s later in the background, in one batch with every other invalidation and clear due in the same
+    /// second, since FusionCache 2.9 can lose one that lands while the same server checks those dependencies; a value
+    /// cached in between is evicted again, and disposing the cache publishes it at once.
     /// </remarks>
     public async ValueTask InvalidateAsync(IEnumerable<Dependency> dependencies)
     {
@@ -288,7 +293,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         }
 
         await RemoveByTagsAsync(tags).ConfigureAwait(false);
-        PublishAgainLater(() => RemoveByTagsAsync(tags));
+        PublishAgainLater(tags, clear: false);
     }
 
     /// <summary>The synchronous twin of <see cref="InvalidateAsync(IEnumerable{Dependency})"/>.</summary>
@@ -303,19 +308,19 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         }
 
         _cache.RemoveByTag(tags);
-        PublishAgainLater(() => RemoveByTagsAsync(tags));
+        PublishAgainLater(tags, clear: false);
     }
 
     /// <summary>Evicts everything Sluice cached.</summary>
     /// <param name="ct">Cancels the clear.</param>
     /// <remarks>
-    /// Once it returns, the clear is published again 5 s later in the background, as an invalidation is (see
+    /// Once it returns, the clear is published again 5 to 6 s later in the background, as an invalidation is (see
     /// <see cref="InvalidateAsync(IEnumerable{Dependency})"/>), so a value cached in between is evicted too.
     /// </remarks>
     public async ValueTask ClearAsync(CancellationToken ct = default)
     {
         await _cache.ClearAsync(allowFailSafe: false, token: ct).ConfigureAwait(false);
-        PublishAgainLater(() => _cache.ClearAsync(allowFailSafe: false).AsTask());
+        PublishAgainLater([], clear: true);
     }
 
     /// <summary>
@@ -324,14 +329,22 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        await _disposing.CancelAsync().ConfigureAwait(false);
-        Task[] republishing;
+        // Marked under the lock that opens windows, so each is either fired here or fired by its opener.
+        RepublishWindow[] windows;
         lock (_republishing)
         {
-            republishing = [.. _republishing];
+            _disposed = true;
+            windows = [.. _republishing];
         }
 
-        await Task.WhenAll(republishing).ConfigureAwait(false);
+        foreach (var window in windows)
+        {
+            window.Timer?.Dispose();
+            window.Fire();
+        }
+
+        // Each window's own publish, so a failure in one would reach this dispose rather than go unobserved.
+        await Task.WhenAll(windows.Select(window => window.Publishing)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -341,49 +354,99 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
 
     // FusionCache's multi-tag overload removes one tag at a time, so run them side by side.
-    private Task RemoveByTagsAsync(List<string> tags) =>
+    private Task RemoveByTagsAsync(IEnumerable<string> tags) =>
         Task.WhenAll(
             tags.Select(tag => _cache.RemoveByTagAsync(tag, token: CancellationToken.None).AsTask())
         );
 
-    // Publishes again after the delay, or at once when the cache is disposed (or already is). Nothing awaits it but
-    // dispose, so every failure ends here, and no faulted task is left unobserved: FusionCache logs a failed write.
-    private void PublishAgainLater(Func<Task> publish)
+    // Adds the tags, or the clear, to the window due at the first whole second at least the delay from now, opening it
+    // if no invalidation has yet: one timer and one de-duplicated tag set per second, however many invalidations. Timed
+    // on the monotonic timestamp, not the wall clock, which can step back and shorten a joiner's wait below the delay.
+    private void PublishAgainLater(IEnumerable<string> tags, bool clear)
     {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var second = _time.TimestampFrequency;
+        var now = _time.GetTimestamp();
+        var due =
+            (now + RepublishDelay.Ticks * second / TimeSpan.TicksPerSecond + second - 1)
+            / second
+            * second;
+        RepublishWindow? openedAfterDispose = null;
         lock (_republishing)
         {
-            _republishing.Add(done.Task);
+            if (_joinable?.Due != due)
+            {
+                _joinable = Open(due, _time.GetElapsedTime(now, due));
+                openedAfterDispose = _disposed ? _joinable : null;
+            }
+
+            _joinable.Tags.UnionWith(tags);
+            _joinable.Clear |= clear;
         }
 
-        // It outlives the call, so it mustn't hold the caller's async state (its request, transaction or trace) for
-        // the delay. Started on this thread, so its timer exists when the call returns.
+        // Outside the lock, since the publish runs on the thread that fires it.
+        openedAfterDispose?.Fire();
+    }
+
+    // The window outlives the call that opened it, so neither its timer nor its wait holds that caller's async state
+    // (its request, transaction or trace). Its timer exists when the call returns; none once the cache is disposed.
+    private RepublishWindow Open(long due, TimeSpan delay)
+    {
+        var window = new RepublishWindow(due);
         if (ExecutionContext.IsFlowSuppressed())
         {
-            _ = PublishAgainAsync(publish, done);
-            return;
+            Start(window, delay);
+        }
+        else
+        {
+            using (ExecutionContext.SuppressFlow())
+            {
+                Start(window, delay);
+            }
         }
 
-        using (ExecutionContext.SuppressFlow())
+        _republishing.Add(window);
+        return window;
+    }
+
+    private void Start(RepublishWindow window, TimeSpan delay)
+    {
+        window.Publishing = RepublishAsync(window);
+        if (!_disposed)
         {
-            _ = PublishAgainAsync(publish, done);
+            // Rounded up to a whole millisecond, as the system timer counts, so it never fires early.
+            window.Timer = _time.CreateTimer(
+                static state => ((RepublishWindow)state!).Fire(),
+                window,
+                TimeSpan.FromMilliseconds(Math.Ceiling(delay.TotalMilliseconds)),
+                Timeout.InfiniteTimeSpan
+            );
         }
     }
 
-    private async Task PublishAgainAsync(Func<Task> publish, TaskCompletionSource done)
+    // Publishes the window's tags and clear once its timer or dispose fires it. Nothing awaits it but dispose, so every
+    // failure ends here: FusionCache has logged a failed write, or was disposed first, at shutdown.
+    private async Task RepublishAsync(RepublishWindow window)
     {
+        await window.Fired.ConfigureAwait(false);
+
+        // Closed to joiners under the lock, so its tags and clear are final once it's released.
+        lock (_republishing)
+        {
+            if (_joinable == window)
+            {
+                _joinable = null;
+            }
+        }
+
         try
         {
-            try
-            {
-                await Task.Delay(RepublishDelay, _time, _disposing.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // Disposing: publish now.
-            }
-
-            await publish().ConfigureAwait(false);
+            await Task.WhenAll(
+                    RemoveByTagsAsync(window.Tags),
+                    window.Clear
+                        ? _cache.ClearAsync(allowFailSafe: false).AsTask()
+                        : Task.CompletedTask
+                )
+                .ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -393,11 +456,32 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         {
             lock (_republishing)
             {
-                _republishing.Remove(done.Task);
+                _republishing.Remove(window);
             }
-
-            done.SetResult();
         }
+    }
+
+    // The re-publishes due at one whole second: every invalidation and clear in the second that ends the delay before
+    // it, published again together.
+    private sealed class RepublishWindow(long due)
+    {
+        // Completed by the timer or by dispose, whichever is first. Its continuations run on that thread, so the
+        // publish starts there, as soon as the window is due.
+        private readonly TaskCompletionSource _fired = new();
+
+        public long Due { get; } = due;
+
+        public HashSet<string> Tags { get; } = new(StringComparer.Ordinal);
+
+        public bool Clear { get; set; }
+
+        public ITimer? Timer { get; set; }
+
+        public Task Publishing { get; set; } = Task.CompletedTask;
+
+        public Task Fired => _fired.Task;
+
+        public void Fire() => _fired.TrySetResult();
     }
 
     private FusionCacheEntryOptions OptionsFor(string name, TimeSpan? duration, long? size)

@@ -194,11 +194,11 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         return result;
     }
 
-    // A write, anywhere in a compute, whoever built it. Outside a fused fetch, a command with no context, or from a
-    // context the compute didn't get from read.Db, or that isn't a query Sluice analysed, or whose reads it couldn't
-    // work out; otherwise its reads are recorded. ForeignContexts sees a command with no context first, and refuses it
-    // the same way. Then any read inside a transaction, where a compute would cache rows other callers can't see yet,
-    // or an old snapshot under RepeatableRead or Serializable. The transaction is read as the write side reads it, from
+    // A command with no context is ForeignContexts' to refuse, which sees it first, a fused fetch included. Otherwise a
+    // write, anywhere in a compute. Outside a fused fetch, a command from a context the compute didn't get from
+    // read.Db, or that isn't a query Sluice analysed, or whose reads it couldn't work out; otherwise its reads are
+    // recorded. Then any read inside a transaction, where a compute would cache rows other callers can't see yet, or
+    // an old snapshot under RepeatableRead or Serializable. The transaction is read as the write side reads it, from
     // EF's own inputs: the command's own transaction would miss an enlisted or ambient one.
     private static InvalidOperationException? Read(
         SluiceReads reads,
@@ -206,19 +206,18 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         CommandEventData eventData
     )
     {
+        if (eventData.Context is not { } context)
+        {
+            return null;
+        }
+
         if (IsWrite(eventData.CommandSource))
         {
             return WriteInCompute(command);
         }
 
-        var context = eventData.Context;
         if (!ActiveCompute.InFetch(reads))
         {
-            if (context is null)
-            {
-                return NotALinqQuery(command);
-            }
-
             var configured = ComputeContexts.StateOf(reads, context);
             if (configured == ComputeContext.Foreign)
             {
@@ -288,7 +287,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             }
         }
 
-        if (context is not null && !ContextTransaction.Of(context).IsNone)
+        if (!ContextTransaction.Of(context).IsNone)
         {
             return InTransaction();
         }

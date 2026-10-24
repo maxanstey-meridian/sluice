@@ -20,7 +20,7 @@ invalidation has run.
 | with no transaction (EF's implicit one, or autocommit) | before `SaveChanges` returns |
 | in `BeginTransaction` | when `Commit` or `Rollback` runs, on whichever context calls it |
 | in a `TransactionScope`, or `Database.EnlistTransaction` | when the transaction completes, whatever the outcome |
-| in a transaction disposed without commit or rollback | when it's disposed |
+| in a transaction disposed without commit or rollback | when it's disposed, if EF began it; else when Sluice next looks |
 | in a `DbTransaction` you commit or roll back outside EF | late: when Sluice next looks (see below). Commit through EF |
 
 A rollback invalidates too, as does a save that fails, is cancelled or hits a concurrency
@@ -38,7 +38,8 @@ EF raises no event when you call `Commit()` or `Rollback()` on the `DbTransactio
 (`db.Database.CurrentTransaction.GetDbTransaction()`). So Sluice notices the transaction has
 ended the next time it looks: at the flow's next cached read (on a flow that called
 `SluiceFlow.Begin()`), the context's next command, a write completing in it, the transaction
-being disposed (EF disposes it with the context, too), or its connection beginning another
+being disposed, if EF began it (EF disposes it with the context, too; one you pass in with
+`UseTransaction` isn't seen being disposed), or its connection beginning another
 transaction, opening, closing or being disposed, whichever comes first. Until then, a read can
 cache the old value again. A transaction disposed without commit or rollback looks the same to
 Sluice as one committed outside EF, so it's invalidated too, which only evicts more than it
@@ -93,8 +94,8 @@ attempt's writes roll back with it, or are invalidated anyway if its commit fail
 Several contexts can share one transaction. Every context that saves must use `UseSluice` with
 the same `SluiceCache`, so its saves are captured. Then:
 
-- **`UseTransaction`**: the context that calls `Commit` or `Rollback` must use `UseSluice` with
-  that cache too. It invalidates what all of them saved.
+- **`UseTransaction`**: the context that calls `Commit` or `Rollback` needn't use `UseSluice`;
+  the commit or rollback invalidates what every `UseSluice` context saved in it.
 - **One `TransactionScope`**: no context commits. Each saving context invalidates its own saves
   when the scope completes.
 
@@ -139,6 +140,4 @@ after calling `SluiceFlow.Begin()`.
   lives until its entry expires. That's deliberate: Sluice keeps no outbox, so the entry's
   duration bounds it. An app that needs more can record what it wrote in its own outbox, in the
   same transaction, and call `InvalidateAsync` from the outbox's handler.
-- A save on a context without `UseSluice` isn't seen. A commit on one, of a transaction a
-  `UseSluice` context shares through `UseTransaction`, is invalidated late, like a commit outside
-  EF.
+- A save on a context without `UseSluice` isn't seen.

@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -98,7 +99,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         (await bobRead.WasEvicted())
             .Should()
             .BeTrue(
-                "the inner transaction never committed, but disposing it closed its connection, which publishes "
+                "the inner transaction never committed, but disposing it publishes "
                     + "what it held in case it was committed outside EF; that only over-invalidates"
             );
     }
@@ -391,24 +392,30 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await transaction.DisposeAsync();
         (await bobRead.WasEvicted())
             .Should()
-            .BeFalse(
-                "closing the transaction's connection found nothing of the leftover left on the ended transaction"
-            );
+            .BeFalse("disposing the transaction found nothing of the leftover left on it");
     }
 
     public enum Abandoned
     {
-        // Disposing the transaction closes the connection EF opened for it.
+        // EF began it, so disposing it raises EF's disposed event, which publishes, and closes the connection EF opened
+        // for it.
         TransactionDisposed,
 
-        // Disposing the context closes the connection the app opened without an event, then disposes it.
+        // Passed in with UseTransaction, which EF raises no disposed event for. Disposing the context closes the
+        // connection the app opened through EF without an event, then disposes it.
         ContextDisposed,
 
-        // Returning a pooled context closes the connection the app opened without an event; its next lease opens it.
+        // Passed in with UseTransaction. Returning a pooled context closes the connection the app opened through EF
+        // without an event; its next lease opens it.
         PooledContextLeasedAgain,
 
-        // Disposing a context on a connection the app created closes nothing; EF only disposes its transaction.
+        // EF began it, on a connection the app created: disposing the context closes nothing, and EF only disposes its
+        // transaction, raising its disposed event.
         ContextDisposedOnTheAppsConnection,
+
+        // Passed in with UseTransaction, on a connection the app created, which it closes and opens again itself; then
+        // the context joins the connection's next transaction.
+        AnotherTransactionUsed,
     }
 
     [Theory]
@@ -420,7 +427,9 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     [InlineData(Abandoned.PooledContextLeasedAgain, true)]
     [InlineData(Abandoned.ContextDisposedOnTheAppsConnection, false)]
     [InlineData(Abandoned.ContextDisposedOnTheAppsConnection, true)]
-    public async Task A_transaction_committed_outside_EF_and_left_is_evicted_when_EF_closes_reopens_or_disposes_its_connection(
+    [InlineData(Abandoned.AnotherTransactionUsed, false)]
+    [InlineData(Abandoned.AnotherTransactionUsed, true)]
+    public async Task A_transaction_committed_outside_EF_and_left_is_evicted_when_it_is_disposed_or_EF_opens_disposes_or_joins_another_on_its_connection(
         Abandoned abandoned,
         bool sync
     )
@@ -435,16 +444,17 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         var adaRead = await CachedRead.Customer(node.Cache, ada);
         var pool = node.Services.GetRequiredService<IDbContextFactory<ShopDb>>();
         await using var connection = new NpgsqlConnection(postgres.ConnectionString);
+        var appsConnection =
+            abandoned
+            is Abandoned.ContextDisposedOnTheAppsConnection
+                or Abandoned.AnotherTransactionUsed;
         var db = abandoned switch
         {
             Abandoned.PooledContextLeasedAgain => await pool.CreateDbContextAsync(),
-            Abandoned.ContextDisposedOnTheAppsConnection => postgres.CreateDb(
-                node,
-                connection: connection
-            ),
+            _ when appsConnection => postgres.CreateDb(node, connection: connection),
             _ => postgres.CreateDb(node),
         };
-        if (abandoned is Abandoned.ContextDisposedOnTheAppsConnection)
+        if (appsConnection)
         {
             await connection.OpenAsync();
         }
@@ -453,27 +463,162 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
             await db.Database.OpenConnectionAsync();
         }
 
-        var transaction = await db.Database.BeginTransactionAsync();
+        IDbContextTransaction? owned = null;
+        DbTransaction transaction;
+        if (
+            abandoned
+            is Abandoned.TransactionDisposed
+                or Abandoned.ContextDisposedOnTheAppsConnection
+        )
+        {
+            owned = await db.Database.BeginTransactionAsync();
+            transaction = owned.GetDbTransaction();
+        }
+        else
+        {
+            transaction = await db.Database.GetDbConnection().BeginTransactionAsync();
+            await db.Database.UseTransactionAsync(transaction);
+        }
+
         await db.Rename(ada, "Ada Lovelace");
-        await transaction.GetDbTransaction().CommitAsync();
+        await transaction.CommitAsync();
         (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
 
         if (abandoned is Abandoned.TransactionDisposed)
         {
-            await Dispose(transaction, sync);
+            await Dispose(owned!, sync);
+        }
+
+        if (abandoned is Abandoned.AnotherTransactionUsed)
+        {
+            // Closing unbinds the committed transaction from the physical connection, so Npgsql begins a new object.
+            await connection.CloseAsync();
+            await connection.OpenAsync();
+            await using var next = await connection.BeginTransactionAsync();
+            next.Should().NotBeSameAs(transaction);
+            if (sync)
+            {
+                db.Database.UseTransaction(next);
+            }
+            else
+            {
+                await db.Database.UseTransactionAsync(next);
+            }
+
+            (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+            (await adaRead.WasEvicted())
+                .Should()
+                .BeTrue("the context joined the connection's next transaction");
+            await Dispose(db, sync);
+            return;
         }
 
         await Dispose(db, sync);
         if (abandoned is Abandoned.PooledContextLeasedAgain)
         {
+            (await adaRead.WasEvicted())
+                .Should()
+                .BeFalse("returning the context closed its connection without an event");
             await using var next = await pool.CreateDbContextAsync();
             next.ContextId.InstanceId.Should()
                 .Be(db.ContextId.InstanceId, "the pool hands out the same instance");
-            await next.NameOf(ada);
+
+            // Opened by hand, so nothing closes it before the read.
+            await next.Database.OpenConnectionAsync();
+            (await adaRead.WasEvicted()).Should().BeTrue("the next lease opened the connection");
+            return;
         }
 
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
         (await adaRead.WasEvicted()).Should().BeTrue();
+    }
+
+    // Npgsql's DbTransaction object belongs to the physical connection, and its pool hands that to whichever
+    // DbConnection opens next, so one object runs a transaction on one DbConnection, and then the next on another.
+    // Here the first is committed and disposed outside EF, on a connection the app closes itself, so nothing has
+    // published it when the object begins again on the second DbConnection, through EF or with UseTransaction, which
+    // publishes it. The second transaction's write is published only when it commits, not when the first DbConnection
+    // is disposed. The first context still holds the object when the app opens its connection again, on another
+    // physical connection, so its save runs outside the transaction, commits at once, and publishes at once, leaving
+    // the second transaction's write to its commit.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_DbTransaction_object_Npgsql_hands_to_another_connection_publishes_what_it_held_when_it_begins_there_and_its_next_write_only_when_that_commits(
+        bool joined
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        // A pool of its own, empty, so the only idle physical connection is the one the first DbConnection left.
+        var twoPhysical = new NpgsqlConnectionStringBuilder(postgres.ConnectionString)
+        {
+            MaxPoolSize = 2,
+            ApplicationName = $"sluice-handover-{Guid.NewGuid():N}",
+        }.ConnectionString;
+        await using var first = new NpgsqlConnection(twoPhysical);
+        await using var second = new NpgsqlConnection(twoPhysical);
+
+        // The first context owns its connection, so disposing it disposes the connection, which EF raises an event
+        // for, without opening it.
+        var earlier = new ShopDb(
+            new DbContextOptionsBuilder<ShopDb>()
+                .UseNpgsql(first, contextOwnsConnection: true)
+                .UseSluice(node.Services)
+                .Options
+        );
+        await first.OpenAsync();
+        var transaction = await first.BeginTransactionAsync();
+        await earlier.Database.UseTransactionAsync(transaction);
+        await earlier.Rename(ada, "Ada Lovelace");
+        await transaction.CommitAsync();
+        await transaction.DisposeAsync();
+        await first.CloseAsync();
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
+
+        await second.OpenAsync();
+        await using var later = postgres.CreateDb(node, connection: second);
+        if (joined)
+        {
+            await later.Database.UseTransactionAsync(await second.BeginTransactionAsync());
+        }
+        else
+        {
+            await later.Database.BeginTransactionAsync();
+        }
+
+        later
+            .Database.CurrentTransaction!.GetDbTransaction()
+            .Should()
+            .BeSameAs(transaction, "Npgsql hands out the physical connection's object again");
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the object began again, so the transaction it held had ended");
+        await later.Rename(bob, "Bob Babbage");
+
+        await first.OpenAsync();
+        earlier.Database.AutoSavepointsEnabled = false;
+        await earlier.Rename(ada, "Ada Byron");
+        (await reader.NameOf(ada)).Should().Be("Ada Byron", "the save ran outside the transaction");
+        (await adaRead.WasEvicted()).Should().BeTrue("the save committed at once");
+        (await bobRead.WasEvicted())
+            .Should()
+            .BeFalse("the save left the second connection's transaction what it holds");
+
+        await earlier.DisposeAsync();
+        (await bobRead.WasEvicted())
+            .Should()
+            .BeFalse("the transaction on the second connection hasn't committed");
+        await later.Database.CommitTransactionAsync();
+
+        (await reader.NameOf(bob)).Should().Be("Bob Babbage");
+        (await bobRead.WasEvicted()).Should().BeTrue("the commit published the write");
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeFalse("the commit didn't publish the first transaction again");
     }
 
     private static async Task Dispose(IAsyncDisposable disposable, bool sync)
@@ -512,26 +657,59 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
             .And.Contain("1 rows");
     }
 
-    [Fact]
-    public async Task A_save_on_a_context_sharing_another_context_s_transaction_is_evicted_when_it_commits()
+    // The context that ends the transaction may have no UseSluice: EF raises its commit and rollback events for every
+    // context, and Sluice listens. One that has UseSluice saves before the other joins, which keeps what the
+    // transaction has pending for its commit.
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public async Task A_save_on_a_context_sharing_another_context_s_transaction_is_evicted_when_the_transaction_ends_whichever_context_ends_it(
+        bool ownerUsesSluice,
+        bool rollBack
+    )
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
-        var (ada, _) = await reader.AddCustomers();
+        var (ada, bob) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
         await using var connection = new NpgsqlConnection(postgres.ConnectionString);
         await connection.OpenAsync();
 
-        await using var owner = postgres.CreateDb(node, connection: connection);
+        await using var owner = ownerUsesSluice
+            ? postgres.CreateDb(node, connection: connection)
+            : postgres.CreateDb(connection: connection);
         await using var guest = postgres.CreateDb(node, connection: connection);
         await using var transaction = await owner.Database.BeginTransactionAsync();
+        if (ownerUsesSluice)
+        {
+            await owner.Rename(ada, "Ada Lovelace");
+        }
+
         await guest.Database.UseTransactionAsync(transaction.GetDbTransaction());
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeFalse("the guest joined the transaction, which hasn't committed");
 
-        await guest.Rename(ada, "Ada Lovelace");
-        (await adaRead.WasEvicted()).Should().BeFalse("the transaction hasn't committed");
+        await guest.Rename(bob, "Bob Babbage");
+        (await bobRead.WasEvicted()).Should().BeFalse("the transaction hasn't committed");
 
-        await transaction.CommitAsync();
-        (await adaRead.WasEvicted()).Should().BeTrue();
+        if (rollBack)
+        {
+            await transaction.RollbackAsync();
+        }
+        else
+        {
+            await transaction.CommitAsync();
+        }
+
+        (await reader.NameOf(bob)).Should().Be(rollBack ? "Bob" : "Bob Babbage");
+        (await bobRead.WasEvicted()).Should().BeTrue();
+        if (ownerUsesSluice)
+        {
+            (await adaRead.WasEvicted()).Should().BeTrue();
+        }
     }
 
     [Theory]

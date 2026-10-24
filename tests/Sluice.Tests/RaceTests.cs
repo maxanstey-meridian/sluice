@@ -2,11 +2,14 @@ using System.Transactions;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Sluice.Infrastructure;
 using Sluice.Tests.Support;
 using ZiggyCreatures.Caching.Fusion;
+using ZiggyCreatures.Caching.Fusion.Events;
 
 namespace Sluice.Tests;
 
@@ -18,7 +21,7 @@ public sealed class RaceTests
     // Sluice's re-publish delay (SluiceCache.RepublishDelay).
     private static readonly TimeSpan _republishDelay = TimeSpan.FromSeconds(5);
 
-    private readonly FakeTimeProvider _time = new();
+    private readonly SystemLikeClock _time = new();
 
     private readonly Dictionary<int, string> _data = new() { [1] = "old", [2] = "other" };
     private readonly TaskCompletionSource _reading = new(
@@ -189,15 +192,7 @@ public sealed class RaceTests
         node.Fusion.Events.Clear += Count;
         try
         {
-            // On a flow of its own, as a real timer fires: a re-publish resumes on the thread that advanced the clock,
-            // so advancing it from the test's flow would lend the re-publish the test's async state.
-            Task advancing;
-            using (ExecutionContext.SuppressFlow())
-            {
-                advancing = Task.Run(() => _time.Advance(by));
-            }
-
-            await advancing;
+            await AdvanceAsATimerAsync(by);
             await published.Task.WaitAsync(TimeSpan.FromSeconds(10));
         }
         finally
@@ -205,6 +200,22 @@ public sealed class RaceTests
             node.Fusion.Events.RemoveByTag -= Count;
             node.Fusion.Events.Clear -= Count;
         }
+    }
+
+    // Advances the clock on a pool thread with a flow of its own, as a real timer fires. A re-publish runs on the thread
+    // that fires its window, so advancing from the test's flow would lend it the test's async state; and the test's
+    // thread has xUnit's synchronization context, which makes it run on another thread instead, maybe after this returns.
+    // From a pool thread it runs inside the advance, so with in-memory caches, whose writes complete at once, whatever
+    // the clock made due has been published when this returns, and a read after it sees a re-publish that came early.
+    private async Task AdvanceAsATimerAsync(TimeSpan by)
+    {
+        Task advancing;
+        using (ExecutionContext.SuppressFlow())
+        {
+            advancing = Task.Run(() => _time.Advance(by));
+        }
+
+        await advancing;
     }
 
     // FusionCache 2.9 (FusionCache#659): a tag check re-reads the tag's marker under its lock and then writes what it
@@ -281,7 +292,7 @@ public sealed class RaceTests
         }
 
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#2");
-        _time.Advance(_republishDelay - TimeSpan.FromTicks(1));
+        await AdvanceAsATimerAsync(_republishDelay - TimeSpan.FromTicks(1));
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#2", "the delay hasn't passed");
 
         // The key's tag and the whole-source readers' tag.
@@ -290,7 +301,7 @@ public sealed class RaceTests
             .Should()
             .Be("k#3", "the value cached in between was evicted");
 
-        _time.Advance(_republishDelay);
+        await AdvanceAsATimerAsync(_republishDelay);
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#3", "it's published again once");
     }
 
@@ -311,13 +322,10 @@ public sealed class RaceTests
         await a.Cache.InvalidateAsync(_rows.For(1));
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#2");
 
+        // Bounded, so a dispose that waits for the delay fails rather than hangs.
         Func<Task> dispose = asynchronously
-            ? () => a.DisposeAsync().AsTask()
-            : () =>
-            {
-                a.Dispose();
-                return Task.CompletedTask;
-            };
+            ? () => a.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10))
+            : () => Task.Run(a.Dispose).WaitAsync(TimeSpan.FromSeconds(10));
 
         await dispose.Should().NotThrowAsync();
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#3");
@@ -353,60 +361,164 @@ public sealed class RaceTests
         seen.Should().Equal((null, null), (null, null));
     }
 
-    // Nothing awaits a re-publish but dispose, so one that fails must end in Sluice: the dispose doesn't throw, and no
-    // faulted task is left for the finalizer to report as unobserved.
+    // A cache disposed without its provider, so FusionCache outlives it: an invalidation then publishes again at once,
+    // with no clock to wait on, even one due in the same second as one the dispose published, whose window is closed.
+    [Fact]
+    public async Task An_invalidation_after_dispose_is_published_again_at_once()
+    {
+        await using var node = new SluiceNode(services: OnFakeTime);
+        var tags = 0;
+        var republished = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+        node.Fusion.Events.RemoveByTag += (_, _) =>
+        {
+            // Each invalidation's key tag and whole-source readers' tag, published and then published again.
+            if (Interlocked.Increment(ref tags) == 8)
+            {
+                republished.TrySetResult();
+            }
+        };
+
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        await node.Cache.DisposeAsync();
+        await node.Cache.InvalidateAsync(_rows.For(2));
+
+        await republished.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    // Dispose awaits each window's publish, so a failing one must end in Sluice: the dispose doesn't throw, and the
+    // failure is seen where it belongs, in FusionCache's log or its refusal once disposed. Without Sluice's catch, the
+    // dispose would throw it.
     [Theory]
     [InlineData("FusionCache was disposed first")]
     [InlineData("FusionCache's memory write throws")]
     public async Task A_failing_re_publish_reaches_no_one(string failure)
     {
         var memory = new HookedMemoryCache();
-        await using var node = new SluiceNode(cache => cache.WithMemoryCache(memory), OnFakeTime);
-        var thrown = new InvalidOperationException(
-            $"Simulated memory cache failure {Guid.NewGuid()}"
+        var log = new FakeLogger<FusionCache>();
+        await using var node = new SluiceNode(
+            cache => cache.WithMemoryCache(memory).WithLogger(log),
+            OnFakeTime
         );
-        var unobserved = new List<Exception>();
-        void Unobserved(object? sender, UnobservedTaskExceptionEventArgs e)
-        {
-            lock (unobserved)
-            {
-                unobserved.AddRange(e.Exception.Flatten().InnerExceptions);
-            }
-        }
+        var thrown = new InvalidOperationException("Simulated memory cache failure.");
 
         await node.Cache.InvalidateAsync(_rows.For(1));
         if (failure == "FusionCache was disposed first")
         {
             node.Fusion.Dispose();
+            await node
+                .Fusion.Awaiting(cache => cache.RemoveByTagAsync("race-rows:1"))
+                .Should()
+                .ThrowAsync<ObjectDisposedException>("the re-publish's tag writes fail");
         }
         else
         {
             memory.OnWrite = _ => throw thrown;
         }
 
-        TaskScheduler.UnobservedTaskException += Unobserved;
         try
         {
             await node.Cache.Awaiting(cache => cache.DisposeAsync()).Should().NotThrowAsync();
-
-            // The failed task completes just after the dispose's wait ends, so collect until it's had time to.
-            for (var i = 0; i < 10; i++)
-            {
-                await Task.Delay(10);
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-            }
         }
         finally
         {
-            TaskScheduler.UnobservedTaskException -= Unobserved;
             memory.OnWrite = null;
         }
 
-        lock (unobserved)
+        if (failure == "FusionCache's memory write throws")
         {
-            unobserved.Should().NotContain(thrown);
+            // The key's tag and the whole-source readers' tag.
+            log.Collector.GetSnapshot()
+                .Where(record => record.Level == LogLevel.Error)
+                .Select(record => record.Exception)
+                .Should()
+                .Equal(thrown, thrown);
         }
+    }
+
+    // Every invalidation and clear due at the same whole second is published again in one batch, each tag once however
+    // often it was invalidated. The clock starts on a whole second, S, so these are all due at S + 6 s: the first, a
+    // tick after S, is published again 6 s later (its timer counts whole milliseconds, rounded up), and the last, a tick
+    // before S + 1 s, not yet 5 s later.
+    [Fact]
+    public async Task Invalidations_due_in_the_same_second_are_published_again_together_and_each_after_the_delay()
+    {
+        // Handlers run on the publishing thread, inside the advance (AdvanceAsATimerAsync), so each reports what it
+        // published once it returns.
+        await using var node = new SluiceNode(
+            cache => cache.WithOptions(options => options.EnableSyncEventHandlersExecution = true),
+            OnFakeTime
+        );
+        (_time.GetTimestamp() % _time.TimestampFrequency)
+            .Should()
+            .Be(0, "the clock starts on a whole second");
+        var published = new List<string>();
+        void Tag(object? sender, FusionCacheTagEventArgs e) => published.Add(e.Tag);
+        void Clear(object? sender, EventArgs e) => published.Add("clear");
+
+        _time.Advance(TimeSpan.FromTicks(1));
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        _time.Advance(TimeSpan.FromMilliseconds(500));
+        node.Cache.Invalidate(_rows.For(2), _rows.For(1));
+        await node.Cache.ClearAsync();
+        _time.Advance(TimeSpan.FromMilliseconds(500) - TimeSpan.FromTicks(2));
+        await node.Cache.InvalidateAsync([_rows.For(3)]);
+
+        node.Fusion.Events.RemoveByTag += Tag;
+        node.Fusion.Events.Clear += Clear;
+        try
+        {
+            await AdvanceAsATimerAsync(_republishDelay);
+            published
+                .Should()
+                .BeEmpty(
+                    "the last invalidation was exactly 5 s ago, and its window is due after that"
+                );
+
+            await AdvanceAsATimerAsync(TimeSpan.FromTicks(2));
+            published
+                .Should()
+                .BeEquivalentTo(
+                    ["race-rows:1", "race-rows:2", "race-rows:3", "race-rows:*", "clear"],
+                    "the first invalidation was 6 s ago (the keys' tags, the whole-source readers' tag and the clear)"
+                );
+
+            await AdvanceAsATimerAsync(_republishDelay * 2);
+            published.Should().HaveCount(5, "each is published again once");
+        }
+        finally
+        {
+            node.Fusion.Events.RemoveByTag -= Tag;
+            node.Fusion.Events.Clear -= Clear;
+        }
+    }
+
+    // An NTP correction can step the wall clock back. The delay is timed on the monotonic timestamp, so an invalidation
+    // made after the step doesn't join the window of one made before it, which is due sooner.
+    [Fact]
+    public async Task A_wall_clock_stepped_back_does_not_shorten_the_delay()
+    {
+        await using var node = new SluiceNode(
+            cache => cache.WithOptions(options => options.EnableSyncEventHandlersExecution = true),
+            OnFakeTime
+        );
+        var published = new List<string>();
+        node.Fusion.Events.RemoveByTag += (_, e) => published.Add(e.Tag);
+
+        _time.Advance(TimeSpan.FromMilliseconds(500));
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        _time.WallClockStep = -TimeSpan.FromSeconds(1);
+        _time.Advance(TimeSpan.FromMilliseconds(700));
+        await node.Cache.InvalidateAsync(_rows.For(2));
+        published.Clear();
+
+        await AdvanceAsATimerAsync(TimeSpan.FromMilliseconds(4800));
+        published.Should().Contain("race-rows:1", "it was invalidated 5.5 s ago");
+        published.Should().NotContain("race-rows:2", "it was invalidated 4.8 s ago");
+
+        await AdvanceAsATimerAsync(TimeSpan.FromSeconds(1));
+        published.Should().Contain("race-rows:2");
     }
 
     [Fact]
@@ -423,11 +535,44 @@ public sealed class RaceTests
 
         await node.Cache.ClearAsync();
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#2");
-        _time.Advance(_republishDelay - TimeSpan.FromTicks(1));
+        await AdvanceAsATimerAsync(_republishDelay - TimeSpan.FromTicks(1));
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#2", "the delay hasn't passed");
 
         await AdvanceUntilPublishedAsync(node, TimeSpan.FromTicks(1), publishes: 1);
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#3");
+    }
+
+    /// <summary>
+    /// A fake clock that counts its timers in whole milliseconds, truncated, as the system's do, so a delay that wasn't
+    /// rounded up fires early; and whose wall clock can be stepped apart from its monotonic timestamp, as an NTP
+    /// correction steps the system's.
+    /// </summary>
+    private sealed class SystemLikeClock : FakeTimeProvider
+    {
+        /// <summary>How far the wall clock (<see cref="GetUtcNow"/>) has been stepped from the monotonic timestamp.</summary>
+        public TimeSpan WallClockStep { get; set; }
+
+        public override DateTimeOffset GetUtcNow() => base.GetUtcNow() + WallClockStep;
+
+        public override long GetTimestamp() => base.GetUtcNow().Ticks;
+
+        public override ITimer CreateTimer(
+            TimerCallback callback,
+            object? state,
+            TimeSpan dueTime,
+            TimeSpan period
+        ) =>
+            base.CreateTimer(
+                callback,
+                state,
+                WholeMilliseconds(dueTime),
+                WholeMilliseconds(period)
+            );
+
+        private static TimeSpan WholeMilliseconds(TimeSpan time) =>
+            TimeSpan.FromTicks(
+                time.Ticks / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond
+            );
     }
 
     /// <summary>

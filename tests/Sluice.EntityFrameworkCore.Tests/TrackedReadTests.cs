@@ -21,6 +21,9 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         "*isn't a LINQ query*Run it in the fetch of read.From(dependency, fetch)*";
     private const string Write =
         "*Writes can't run inside a compute*run them before or after GetOrSetAsync*";
+    private const string WithNoContext =
+        "An EF command with no context ran inside a compute (select 1)*can't tell what it read, or which "
+        + "transaction it ran in*add or attach entities before or after GetOrSetAsync.";
 
     // The remedies the analysis's reasons end with.
     private const string Declare =
@@ -62,7 +65,7 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ),
         ["scalar with no context"] = (
             (db, ct) => SelectOne(db).ExecuteScalarAsync(NoContext(db), ct),
-            NotLinq
+            WithNoContext
         ),
         ["non-query"] = ((db, _) => Task.FromResult(db.Database.ExecuteSqlRaw(Rename)), Write),
         ["non-query async"] = ((db, ct) => db.Database.ExecuteSqlRawAsync(Rename, ct), Write),
@@ -670,14 +673,14 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         // EF's raw command builder given no context, on this context's connection and logger.
         ["a read with no context"] = (
             (db, ct) => SelectOne(db).ExecuteScalarAsync(NoContext(db), ct),
-            NotLinq
+            WithNoContext
         ),
         ["a write with no context"] = (
             (db, ct) =>
                 db.GetService<IRawSqlCommandBuilder>()
                     .Build(Rename)
                     .ExecuteNonQueryAsync(NoContext(db, CommandSource.ExecuteSqlRaw), ct),
-            Write
+            WithNoContext.Replace("(select 1)", "(update*)")
         ),
     };
 
@@ -758,6 +761,27 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
 
     public static TheoryData<string> ValuesHoldingFromAnyContext =>
         new(_holdingFromAnyContext.Keys);
+
+    // Values that capture the execution context, whose async state holds the compute and its own context, made in a
+    // compute that has its context. None holds the context itself.
+    private static readonly Dictionary<string, Func<object>> _capturingTheFlow = new()
+    {
+        ["a captured execution context"] = () => new Holding(ExecutionContext.Capture()!),
+        ["a cancellation token with a registration"] = () =>
+        {
+            var source = new CancellationTokenSource();
+            source.Token.Register(static () => { });
+            return new Holding(source.Token);
+        },
+        ["a pending task with a continuation"] = () =>
+        {
+            var pending = new TaskCompletionSource();
+            _ = pending.Task.ContinueWith(static _ => { }, TaskScheduler.Default);
+            return new Holding(pending.Task);
+        },
+    };
+
+    public static TheoryData<string> ValuesCapturingTheFlow => new(_capturingTheFlow.Keys);
 
     // Generic code reaches the navigation through the interface its type parameter is constrained to.
     private static IQueryable<string> CustomerNames<T>(IQueryable<T> rows)
@@ -1497,9 +1521,10 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     }
 
     // A fetch is a declared read, but a write there still publishes mid-compute, and a read inside a transaction still
-    // caches rows other callers can't see. A command with no context is read for its own transaction.
+    // caches rows other callers can't see. A command with no context says neither which context nor which transaction
+    // it ran in, so it throws there too.
     [Fact]
-    public async Task A_query_on_a_context_without_UseSluice_runs_in_a_fused_fetch_and_a_save_or_a_read_in_a_transaction_there_throws()
+    public async Task A_query_on_a_context_without_UseSluice_runs_in_a_fused_fetch_and_a_save_a_read_in_a_transaction_or_a_command_with_no_context_there_throws()
     {
         await using var node = new SluiceNode();
         await using var plain = postgres.CreateDb();
@@ -1508,14 +1533,15 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             node.Cache,
             (read, _) => read.From(_totals.All, fetchCt => plain.Customers.ToListAsync(fetchCt))
         );
-        var noContext = await CachedRead.Of(
-            node.Cache,
-            (read, _) =>
-                read.From(
-                    _totals.All,
-                    fetchCt => SelectOne(plain).ExecuteScalarAsync(NoContext(plain), fetchCt)
-                )
-        );
+        var noContext = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, _) =>
+                    read.From(
+                        _totals.All,
+                        fetchCt => SelectOne(plain).ExecuteScalarAsync(NoContext(plain), fetchCt)
+                    )
+            );
         var save = () =>
             CachedRead.Of(
                 node.Cache,
@@ -1534,26 +1560,13 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                 node.Cache,
                 (read, _) => read.From(_totals.All, fetchCt => plain.Customers.ToListAsync(fetchCt))
             );
-        var noContextInTransaction = () =>
-            CachedRead.Of(
-                node.Cache,
-                (read, _) =>
-                    read.From(
-                        _totals.All,
-                        fetchCt => SelectOne(plain).ExecuteScalarAsync(NoContext(plain), fetchCt)
-                    )
-            );
 
         (await fetched.WasEvicted()).Should().BeFalse("the fetch's value was cached");
-        (await noContext.WasEvicted()).Should().BeFalse("the fetch's value was cached");
+        await noContext.Should().ThrowAsync<InvalidOperationException>().WithMessage(WithNoContext);
         await save.Should().ThrowAsync<InvalidOperationException>().WithMessage(Write);
         await using (await plain.Database.BeginTransactionAsync())
         {
             await inTransaction
-                .Should()
-                .ThrowAsync<InvalidOperationException>()
-                .WithMessage(Messages.InTransaction);
-            await noContextInTransaction
                 .Should()
                 .ThrowAsync<InvalidOperationException>()
                 .WithMessage(Messages.InTransaction);
@@ -1578,8 +1591,6 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             )
         );
 
-        // The store check is added to the node's cache when a UseSluice context's options are first built for it.
-        await using var registers = postgres.CreateDb(node);
         await using var lazy = LazyHelpdeskDb.Create();
         var (compute, message) = _holdingFromAnyContext[kind];
         var runs = 0;
@@ -1600,6 +1611,35 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         await call.Should().ThrowAsync<InvalidOperationException>().WithMessage(message);
         await call.Should().ThrowAsync<InvalidOperationException>();
         runs.Should().Be(2, "nothing was cached");
+    }
+
+    // A Task, a CancellationToken's registrations and a delegate's state capture the execution context, which reaches
+    // the compute's own context through its async state; the value doesn't hold that context, so it's stored.
+    [Theory]
+    [MemberData(nameof(ValuesCapturingTheFlow))]
+    public async Task A_value_holding_a_captured_execution_context_is_stored(string kind)
+    {
+        await using var node = new SluiceNode();
+        var value = _capturingTheFlow[kind];
+        var runs = 0;
+
+        var call = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _wrapped,
+                    kind,
+                    async (r, ct) =>
+                    {
+                        runs++;
+                        await r.Db<ShopDb>().Customers.CountAsync(ct);
+                        return value();
+                    }
+                )
+                .AsTask();
+
+        await call();
+        await call();
+        runs.Should().Be(1, "the value was stored");
     }
 
     // The analysis refuses entities by the query's result type; a lazy entity inside the app's own type, or the
@@ -1641,6 +1681,8 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     private sealed record ReceiptView(int Id, Receipt Receipt);
 
     private sealed record Boxed(object Context);
+
+    private sealed record Holding(object Value);
 
     private sealed record TenantHolder(LazyHelpTenant Tenant);
 

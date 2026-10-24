@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Microsoft.Extensions.DependencyInjection;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
@@ -11,6 +12,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     private static readonly Query<decimal, Price> _price = new("ef-folded-price");
     private static readonly Query<string, Tag> _tag = new("ef-folded-tag");
     private static readonly Query<string, Product> _product = new("ef-folded-product");
+    private static readonly Query<int, int> _clash = new("ef-folded-clash");
 
     [Fact]
     public async Task A_numeric_key_read_as_1_is_evicted_by_the_same_value_written_as_1_00()
@@ -114,20 +116,42 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     }
 
     // An app source named like a table would share its readers' tags with a key text of its own. Every source of the
-    // model is built before its first write runs a command, so the clash throws there, whichever write comes first: the
-    // table doesn't exist, so a write that ran would fail on the database instead.
+    // model is built before its first write runs a command, so the clash throws there, whichever write comes first, and
+    // where a read or a dependency first builds one: the table doesn't exist, so a write or read that ran would fail on
+    // the database instead.
     [Fact]
-    public async Task A_table_named_like_an_app_source_is_refused_before_a_save_or_bulk_write_runs()
+    public async Task A_table_named_like_an_app_source_is_refused_before_a_save_bulk_write_or_read_runs()
     {
         _ = new Source<int>(ClashingDb.Table);
-        await using var node = new SluiceNode();
+        await using var node = new SluiceNode(services: services =>
+            services.AddDbContext<ClashingDb>(
+                (provider, options) =>
+                    options.UseNpgsql(postgres.ConnectionString).UseSluice(provider)
+            )
+        );
         await using var db = new ClashingDb(
-            new DbContextOptionsBuilder()
+            new DbContextOptionsBuilder<ClashingDb>()
                 .UseNpgsql(postgres.ConnectionString)
                 .UseSluice(node.Services)
                 .Options
         );
 
+        var dependency = () => db.Set<Gadget>().AllDependencies();
+        dependency.Should().Throw<ArgumentException>().WithMessage($"*'{ClashingDb.Table}'*");
+        var read = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _clash,
+                    1,
+                    async (r, ct) =>
+                    {
+                        await r.Entity(r.Db<ClashingDb>().Set<Gadget>(), new GadgetNo(1))
+                            .SingleOrDefaultAsync(ct);
+                        return 1;
+                    }
+                )
+                .AsTask();
+        await read.Should().ThrowAsync<ArgumentException>().WithMessage($"*'{ClashingDb.Table}'*");
         db.Add(new Gadget { Id = new GadgetNo(1) });
         var save = () => db.SaveChangesAsync();
         (await save.Should().ThrowAsync<DbUpdateException>())
@@ -137,7 +161,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         await bulk.Should().ThrowAsync<ArgumentException>().WithMessage($"*'{ClashingDb.Table}'*");
     }
 
-    private sealed class ClashingDb(DbContextOptions options) : DbContext(options)
+    private sealed class ClashingDb(DbContextOptions<ClashingDb> options) : DbContext(options)
     {
         public const string Table = "gadgets_named_like_an_app_source";
 

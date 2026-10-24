@@ -25,10 +25,10 @@ no longer than the entry's duration.
   more records what it wrote in an outbox of its own, in the same transaction, and calls
   `InvalidateAsync` from the outbox's handler. See
   [Transactions](/guides/transactions#what-s-not-covered).
-- **A FusionCache 2.9 race can delay an invalidation on one server by up to 5 s.** An
+- **A FusionCache 2.9 race can delay an invalidation on one server by up to 6 s.** An
   invalidation that lands in the same microseconds as a read checking that dependency can be
   overwritten by the check (FusionCache#659), and that server keeps serving the values cached
-  before it. Sluice publishes every invalidation and clear again 5 s later, which restores it;
+  before it. Sluice publishes every invalidation and clear again 5 to 6 s later, which restores it;
   it stays lost only if that server's Redis lookup of the tag takes longer than 5 s (the
   [recommended Redis timeouts](/guides/configuration#multi-node) of one second keep lookups well
   under that). See
@@ -124,8 +124,8 @@ no longer than the entry's duration.
   [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes) and
   [Bulk writes by key](/guides/ef-core#bulk-writes-by-key).
 - **A `DbTransaction` committed or rolled back outside EF is invalidated late**: when Sluice
-  next looks, such as the flow's next cached read, the context's next command or the
-  transaction's disposal, since EF raises no event for it. A read in between can cache the old value. Commit through EF. See
+  next looks, such as the flow's next cached read, the context's next command or, for a
+  transaction EF began, its disposal, since EF raises no event for it. A read in between can cache the old value. Commit through EF. See
   [Committing outside EF](/guides/transactions#committing-outside-ef).
 - **A cached read of your own uncommitted writes is caught only where Sluice sees the
   transaction**: a `TransactionScope` by itself, and an EF or enlisted transaction once the

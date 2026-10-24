@@ -75,11 +75,12 @@ public sealed class PoolingTests(PostgresFixture postgres)
             await db.Rename(ada, "Ada Lovelace");
         }
 
-        // Ending the lease disposes its abandoned transaction and closes its connection, and a write still pending
-        // when its connection closes is published, since over-invalidating is safe.
+        // Ending the lease disposes the abandoned transaction EF began, and what a transaction still has pending when
+        // it's disposed is published, since Sluice can't tell it from one committed outside EF, and over-invalidating
+        // is safe.
         (await adaRead.WasEvicted())
             .Should()
-            .BeTrue("the first lease's connection closed with its write pending");
+            .BeTrue("the first lease's transaction was disposed with its write pending");
         (await reader.NameOf(ada)).Should().Be("Ada", "the transaction never committed");
 
         (db, lease) = Lease();

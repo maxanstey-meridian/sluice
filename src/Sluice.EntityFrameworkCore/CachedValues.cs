@@ -17,7 +17,8 @@ namespace Sluice.EntityFrameworkCore;
 /// <remarks>
 /// A walk of the value's fields, never its properties, so none of the app's code runs, with an explicit stack and a
 /// set of what it has visited by reference. Each runtime type's fields worth following are worked out once: those
-/// whose type may hold a loader or a context. Primitives, strings, enums and reflection objects are skipped, as are
+/// whose type may hold a loader or a context. Primitives, strings, enums, reflection objects and execution contexts
+/// (whose async-local values hold the compute's own context) are skipped, as are
 /// structs and sealed types (and arrays of them) whose fields can't hold one, so a list of sealed records costs one
 /// look at the list. It walks every value the cache stores, whatever model it comes from: the app can put a context in
 /// a value itself, and a lazy entity can come from a context without <c>UseSluice</c>, or from before the compute,
@@ -32,7 +33,8 @@ internal static class CachedValues
     private static readonly ConcurrentDictionary<Type, bool> _closed = new();
 
     /// <summary>
-    /// The store check the EF package adds to each cache: why <paramref name="value"/> mustn't be stored, or null.
+    /// The store check the EF package registers with its services: why <paramref name="value"/> mustn't be stored, or
+    /// null.
     /// </summary>
     internal static Exception? Check(object value)
     {
@@ -179,13 +181,16 @@ internal static class CachedValues
     // reflection object, or a struct or sealed type (or an array of one) whose fields are all such. A type met again
     // while it's being worked out is taken as closed, which is right for the type the work started from, since its
     // other fields are still looked at, but not always for the ones in between, so only the first type's answer is
-    // kept.
+    // kept. An ExecutionContext is taken as closed too: a Task, a CancellationToken's registrations and a delegate's
+    // state capture one, and through its AsyncLocal values it reaches the compute itself, its reads and its own
+    // context, which the value doesn't hold, and which ends with the compute.
     private static bool Closed(Type type, HashSet<Type> working)
     {
         if (
             type.IsPrimitive
             || type.IsEnum
             || type == typeof(string)
+            || type == typeof(ExecutionContext)
             || type.IsPointer
             || type.IsFunctionPointer
             || typeof(MemberInfo).IsAssignableFrom(type)

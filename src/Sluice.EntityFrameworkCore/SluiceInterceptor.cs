@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -104,17 +105,60 @@ internal sealed partial class SluiceInterceptor
     }
 
     /// <summary>
-    /// Publishes what <paramref name="transaction"/> still has pending, for EF's <c>TransactionDisposed</c> diagnostic
-    /// event, which no interceptor sees: EF disposes the transaction it began when the app disposes it, and when it
-    /// resets its context (disposed, or returned to the pool), whoever owns the connection. One committed or rolled back
-    /// outside EF has nothing else to publish it on a connection EF doesn't close. EF has ended the transaction by
-    /// then. Every cache's interceptor looks, since the event names no cache; at most one holds the transaction.
+    /// Publishes what <paramref name="transaction"/> still has pending, for one of EF's diagnostic events, which EF
+    /// raises for every context, interceptors or not: a commit or rollback (<c>TransactionCommitted</c>,
+    /// <c>TransactionRolledBack</c>), which a context without <c>UseSluice</c> may run on a transaction a
+    /// <c>UseSluice</c> context shares through <c>UseTransaction</c>, and the disposal of a transaction EF began
+    /// (<c>TransactionDisposed</c>), which no interceptor sees: EF disposes it when the app does, and when it resets its
+    /// context (disposed, or returned to the pool), whoever owns the connection. One committed or rolled back outside EF
+    /// has nothing else to publish it on a connection EF doesn't close. EF has ended the transaction by then. Every
+    /// cache's interceptor looks, since the event names no cache, but those on <paramref name="seenBy"/>, which see
+    /// the event themselves, and publish it on the caller's path; at most one holds the transaction.
     /// </summary>
-    internal static void TransactionDisposed(DbTransaction transaction)
+    internal static void TransactionEnded(DbTransaction transaction, DbContext? seenBy)
     {
-        foreach (var (_, interceptor) in _instances)
+        foreach (var interceptor in Others(seenBy))
         {
             interceptor.Publish(() => interceptor._efPending.TakeAll(transaction));
+        }
+    }
+
+    /// <summary>
+    /// Publishes what <paramref name="transaction"/> has pending, and keeps it, for EF's <c>TransactionError</c>
+    /// diagnostic event, as <see cref="TransactionFailed"/> does for a context with <c>UseSluice</c>.
+    /// </summary>
+    internal static void TransactionErred(DbTransaction transaction, DbContext? seenBy)
+    {
+        foreach (var interceptor in Others(seenBy))
+        {
+            interceptor.Publish(() => interceptor._efPending.Find(transaction)?.All() ?? []);
+        }
+    }
+
+    // Every cache's interceptor but those on the context, which see its transaction events themselves. A context
+    // already disposed (the app ending a transaction it kept) can't say, so every one looks: only one takes what the
+    // transaction holds. Never throws, since EF raises the event inside the call that ended the transaction.
+    private static IEnumerable<SluiceInterceptor> Others(DbContext? context)
+    {
+        IEnumerable<IInterceptor>? own;
+        try
+        {
+            own = context
+                ?.GetService<IDbContextOptions>()
+                .FindExtension<CoreOptionsExtension>()
+                ?.Interceptors;
+        }
+        catch (ObjectDisposedException)
+        {
+            own = null;
+        }
+
+        foreach (var (_, interceptor) in _instances)
+        {
+            if (own?.Contains(interceptor) != true)
+            {
+                yield return interceptor;
+            }
         }
     }
 
@@ -142,7 +186,7 @@ internal sealed partial class SluiceInterceptor
     // detection and cascades, so this only starts the save, and publishes what's left of earlier ones: one its context
     // left unfinished, and what its EF transaction held, if that was committed or rolled back outside EF. A provider
     // may refuse the save's commands in such a transaction (Npgsql does), so this may be the last Sluice sees of it
-    // until its connection closes.
+    // until the transaction is disposed, or its connection begins or joins another, opens, closes or is disposed.
     public InterceptionResult<int> SavingChanges(
         DbContextEventData eventData,
         InterceptionResult<int> result
@@ -340,15 +384,17 @@ internal sealed partial class SluiceInterceptor
     // A connection runs one transaction at a time, so anything still pending on the connection when it starts another
     // belongs to one that ended without a commit or rollback EF saw: one committed or rolled back outside EF, or
     // disposed without either, or one whose commit failed. It publishes now, since the first may have committed it,
-    // and over-invalidating the others is safe. By the connection, not the DbTransaction object, which only some
-    // providers hand out again (Npgsql does, per connection; SqlClient and Sqlite don't).
+    // and over-invalidating the others is safe. So does anything pending on the DbTransaction object it returns: one
+    // that has just begun has written nothing, and a provider may hand the object out again, on the same connection or
+    // another (Npgsql does: the object belongs to the physical connection, which the pool hands to whichever
+    // DbConnection opens next; SqlClient and Sqlite make a new one).
     public DbTransaction TransactionStarted(
         DbConnection connection,
         TransactionEndEventData eventData,
         DbTransaction result
     )
     {
-        Publish(() => _efPending.TakeOn(connection));
+        Publish(() => [.. _efPending.TakeOn(connection), .. _efPending.TakeAll(result)]);
         AddProbe(eventData);
         return result;
     }
@@ -360,20 +406,23 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
-        await PublishAsync(() => _efPending.TakeOn(connection)).ConfigureAwait(false);
+        await PublishAsync(() => [.. _efPending.TakeOn(connection), .. _efPending.TakeAll(result)])
+            .ConfigureAwait(false);
         AddProbe(eventData);
         return result;
     }
 
-    // A context joining a transaction (UseTransaction) shares what the transaction has pending, so it keeps it, and
-    // publishes what any other on the connection has pending, as starting one does.
+    // A context joining a transaction (UseTransaction) on the connection that has it shares what it has pending, so it
+    // keeps it, and publishes what any other on the connection has pending, as starting one does. What the
+    // DbTransaction object holds from another connection belongs to a transaction that has ended, since a transaction
+    // runs on one connection, so that publishes too.
     public DbTransaction TransactionUsed(
         DbConnection connection,
         TransactionEventData eventData,
         DbTransaction result
     )
     {
-        Publish(() => _efPending.TakeOn(connection, except: result));
+        Publish(() => Joining(connection, result));
         AddProbe(eventData);
         return result;
     }
@@ -385,11 +434,16 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
-        await PublishAsync(() => _efPending.TakeOn(connection, except: result))
-            .ConfigureAwait(false);
+        await PublishAsync(() => Joining(connection, result)).ConfigureAwait(false);
         AddProbe(eventData);
         return result;
     }
+
+    private List<Dependency> Joining(DbConnection connection, DbTransaction transaction) =>
+        [
+            .. _efPending.TakeOn(connection, except: transaction),
+            .. _efPending.TakeUnlessOn(transaction, connection),
+        ];
 
     public void TransactionCommitted(
         DbTransaction transaction,
@@ -432,8 +486,11 @@ internal sealed partial class SluiceInterceptor
     // a release pops the innermost, and a rollback pops nothing, as PostgreSQL keeps the savepoint it rolls back to.
     // The database drops at least as many as Sluice does, so Sluice's innermost is never older than the one the
     // database rolls back to, and Sluice can undo less than it did, never more.
-    public void CreatedSavepoint(DbTransaction transaction, TransactionEventData eventData) =>
-        CreateSavepoint(transaction, eventData);
+    public void CreatedSavepoint(DbTransaction transaction, TransactionEventData eventData)
+    {
+        var ended = CreateSavepoint(transaction, eventData);
+        Publish(() => ended);
+    }
 
     public Task CreatedSavepointAsync(
         DbTransaction transaction,
@@ -441,8 +498,8 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
-        CreateSavepoint(transaction, eventData);
-        return Task.CompletedTask;
+        var ended = CreateSavepoint(transaction, eventData);
+        return PublishAsync(() => ended);
     }
 
     public void RolledBackToSavepoint(DbTransaction transaction, TransactionEventData eventData) =>
@@ -475,17 +532,21 @@ internal sealed partial class SluiceInterceptor
     // rollback to it undoes everything that save writes, whenever the save gets to publish. Like the first command,
     // it starts the save's record when there's none: a save run inside this one (an interceptor saving again from
     // SavingChanges) took it, and completed. One the app makes outside a save starts a record with nothing captured,
-    // which the next save drops.
-    private void CreateSavepoint(DbTransaction transaction, TransactionEventData eventData)
+    // which the next save drops. Returns what an earlier transaction left on the DbTransaction object, to publish.
+    private List<Dependency> CreateSavepoint(
+        DbTransaction transaction,
+        TransactionEventData eventData
+    )
     {
-        if (transaction.Connection is { } connection)
+        if (transaction.Connection is not { } connection)
         {
-            _efPending
-                .For(transaction, connection)
-                .Save(
-                    eventData.Context is { } context ? _saves.GetValue(context, _ => new()) : null
-                );
+            return [];
         }
+
+        _efPending
+            .For(transaction, connection, out var ended)
+            .Save(eventData.Context is { } context ? _saves.GetValue(context, _ => new()) : null);
+        return ended;
     }
 
     private void RollBackToSavepoint(DbTransaction transaction, TransactionEventData eventData)
@@ -749,7 +810,9 @@ internal sealed partial class SluiceInterceptor
     // its commit, where a throw is still safe, because a save's entries can change again before it.
     //
     // An EF transaction committed or rolled back outside EF (on the DbTransaction) has ended though EF still holds it,
-    // so what it holds publishes now, with the write. A write whose context can't see the ambient transaction it ran
+    // so what it holds publishes now, with the write. One whose DbTransaction object the provider has handed to another
+    // connection (ContextTransaction.On) is that connection's now, and the write ran outside it, so the write publishes
+    // now, and the transaction keeps what it holds. A write whose context can't see the ambient transaction it ran
     // in (a TransactionScope that doesn't flow into async code) publishes now, since it may not be in it, and again
     // when that transaction completes, since it may.
     private Func<List<Dependency>>? Route(Write write)
@@ -762,8 +825,18 @@ internal sealed partial class SluiceInterceptor
                 return () => [.. _efPending.TakeAll(ef), .. write.Derive()];
             }
 
-            Defer(write.Context, transaction, write.Derive(), write.Undone);
-            return null;
+            if (
+                !ContextTransaction.On(
+                    ef,
+                    ContextTransaction.Connection(write.Context).DbConnection
+                )
+            )
+            {
+                return write.Derive;
+            }
+
+            var ended = Defer(write.Context, transaction, write.Derive(), write.Undone);
+            return ended.Count > 0 ? () => ended : null;
         }
 
         if (transaction.Ambient is { } ambient)
@@ -796,8 +869,9 @@ internal sealed partial class SluiceInterceptor
     }
 
     // Keeps a write for the EF transaction's end, and adds a probe of the transaction to the flow's box, so the guard
-    // sees it from the flow's first write in it, even when it began before the box.
-    private void Defer(
+    // sees it from the flow's first write in it, even when it began before the box. Returns what an earlier
+    // transaction left on the DbTransaction object from another connection, to publish now.
+    private List<Dependency> Defer(
         DbContext context,
         ContextTransaction transaction,
         List<Dependency> dependencies,
@@ -805,8 +879,11 @@ internal sealed partial class SluiceInterceptor
     )
     {
         var connection = ContextTransaction.Connection(context);
-        _efPending.For(transaction.Ef!, connection.DbConnection).Add(dependencies, undone);
+        _efPending
+            .For(transaction.Ef!, connection.DbConnection, out var ended)
+            .Add(dependencies, undone);
         AddProbe(connection, transaction.EfId!.Value);
+        return ended;
     }
 
     private void AddProbe(TransactionEventData eventData)
@@ -829,7 +906,8 @@ internal sealed partial class SluiceInterceptor
     }
 
     // A transaction committed or rolled back outside EF has ended though EF still holds it: what it held publishes now,
-    // once, and nothing is pending. Publishing never throws.
+    // once, and nothing is pending. Publishing never throws. One whose DbTransaction object the provider has handed to
+    // another connection (ContextTransaction.On) is that connection's, and what it has pending isn't this flow's.
     private IReadOnlyCollection<Dependency> PendingIn(
         WeakReference<IRelationalConnection> held,
         Guid transactionId
@@ -851,7 +929,9 @@ internal sealed partial class SluiceInterceptor
             return [];
         }
 
-        return _efPending.Find(transaction)?.Pending() ?? [];
+        return ContextTransaction.On(transaction, live.DbConnection)
+            ? _efPending.Find(transaction)?.Pending() ?? []
+            : [];
     }
 
     // Publishes the write when the ambient transaction completes, and keeps it as pending until then. The core's
@@ -923,7 +1003,8 @@ internal sealed partial class SluiceInterceptor
     // A save left over when its context saves again. Its transaction may have ended since, or be the one the next save
     // runs in, so it publishes now, and again from the transaction it ran in if that's still live, never from another
     // that has taken its place (an EF transaction is told apart by EF's id), nor from one that ended outside EF,
-    // which Earlier publishes. Both only over-invalidate.
+    // which Earlier publishes, or moved to another connection with its DbTransaction object (Route). Both only
+    // over-invalidate.
     private List<Dependency> HandToLiveTransaction(DbContext context, SaveInProgress leftover)
     {
         var capture = leftover.Capture!;
@@ -932,9 +1013,12 @@ internal sealed partial class SluiceInterceptor
         var now = ContextTransaction.Of(context);
         if (then.EfId is { } id && now is { EfId: { } nowId, Ef: { } ef } && id == nowId)
         {
-            if (!ContextTransaction.Ended(ef))
+            if (
+                !ContextTransaction.Ended(ef)
+                && ContextTransaction.On(ef, ContextTransaction.Connection(context).DbConnection)
+            )
             {
-                Defer(context, now, dependencies, leftover.RolledBack);
+                return [.. dependencies, .. Defer(context, now, dependencies, leftover.RolledBack)];
             }
         }
         else if (then.Ambient is { } ambient)
@@ -1077,71 +1161,104 @@ internal sealed partial class SluiceInterceptor
     }
 
     // What EF transactions have pending, each by its DbTransaction, which contexts sharing a transaction have in
-    // common, and found by the connection it runs on too, since EF disposes a transaction without an event. Each is
-    // held until EF commits or rolls it back, or its connection starts or joins another, opens, closes or is
-    // disposed: a connection runs one transaction at a time, and holds none while closed. Weak by connection, so a
-    // connection dropped without any of those leaves nothing behind.
+    // common, and found by the connection it runs on too, since EF ends a transaction without an event. Each is held
+    // until EF commits or rolls it back, its DbTransaction object begins again or is joined on another connection, or
+    // its connection starts or joins another, opens, closes or is disposed: a connection runs one transaction at a
+    // time, and holds none while closed. A record belongs to the connection it was made on: a provider may hand the
+    // object out again on another (Npgsql does, through its pool), so the object's next writes there take the old record
+    // and start one of their own, and a connection's set holds exactly the objects whose records were made on it. One
+    // lock for both tables, so a record can't be taken through one while it's added to through the other. Weak by
+    // connection, so a connection dropped without any of those leaves nothing behind.
     private sealed class EfPending
     {
+        private readonly Lock _lock = new();
         private readonly ConditionalWeakTable<DbTransaction, PendingWrites> _byTransaction = new();
         private readonly ConditionalWeakTable<DbConnection, HashSet<DbTransaction>> _byConnection =
             new();
 
-        public PendingWrites For(DbTransaction transaction, DbConnection connection)
+        // The record for the transaction's writes on the connection, and in ended what the object held from another
+        // connection, taken: a transaction that has ended, since one runs on one connection.
+        public PendingWrites For(
+            DbTransaction transaction,
+            DbConnection connection,
+            out List<Dependency> ended
+        )
         {
-            var onConnection = _byConnection.GetValue(connection, _ => []);
-            lock (onConnection)
+            lock (_lock)
             {
-                onConnection.Add(transaction);
+                ended = UnlessOn(transaction, connection);
+                _byConnection.GetValue(connection, _ => []).Add(transaction);
+                return _byTransaction.GetValue(transaction, _ => new() { Connection = connection });
             }
-
-            return _byTransaction.GetValue(transaction, _ => new() { Connection = connection });
         }
 
         public PendingWrites? Find(DbTransaction transaction) =>
             _byTransaction.TryGetValue(transaction, out var pending) ? pending : null;
 
-        // Only one caller takes what a transaction has pending, so only one publishes it.
-        public PendingWrites? Take(DbTransaction transaction)
+        // Everything the transaction has pending, taken; none when another caller took it, so only one publishes it.
+        public List<Dependency> TakeAll(DbTransaction transaction)
         {
-            if (
-                !_byTransaction.TryGetValue(transaction, out var pending)
-                || !_byTransaction.Remove(transaction)
-            )
+            lock (_lock)
             {
-                return null;
+                return Remove(transaction)?.All() ?? [];
             }
-
-            if (_byConnection.TryGetValue(pending.Connection!, out var onConnection))
-            {
-                lock (onConnection)
-                {
-                    onConnection.Remove(transaction);
-                }
-            }
-
-            return pending;
         }
 
-        // Everything the transaction has pending, taken; none when another caller took it.
-        public List<Dependency> TakeAll(DbTransaction transaction) =>
-            Take(transaction)?.All() ?? [];
+        // Everything the transaction has pending from a connection other than this one, taken.
+        public List<Dependency> TakeUnlessOn(DbTransaction transaction, DbConnection connection)
+        {
+            lock (_lock)
+            {
+                return UnlessOn(transaction, connection);
+            }
+        }
 
         // Everything the connection's transactions have pending, but the one it's joining, taken.
         public List<Dependency> TakeOn(DbConnection connection, DbTransaction? except = null)
         {
-            if (!_byConnection.TryGetValue(connection, out var onConnection))
+            if (!_byConnection.TryGetValue(connection, out _))
             {
                 return [];
             }
 
-            DbTransaction[] transactions;
-            lock (onConnection)
+            lock (_lock)
             {
-                transactions = [.. onConnection.Where(transaction => transaction != except)];
+                if (!_byConnection.TryGetValue(connection, out var onConnection))
+                {
+                    return [];
+                }
+
+                return
+                [
+                    .. onConnection
+                        .Where(transaction => transaction != except)
+                        .ToList()
+                        .SelectMany(transaction => Remove(transaction)!.All()),
+                ];
+            }
+        }
+
+        // Under the lock.
+        private List<Dependency> UnlessOn(DbTransaction transaction, DbConnection connection) =>
+            Find(transaction) is { } pending && pending.Connection != connection
+                ? Remove(transaction)!.All()
+                : [];
+
+        // Under the lock.
+        private PendingWrites? Remove(DbTransaction transaction)
+        {
+            if (!_byTransaction.TryGetValue(transaction, out var pending))
+            {
+                return null;
             }
 
-            return [.. transactions.SelectMany(TakeAll)];
+            _byTransaction.Remove(transaction);
+            if (_byConnection.TryGetValue(pending.Connection!, out var onConnection))
+            {
+                onConnection.Remove(transaction);
+            }
+
+            return pending;
         }
     }
 
