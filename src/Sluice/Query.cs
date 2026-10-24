@@ -50,7 +50,15 @@ public sealed class Query<TKey, TValue>
     public long? Size
     {
         get;
-        init => field = EntrySize.Checked(value);
+        init
+        {
+            if (value is { } size)
+            {
+                ArgumentOutOfRangeException.ThrowIfNegative(size, nameof(Size));
+            }
+
+            field = value;
+        }
     }
 
     internal string Name { get; }
@@ -84,20 +92,16 @@ public sealed class Query<TValue>
     public long? Size
     {
         get;
-        init => field = EntrySize.Checked(value);
+        init
+        {
+            if (value is { } size)
+            {
+                ArgumentOutOfRangeException.ThrowIfNegative(size, nameof(Size));
+            }
+
+            field = value;
+        }
     }
 
     internal string Name { get; }
-}
-
-file static class EntrySize
-{
-    internal static long? Checked(long? size) =>
-        size is < 0
-            ? throw new ArgumentOutOfRangeException(
-                nameof(size),
-                size,
-                "An entry's size can't be negative."
-            )
-            : size;
 }

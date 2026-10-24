@@ -15,8 +15,10 @@ scoped service, a lookup by a unique column, and keys from public input.
   (`[SluiceContextState] private Guid? TenantId => _tenant.Id;`) and a filter may read it inside
   a compute, exactly as it may read a settable field: only on a configured context, with the
   `-- Sluice reads the context's state: …` comment. Sluice doesn't read the body; the attribute is
-  your promise, as the configure is. It must hold a plain value and not be virtual, unless
-  sealed; it may be private. Unmarked properties with a body, methods and members of objects the
+  your promise, as the configure is. It must hold a plain value, have a body and not be virtual
+  or abstract (an interface's implementation is fine); it may be private. A marked auto-property
+  is refused. On a context leased straight from `AddDbContextPool`, see the pooling note in the
+  guide. Unmarked properties with a body, methods and members of objects the
   context holds are still refused, and the refusal of an unmarked context property now says to
   mark it.
 - **New: `read.Entity(set, column, value)`, by a unique column.** A lookup by slug or email

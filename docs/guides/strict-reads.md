@@ -27,8 +27,8 @@ read the context). It can't for these, so they throw when they run inside a comp
   `ToSqlQuery`. No tracked write ever invalidates them;
 - a query filter that reads the context's state, such as a tenant id held on the context,
   unless the compute set it with `read.Db<AppDb>(configure)`; one that reads it where the
-  configure can't set it (through a service the context holds, a property with a body, a
-  method, a readonly field, or a virtual, init-only or get-only property), configured or not; or one
+  configure can't set it (through a service the context holds, an unmarked property with a
+  body, a method, a readonly field, or a virtual, init-only or get-only property), configured or not; or one
   that reads other state that can change, such as a static tenant accessor, a captured service
   or `DateTime.Now`. See [Tenants](#tenants-and-other-context-state);
 - entities that load lazily or hold their context: lazy-loading proxies, an injected lazy
@@ -55,7 +55,7 @@ which depends on the reason:
 | raw SQL, a function, a table-valued function, a temporal query or another query root Sluice doesn't know | read it in a fused fetch: [the declared route](#the-declared-route) |
 | a type not mapped to a table | read it in a fused fetch |
 | a query filter that reads the context's state | put the tenant in the query key and set it on the compute's context with `read.Db<AppDb>(db => db.TenantId = tenantId)`: [Tenants](#tenants-and-other-context-state) |
-| a query filter that reads the context's state where the configure can't set it | copy the value into a settable field or auto-property in the constructor, filter by that, and configure it; or ignore that filter by name and filter by hand: [Tenants](#tenants-and-other-context-state) |
+| a query filter that reads the context's state where the configure can't set it | copy the value into a settable field or auto-property in the constructor, filter by that, and configure it; or, for a property whose body reads a scoped service, mark it `[SluiceContextState]` and set the service with `read.Db<AppDb>((db, services) => …)`: [A tenant read through a scoped service](#a-tenant-read-through-a-scoped-service); or ignore that filter by name and filter by hand: [Tenants](#tenants-and-other-context-state) |
 | a query filter that reads other state that can change | put whatever it reads in the query key, filter by it yourself, and ignore just the filters the message names, by name (`IgnoreQueryFilters(["Tenant"])`), so the others still apply. An unnamed filter can only be ignored with `IgnoreQueryFilters()`, which drops every filter, so name it first unless it's the only one: [Tenants](#tenants-and-other-context-state) |
 | entities that load lazily or hold their context | select the values you need (`Select(o => new { o.Id, o.Total })`), not the entities |
 | an `Include` path that isn't a constant | include by a lambda (`Include(o => o.Lines)`) or a constant path (`Include("Lines")`) |
@@ -246,7 +246,8 @@ public sealed class AppDb(DbContextOptions<AppDb> options, TenantProvider tenant
 ```
 
 The configure then sets the service, not the context. Its second argument is the compute's own
-DI scope, the one the context was made in, so the service it gets is the one the context holds:
+DI scope, the one the context was made in, so on a context `AddDbContext` or a scoped factory
+makes, the service it gets is the one the context holds:
 
 ```csharp
 read.Db<AppDb>((db, services) => services.GetRequiredService<TenantProvider>().Set(tenantId))
@@ -257,10 +258,17 @@ configure sets". Sluice doesn't read the body. A marked property is treated exac
 settable field: the filter runs only on a configured context, and its queries carry the
 `-- Sluice reads the context's state: …` comment. If the body reads anything else (the clock, a
 static, a value the configure didn't set), one caller's rows are cached for everyone with that
-key. The property must hold a plain value and mustn't be virtual (unless it's sealed); it may be
-private. Unmarked properties with a body, methods, and members of objects the context holds
+key. The property must hold a plain value, must have a body (a marked auto-property is refused:
+a settable one needs no mark, and a get-only one holds only what the constructor set) and mustn't
+be virtual or abstract, though an interface's implementation is fine; it may be private. Unmarked properties with a body, methods, and members of objects the context holds
 (`_tenants.TenantId` written straight into the filter) are still refused, and the refusal of an
 unmarked property says how to mark it.
+
+A context leased straight from `AddDbContextPool` was made by the pool, not the compute's scope,
+and keeps whatever service an earlier lease gave it, so the configure would set a different
+object from the one the property reads. Lease it through a scoped factory that hands it the
+scope's service on every lease, as EF documents for pooled tenants, or point the context at the
+scope's service in the configure as well.
 
 The configure can also point the context at a tenant's own database before its first query,
 for database-per-tenant:

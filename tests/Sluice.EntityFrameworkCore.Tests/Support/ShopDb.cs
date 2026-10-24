@@ -154,6 +154,9 @@ public sealed class Truck : Vehicle
 {
     public int Axles { get; set; }
 
+    /// <summary>Unique among trucks, in the truck's own table, so a vehicle's row doesn't hold it.</summary>
+    public string? Vin { get; set; }
+
     /// <summary>
     /// A foreign key only trucks have, so a vehicle's row doesn't hold it. A concurrency token, which doesn't keep
     /// eviction exact for a row split across tables.
@@ -238,6 +241,9 @@ public sealed class Bin
 {
     public int Id { get; set; }
     public string WarehouseCode { get; set; } = "";
+
+    /// <summary>Unique, and deleted with its warehouse; its converter stores an empty label as null.</summary>
+    public string? Label { get; set; }
 }
 
 /// <summary>Written to a table, read through a view, so the read helpers refuse it.</summary>
@@ -772,6 +778,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Vehicle>().UseTptMappingStrategy();
         model.Entity<Truck>().HasOne<Customer>().WithMany().HasForeignKey(t => t.OwnerId);
         model.Entity<Truck>().Property(t => t.OwnerId).IsConcurrencyToken();
+        model.Entity<Truck>().HasIndex(t => t.Vin).IsUnique();
         model.Entity<Trailer>().HasOne<Truck>().WithMany().HasForeignKey(t => t.TruckId);
         model.Entity<Shape>().UseTpcMappingStrategy();
         model.Entity<Parcel>().HasOne<Customer>().WithMany().HasForeignKey(p => p.CustomerId);
@@ -785,6 +792,11 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .WithMany()
             .HasForeignKey(bin => bin.WarehouseCode)
             .HasPrincipalKey(warehouse => warehouse.Code);
+        model.Entity<Bin>().HasIndex(bin => bin.Label).IsUnique();
+        model
+            .Entity<Bin>()
+            .Property(bin => bin.Label)
+            .HasConversion(label => label == "" ? null : label, label => label);
         model
             .Entity<Customer>()
             .HasMany(c => c.Coupons)

@@ -177,9 +177,9 @@ public static class SluiceReadsExtensions
     /// <see cref="Entity{T}(SluiceReads, DbSet{T}, object)"/>.
     /// </summary>
     /// <remarks>
-    /// Without a row version (on PostgreSQL, <c>xmin</c>), a save that updates or deletes a <typeparamref name="T"/>
-    /// can't know the value the database holds, so it evicts every such reader of <typeparamref name="T"/>, as it does
-    /// <see cref="Children"/> lists.
+    /// Without a row version (on PostgreSQL, <c>xmin</c>), or the column as a concurrency token, on a row stored in one
+    /// table, a save that updates or deletes a <typeparamref name="T"/> can't know the value the database holds, so it
+    /// evicts every such reader of <typeparamref name="T"/>, as it does <see cref="Children"/> lists.
     /// </remarks>
     /// <param name="read">The compute's reads.</param>
     /// <param name="set">The set to read, on the context <see cref="Db{TContext}(SluiceReads)"/> returns.</param>
@@ -193,7 +193,7 @@ public static class SluiceReadsExtensions
     /// <exception cref="ArgumentException">
     /// <paramref name="uniqueColumn"/> doesn't name a property, names it through <c>EF.Property</c> with a name that
     /// isn't a constant, or names one no single-column unique index or alternate key covers; or
-    /// <paramref name="value"/> isn't of its CLR type.
+    /// <paramref name="value"/> isn't of its CLR type, or its value converter stores it as null.
     /// </exception>
     /// <exception cref="NotSupportedException">
     /// Only a composite unique index or key covers the column, <typeparamref name="T"/> isn't mapped to a table, or the
@@ -223,7 +223,16 @@ public static class SluiceReadsExtensions
             uniqueColumn,
             nameof(uniqueColumn)
         );
-        ModelSources.EnsureKeyType(property, value, nameof(value));
+        ModelSources.EnsureKeyType(property, value, nameof(value), "value");
+        if (ModelSources.UniqueValue(property, value) is null)
+        {
+            throw new ArgumentException(
+                $"The value converter of {entityType.DisplayName()}.{property.Name} stores '{value}' as null, which "
+                    + "a read by value never finds. Read the rows whose column is null with a query on read.Db<TContext>().",
+                nameof(value)
+            );
+        }
+
         var query = TrackedReads.Query(set);
 
         read.From(

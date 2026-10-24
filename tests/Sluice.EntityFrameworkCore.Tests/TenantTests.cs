@@ -98,7 +98,8 @@ public sealed class TenantTests : IAsyncLifetime
         "a service the context holds",
         "*HelpNote's query filter reads the context's state through HelpdeskDb.Tenants.TenantId, which read.Db's configure can't set*"
             + "Read the context's state from a settable field or auto-property of the context*"
-            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*"
+            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*",
+        false
     )]
     [InlineData(
         "a property with a body",
@@ -107,17 +108,32 @@ public sealed class TenantTests : IAsyncLifetime
             + "If the property's body reads only what the compute's configure sets, such as a scoped tenant service, "
             + "mark it [SluiceContextState] (it mustn't be virtual) and set that state with "
             + "read.Db<HelpdeskDb>((db, services) => …)*"
-            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*"
+            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*",
+        true
     )]
     [InlineData(
         "a virtual property",
         "*HelpMacro's query filter reads the context's state through HelpdeskModel.Desk, which read.Db's configure can't set*"
             + "Read the context's state from a settable field or auto-property of the context*"
-            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*"
+            + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*",
+        false
+    )]
+    [InlineData(
+        "a marked virtual property",
+        "*HelpShelf's query filter \"marked virtual\" reads the context's state through HelpdeskModel.ShelfTenant, which "
+            + "read.Db's configure can't set*mark it [SluiceContextState] (it mustn't be virtual)*",
+        true
+    )]
+    [InlineData(
+        "a marked get-only property",
+        "*HelpShelf's query filter \"marked get-only\" reads the context's state through HelpdeskModel.ShelfDesk, which "
+            + "read.Db's configure can't set*",
+        false
     )]
     public async Task A_filter_reading_state_a_configure_cannot_set_is_refused_even_on_a_configured_context(
         string through,
-        string message
+        string message,
+        bool offersMark
     )
     {
         await using var node = Node("AddDbContext");
@@ -135,13 +151,23 @@ public sealed class TenantTests : IAsyncLifetime
                         {
                             "a property with a body" => db.Tags.CountAsync(ct),
                             "a virtual property" => db.Macros.CountAsync(ct),
+                            "a marked virtual property" => db
+                                .Shelves.IgnoreQueryFilters(["marked get-only"])
+                                .CountAsync(ct),
+                            "a marked get-only property" => db
+                                .Shelves.IgnoreQueryFilters(["marked virtual"])
+                                .CountAsync(ct),
                             _ => db.Notes.CountAsync(ct),
                         };
                     }
                 )
                 .AsTask();
 
-        await read.Should().ThrowAsync<InvalidOperationException>().WithMessage(message);
+        // Marking is offered only where it can help: a property with a body, holding a plain value.
+        var refused = await read.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(message);
+        refused.Which.Message.Contains("[SluiceContextState]").Should().Be(offersMark);
     }
 
     // The compute's scope is the one its context was made in, so the configure sets the very tenant service the context

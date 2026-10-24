@@ -32,6 +32,14 @@ public sealed class ComputeGuardTests
         return Task.FromResult("unrecorded");
     }
 
+    private Task<string> Uncached(SluiceReads read, CancellationToken ct)
+    {
+        _runs++;
+        read.From(_rows.For(1));
+        read.DoNotCache();
+        return Task.FromResult("uncached");
+    }
+
     // The nested call throws; this compute swallows it and returns normally, which must not help.
     private Func<SluiceReads, CancellationToken, Task<string>> Nesting(SluiceCache cache) =>
         async (read, ct) =>
@@ -88,6 +96,33 @@ public sealed class ComputeGuardTests
         var call = () => a.Cache.GetOrSetAsync(_outer, "k", NoReads).AsTask();
 
         await call.Should().ThrowAsync<InvalidOperationException>();
+        (await b.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+    }
+
+    [Fact]
+    public async Task An_uncached_value_is_stored_nowhere_another_node_can_read()
+    {
+        await using var a = SluiceNode.Clustered(_l2, _bus);
+        await using var b = SluiceNode.Clustered(_l2, _bus);
+
+        (await a.Cache.GetOrSetAsync(_outer, "k", Uncached)).Should().Be("uncached");
+        (await b.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+    }
+
+    [Fact]
+    public async Task An_uncached_value_evicts_nothing_on_another_node()
+    {
+        await using var a = SluiceNode.Clustered(_l2, _bus);
+        await using var b = SluiceNode.Clustered(_l2, _bus);
+        await b.Cache.GetOrSetAsync(_outer, "k", Good);
+
+        // As in the no-reads case: node A misses, and a backplane notice would make node B drop its own entry.
+        await a.Fusion.RemoveAsync(
+            "guard-outer:k",
+            new FusionCacheEntryOptions { SkipBackplaneNotifications = true }
+        );
+
+        (await a.Cache.GetOrSetAsync(_outer, "k", Uncached)).Should().Be("uncached");
         (await b.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
     }
 
@@ -250,8 +285,8 @@ public sealed class ComputeGuardTests
         await b.Should()
             .ThrowAsync<InvalidOperationException>()
             .WithMessage(
-                "The compute of query guard-outer used the read of another compute (query guard-outer), so what it "
-                    + "reads wouldn't be recorded on this one. Use the read the compute was given."
+                "The compute of query guard-outer used the read of another compute (query guard-outer), so it would "
+                    + "act on that compute instead of this one. Use the read the compute was given."
             );
         fetched.Should().BeFalse();
         aMayFinish.SetResult();

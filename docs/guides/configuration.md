@@ -75,7 +75,8 @@ Tag markers, the small entries that record when each dependency was last invalid
 exempt: Sluice stores them with size 0 and `NeverRemove`, whatever you set, because a marker
 that went missing would read as "never invalidated" and an evicted value would come back. They
 aren't counted against the limit, so the cache can hold more than the limit by one small entry
-per dependency it has seen, until each expires (`TagsDefaultEntryOptions.Duration`).
+per dependency it has seen, until each expires: by default up to ten days after it was last
+written (`TagsDefaultEntryOptions.FailSafeMaxDuration`; see [the lifetime rule](#the-lifetime-rule)).
 
 ## Logging
 

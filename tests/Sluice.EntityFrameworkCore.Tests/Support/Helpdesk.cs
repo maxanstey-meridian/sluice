@@ -23,6 +23,16 @@ public sealed class HelpMacro
     public string? Desk { get; set; }
 }
 
+/// <summary>
+/// Filtered through marked properties the configure can't trust: a virtual one, and a get-only auto-property. Each
+/// filter is named, so a read can ignore the other.
+/// </summary>
+public sealed class HelpShelf
+{
+    public int Id { get; set; }
+    public string? TenantId { get; set; }
+}
+
 /// <summary>Filtered by the tenant service the context holds.</summary>
 public sealed class HelpNote
 {
@@ -103,6 +113,15 @@ public abstract class HelpdeskModel(DbContextOptions options) : DbContext(option
     public DbSet<HelpTicket> Tickets => Set<HelpTicket>();
     public DbSet<HelpTag> Tags => Set<HelpTag>();
     public DbSet<HelpMacro> Macros => Set<HelpMacro>();
+    public DbSet<HelpShelf> Shelves => Set<HelpShelf>();
+
+    /// <summary>Marked, but virtual, so a derived context may override its body to read anything.</summary>
+    [SluiceContextState]
+    public virtual string? ShelfTenant => TenantId;
+
+    /// <summary>Marked, but an auto-property only the constructor sets.</summary>
+    [SluiceContextState]
+    public string? ShelfDesk { get; } = "front";
 
     /// <summary>The connection string of <paramref name="database"/> on the shop's server.</summary>
     public static string ConnectionString(string database) =>
@@ -157,6 +176,12 @@ public abstract class HelpdeskModel(DbContextOptions options) : DbContext(option
         model.Entity<HelpTicket>().HasQueryFilter(ticket => ticket.TenantId == TenantId);
         model.Entity<HelpTag>().HasQueryFilter(tag => tag.TenantId == TenantName);
         model.Entity<HelpMacro>().HasQueryFilter(macro => macro.Desk == Desk);
+        model
+            .Entity<HelpShelf>()
+            .HasQueryFilter("marked virtual", shelf => shelf.TenantId == ShelfTenant);
+        model
+            .Entity<HelpShelf>()
+            .HasQueryFilter("marked get-only", shelf => shelf.TenantId == ShelfDesk);
     }
 }
 

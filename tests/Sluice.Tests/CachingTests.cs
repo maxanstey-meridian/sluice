@@ -145,6 +145,7 @@ public sealed class CachingTests
         var started = new TaskCompletionSource();
         var release = new TaskCompletionSource();
         var runs = 0;
+        var firstEnded = false;
 
         async Task<string> Compute(SluiceReads read, CancellationToken ct)
         {
@@ -154,16 +155,21 @@ public sealed class CachingTests
                 started.SetResult();
                 await release.Task;
             }
+            else
+            {
+                firstEnded
+                    .Should()
+                    .BeTrue("a waiter's compute runs once the first has ended, not beside it");
+            }
 
             read.DoNotCache();
+            firstEnded = run == 1 || firstEnded;
             return $"run#{run}";
         }
 
         var first = node.Cache.GetOrSetAsync(query, "k", Compute).AsTask();
         await started.Task;
         var second = node.Cache.GetOrSetAsync(query, "k", Compute).AsTask();
-        await Task.Delay(50);
-        second.IsCompleted.Should().BeFalse("it waits for the running compute");
         release.SetResult();
 
         (await first).Should().Be("run#1");
@@ -175,6 +181,7 @@ public sealed class CachingTests
     {
         await using var node = new SluiceNode();
         var query = new Query<string, string>("caching-uncached-violation");
+        var runs = 0;
 
         var call = () =>
             node
@@ -183,6 +190,7 @@ public sealed class CachingTests
                     "k",
                     async (read, _) =>
                     {
+                        runs++;
                         try
                         {
                             await node.Cache.GetOrSetAsync(
@@ -205,6 +213,8 @@ public sealed class CachingTests
         await call.Should()
             .ThrowAsync<InvalidOperationException>()
             .WithMessage("*called from inside another compute*");
+        await call.Should().ThrowAsync<InvalidOperationException>();
+        runs.Should().Be(2, "nothing was cached, so the second call computed again");
     }
 
     [Fact]

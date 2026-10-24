@@ -38,7 +38,8 @@ internal sealed partial class SluiceInterceptor
     // rollback raises no event, and committed nothing.
     private readonly ConditionalWeakTable<DbTransaction, List<Dependency>> _pending = new();
 
-    // Each entity type that has logged invalidating its foreign keys whole, so each logs once per cache.
+    // Each entity type that has logged invalidating its foreign keys and unique columns whole, so each logs once per
+    // cache.
     private readonly ConcurrentDictionary<string, bool> _loggedUnversioned = new();
 
     private SluiceInterceptor(SluiceCache cache, ILogger<SluiceInterceptor> logger)
@@ -478,14 +479,14 @@ internal sealed partial class SluiceInterceptor
     [LoggerMessage(
         EventId = 3,
         Level = LogLevel.Information,
-        Message = "Sluice evicts every read.Children list of {EntityType}'s foreign keys, under every parent, and every read.Entity of it by a unique column, whatever the value, each time it saves a change to one other than an insert, because {EntityType} has no concurrency token the database changes on every write: the parent or value a row had when it was loaded may not be the one it leaves. To evict only the lists and values it leaves, map one (on PostgreSQL, xmin as a row version; on SQL Server, a rowversion column), or make each such foreign key and unique column a concurrency token."
+        Message = "Sluice evicts every read.Children list under {EntityType}'s foreign keys and every read.Entity of it by a unique column, whichever of those it has, whatever the parent or value, each time it saves a change to one other than an insert, because {EntityType} has no concurrency token the database changes on every write: the parent or value a row had when it was loaded may not be the one it leaves. To evict only the lists and values it leaves, map one (on PostgreSQL, xmin as a row version; on SQL Server, a rowversion column), or make each such foreign key and unique column a concurrency token."
     )]
     private partial void LogUnversioned(string entityType);
 
     [LoggerMessage(
         EventId = 4,
         Level = LogLevel.Information,
-        Message = "Sluice evicts every read.Children list of {EntityType}'s foreign keys, under every parent, and every read.Entity of it by a unique column, whatever the value, each time it saves a change to one other than an insert, because {EntityType} is stored across several tables (table-per-type or entity splitting), so no concurrency token covers every column EF writes: the parent or value a row had when it was loaded may not be the one it leaves."
+        Message = "Sluice evicts every read.Children list under {EntityType}'s foreign keys and every read.Entity of it by a unique column, whichever of those it has, whatever the parent or value, each time it saves a change to one other than an insert, because {EntityType} is stored across several tables (table-per-type or entity splitting), so no concurrency token covers every column EF writes: the parent or value a row had when it was loaded may not be the one it leaves."
     )]
     private partial void LogSplitAcrossTables(string entityType);
 

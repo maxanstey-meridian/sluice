@@ -123,7 +123,7 @@ internal sealed class CapturedSave
                 {
                     dependencies.Add(uniqueSource.All);
                 }
-                else if (value.CurrentValue is { } current)
+                else if (ModelSources.UniqueValue(property, value.CurrentValue) is { } current)
                 {
                     dependencies.Add(uniqueSource.For(current));
                 }
@@ -224,7 +224,10 @@ internal sealed class CapturedSave
             {
                 _originals.Add(source.All);
             }
-            else if (entry.Property(property).OriginalValue is { } original)
+            else if (
+                ModelSources.UniqueValue(property, entry.Property(property).OriginalValue) is
+                { } original
+            )
             {
                 _originals.Add(source.For(original));
             }
@@ -248,12 +251,12 @@ internal sealed class CapturedSave
 
     // A row saved without being loaded (attached, removed or updated from an object the context didn't query) has
     // no original values from the database, so the parent it had, or its unique value, is unknown. Two signs point to
-    // one, and both can also match a loaded row, which only over-invalidates. Update(), or setting the state to Modified, marks every
-    // property modified with its original value equal to its current one. A stub's foreign key holds what the object
-    // was created with: null, which a required key can't hold, or the property's sentinel, EF's "not set" value (the
-    // default of a non-nullable type, such as 0, unless HasSentinel says otherwise; null for a nullable one), which a
-    // real parent rarely has. A stub created with any other value, or with a nullable key left null, looks like a
-    // loaded row, and can't be told apart.
+    // one, and both can also match a loaded row, which only over-invalidates. Update(), or setting the state to
+    // Modified, marks every property modified with its original value equal to its current one. A stub's foreign key
+    // holds what the object was created with: null, which a required key can't hold, or the property's sentinel, EF's
+    // "not set" value (the default of a non-nullable type, such as 0, unless HasSentinel says otherwise; null for a
+    // nullable one), which a real parent rarely has. A stub created with any other value, or with a nullable key left
+    // null, looks like a loaded row, and can't be told apart.
     private static bool OriginalIsUnknown(
         EntityEntry entry,
         IReadOnlyList<IProperty> properties,

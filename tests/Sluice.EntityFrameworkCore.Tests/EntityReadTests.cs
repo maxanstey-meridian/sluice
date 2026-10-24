@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Sluice.EntityFrameworkCore.Tests.Support;
 using ZiggyCreatures.Caching.Fusion;
 
@@ -414,6 +415,109 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .Which.Should()
             .Contain("read.Entity of it by a unique column")
             .And.Contain("Warehouse has no concurrency token");
+    }
+
+    // Raw SQL leaves no trace of the value a row held, so only the whole type's dependencies reach its readers by value.
+    [Fact]
+    public async Task A_unique_column_read_is_evicted_by_AllDependencies_and_not_by_the_row_s_key()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("raw");
+        var page = await AddPage(db, slug);
+        Task ReadIt(SluiceReads read, CancellationToken ct) =>
+            read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleAsync(ct);
+
+        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(page.Id))).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.AllDependencies())).Should().BeTrue();
+    }
+
+    // The database deletes the warehouse's bins without EF loading them, so their labels are unknown.
+    [Fact]
+    public async Task A_delete_that_cascades_evicts_every_reader_of_the_dependent_by_unique_column()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var warehouse = new Warehouse { Code = Fresh("WH") };
+        var label = Fresh("shelf");
+        db.Warehouses.Add(warehouse);
+        db.Bins.Add(new Bin { WarehouseCode = warehouse.Code, Label = label });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var cached = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().Bins, b => b.Label, label).SingleOrDefaultAsync(ct)
+        );
+
+        db.Warehouses.Remove(await db.Warehouses.SingleAsync(w => w.Id == warehouse.Id));
+        await db.SaveChangesAsync();
+
+        (await db.Bins.AnyAsync(b => b.Label == label)).Should().BeFalse("the database deleted it");
+        (await cached.WasEvicted()).Should().BeTrue();
+    }
+
+    // A vehicle deleted by its key alone may be a truck, whose VIN the base type's row doesn't hold.
+    [Fact]
+    public async Task A_delete_through_the_base_type_evicts_every_reader_of_a_derived_type_s_unique_column()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var vin = Fresh("VIN");
+        var truck = new Truck { Plate = Fresh("T"), Vin = vin };
+        db.Vehicles.Add(truck);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var cached = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().Set<Truck>(), t => t.Vin, vin)
+                    .SingleOrDefaultAsync(ct)
+        );
+
+        db.Vehicles.Remove(new Vehicle { Id = truck.Id });
+        await db.SaveChangesAsync();
+
+        (await db.Set<Truck>().AnyAsync(t => t.Id == truck.Id)).Should().BeFalse();
+        (await cached.WasEvicted()).Should().BeTrue();
+    }
+
+    // The converter stores an empty label as null, which no read by value finds and no save publishes.
+    [Fact]
+    public async Task A_unique_value_its_converter_stores_as_null_is_refused_and_saves_without_losing_invalidation()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var warehouse = new Warehouse { Code = Fresh("WH") };
+        db.Warehouses.Add(warehouse);
+        await db.SaveChangesAsync();
+        var bins = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().Bins, b => b.WarehouseCode, warehouse.Code)
+                    .ToListAsync(ct)
+        );
+
+        var refused = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, ct) => read.Entity(read.Db<ShopDb>().Bins, b => b.Label, "").SingleAsync(ct)
+            );
+        await refused
+            .Should()
+            .ThrowAsync<ArgumentException>()
+            .WithMessage("The value converter of Bin.Label stores '' as null*");
+
+        var bin = new Bin { WarehouseCode = warehouse.Code, Label = "" };
+        db.Bins.Add(bin);
+        await db.SaveChangesAsync();
+        bin.Label = Fresh("shelf");
+        await db.SaveChangesAsync();
+        db.Bins.Remove(bin);
+        await db.SaveChangesAsync();
+
+        (await bins.WasEvicted()).Should().BeTrue();
+        node.Logs.GetSnapshot().Should().NotContain(record => record.Level == LogLevel.Error);
     }
 
     [Fact]

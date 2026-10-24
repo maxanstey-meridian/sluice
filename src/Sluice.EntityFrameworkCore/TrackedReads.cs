@@ -614,10 +614,17 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 _ => false,
             };
 
+        // An auto-property gets no trust from the mark: a settable one is already state the configure can set, and a
+        // get-only or init-only one holds what the constructor set, which the configure can't change.
         private static bool IsMarked(MemberInfo member) =>
-            member is PropertyInfo { GetMethod: { } getter } property
-            && (!getter.IsVirtual || getter.IsFinal)
+            member is PropertyInfo property
+            && HasBody(property)
+            && (!property.GetMethod!.IsVirtual || property.GetMethod.IsFinal)
             && property.IsDefined(typeof(SluiceContextStateAttribute), false);
+
+        private static bool HasBody(PropertyInfo property) =>
+            property.GetMethod is { } getter
+            && !getter.IsDefined(typeof(CompilerGeneratedAttribute), false);
 
         private static bool IsStored(MemberInfo member, bool settable) =>
             member switch
@@ -702,8 +709,10 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                             is MemberExpression
                             {
                                 Expression: ConstantExpression { Value: DbContext context },
-                                Member: PropertyInfo,
+                                Member: PropertyInfo property,
                             }
+                        && HasBody(property)
+                        && IsPlain(unfixed.Type)
                             ? context.GetType().Name
                             : null
                     )
@@ -737,8 +746,8 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
             // State the configure can set is a plain value stored on the context itself, or read through a property
             // the app marked as reading only what the configure sets (SLUICE-EF-022).
-            var marked = _refusedFilters
-                .Select(refused => refused.ContextProperty)
+            var contextType = _refusedFilters
+                .Select(refused => refused.MarkableOn)
                 .FirstOrDefault(context => context is not null);
             Untrackable(
                 _refusedFilters.Exists(refused => refused.ReadsContext)
@@ -746,11 +755,11 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                         + "(not readonly, virtual, init-only or get-only) holding a plain value instead, so read.Db's "
                         + "configure can set it from the cache key."
                         + (
-                            marked is null
+                            contextType is null
                                 ? ""
                                 : " If the property's body reads only what the compute's configure sets, such as a "
                                     + "scoped tenant service, mark it [SluiceContextState] (it mustn't be virtual) "
-                                    + $"and set that state with read.Db<{marked}>((db, services) => …)."
+                                    + $"and set that state with read.Db<{contextType}>((db, services) => …)."
                         )
                         + $" Or filter by hand: {ignore}"
                     : $"{reason}. {char.ToUpperInvariant(ignore[0])}{ignore[1..]}"
@@ -1218,13 +1227,14 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         private void Untrackable(string reason) => _untrackable ??= reason;
 
         // A query filter's read of more than its rows: the filter, what it reads, and whether that's the context's state.
-        // A refused property of the context names the context's type, for the [SluiceContextState] remedy.
+        // A refused property of the context with a body, holding a plain value, names the context's type for the
+        // [SluiceContextState] remedy; marking can't help any other part.
         private readonly record struct FilterRead(
             IEntityType Type,
             string? Name,
             string What,
             bool ReadsContext,
-            string? ContextProperty = null
+            string? MarkableOn = null
         );
 
         // What's read is named by root type, the source EF writes publish, with an owned type standing for the owner

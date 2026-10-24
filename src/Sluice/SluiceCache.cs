@@ -213,13 +213,8 @@ public sealed class SluiceCache
             return _entryOptions;
         }
 
-        var options = duration is { } value
-            ? _entryOptions.Duplicate(value)
-            : _entryOptions.Duplicate();
-        if (size is not null)
-        {
-            options.Size = size;
-        }
+        var options = _entryOptions.Duplicate(duration);
+        options.Size = size ?? options.Size;
 
         if (duration is not null)
         {

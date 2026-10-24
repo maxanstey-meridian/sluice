@@ -371,13 +371,18 @@ internal static class ModelSources
 
     /// <summary>Checks that <paramref name="key"/> has the CLR type of <paramref name="property"/>, ignoring nullability.</summary>
     /// <exception cref="ArgumentException">It doesn't.</exception>
-    internal static void EnsureKeyType(IProperty property, object key, string parameterName)
+    internal static void EnsureKeyType(
+        IProperty property,
+        object key,
+        string parameterName,
+        string what = "key"
+    )
     {
         var expected = Nullable.GetUnderlyingType(property.ClrType) ?? property.ClrType;
         if (key.GetType() != expected)
         {
             throw new ArgumentException(
-                $"The key for {property.DeclaringType.DisplayName()}.{property.Name} must be of type {expected.Name}, "
+                $"The {what} for {property.DeclaringType.DisplayName()}.{property.Name} must be of type {expected.Name}, "
                     + $"its type in the EF model, but was of type {key.GetType().Name}.",
                 parameterName
             );
@@ -506,6 +511,17 @@ internal static class ModelSources
                             .ToArray()
                     )
             );
+
+    // A unique column's value as its readers read it: null where the column holds null, as it does where the value
+    // converter stores the value as null, since no read by value finds a null.
+    internal static object? UniqueValue(IProperty property, object? value) =>
+        value is not null
+        && (
+            property.GetTypeMapping().Converter is not { } converter
+            || converter.ConvertToProvider(value) is not null
+        )
+            ? value
+            : null;
 
     // The value the database compares, so a strongly-typed id reads and writes as the column's value.
     private static object ToProvider(IProperty property, object key) =>

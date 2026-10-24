@@ -234,7 +234,7 @@ public sealed class SluiceReads
                 new InvalidOperationException(
                     $"The compute of query {current.Query} used the read of another compute (query {Query}"
                         + (IsOpen ? "" : ", which has already returned")
-                        + "), so what it reads wouldn't be recorded on this one. Use the read the compute was given."
+                        + "), so it would act on that compute instead of this one. Use the read the compute was given."
                 )
             );
         }

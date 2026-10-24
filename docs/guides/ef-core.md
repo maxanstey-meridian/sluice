@@ -194,7 +194,9 @@ The column must be covered by a single-column unique index or alternate key in t
 the rows that have one is fine. Sluice doesn't need the uniqueness to be right; it uses the
 model's unique columns to know which values a save must report. A column without one throws
 `ArgumentException`, and one unique only together with others (a composite index) throws
-`NotSupportedException`. Naming the primary key reads exactly as `read.Entity(set, key)`.
+`NotSupportedException`. Naming the primary key reads exactly as `read.Entity(set, key)`. The
+value can't be null, nor one the column's value converter stores as null: no read by value
+finds a null, so both throw (`ArgumentNullException`, `ArgumentException`).
 
 Each save of a row reports one more value per unique column of its type. Without a row version
 the value the database holds when an update or delete runs may not be the one EF loaded, so,
@@ -469,11 +471,11 @@ await cache.InvalidateAsync(db.Orders.AllDependencies());
 | Dependency | Evicts |
 |---|---|
 | `set.AllDependencies()` | every read of the type, and what a delete of it [cascades into](#database-cascades) |
-| `set.Dependency(key)` | `Entity` readers of that row and plain queries of the type, but **not** `Children` readers of its parent |
+| `set.Dependency(key)` | `Entity` readers of that row by its key and plain queries of the type, but **not** `Children` readers of its parent, nor `read.Entity` readers by a unique column |
 
-`set.Dependency(key)` can't evict `Children` readers because Sluice can't see the row's
-foreign keys without loading it. If something reads the rows you changed through `Children`,
-use `set.AllDependencies()`.
+`set.Dependency(key)` can't evict `Children` readers or readers by a unique column, because
+Sluice can't see the row's foreign keys or unique values without loading it. If something reads
+the rows you changed through `Children` or by a unique column, use `set.AllDependencies()`.
 
 EF dependencies batch with declared ones:
 

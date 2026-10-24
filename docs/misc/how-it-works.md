@@ -46,7 +46,8 @@ compute's `read`, is a bug. Sluice doesn't throw from the factory, because Fusio
 fail-safe would catch the exception and serve a stale value instead. The factory records the violation, tells FusionCache to skip the
 memory write, the distributed write and the backplane message, and returns. `GetOrSetAsync` then
 throws once FusionCache returns. The EF package's strict-read checks use the same route, so a
-compute that catches their exception still caches nothing.
+compute that catches their exception still caches nothing. `read.DoNotCache()` takes the same
+route, skipping the three writes, but hands the value back instead of throwing.
 
 A compute also runs outside the caller's ambient transaction (`TransactionScope`), so a
 connection it opens can't see the caller's uncommitted rows. And it can hold resources for its
@@ -90,7 +91,7 @@ Recording what a query reads is one EF interceptor for the whole process:
   `-- Sluice reads: <types>` every time it runs. EF caches the compiled query, tag included, so
   this runs once per query shape. A query whose reads can't be known (raw SQL, a function, a view)
   is tagged `-- Sluice can't track: <why>` instead. A query whose filters read a field or
-  auto-property of the context gets one more line, `-- Sluice reads the context's state: <what>`.
+  auto-property of the context, or a property marked `[SluiceContextState]`, gets one more line, `-- Sluice reads the context's state: <what>`.
 - **On every command** (`CommandInitialized`, before it runs): inside a compute, a write throws; a
   command from a context other than `read.Db`'s throws, unless it runs in a fused fetch; otherwise
   the tag is read, and each type it names is recorded as a whole-type dependency, or the command

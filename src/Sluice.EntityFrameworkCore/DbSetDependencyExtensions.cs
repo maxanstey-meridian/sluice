@@ -20,7 +20,9 @@ public static class DbSetDependencyExtensions
     /// </summary>
     /// <param name="set">The set the row belongs to.</param>
     /// <param name="key">The primary key, of its CLR type in the EF model.</param>
-    /// <returns>What <see cref="SluiceReadsExtensions.Entity{T}(SluiceReads, DbSet{T}, object)"/> records for the same key.</returns>
+    /// <returns>
+    /// What <see cref="SluiceReadsExtensions.Entity{T}(SluiceReads, DbSet{T}, object)"/> records for the same key.
+    /// </returns>
     /// <exception cref="ArgumentException"><paramref name="key"/> isn't of the primary key's CLR type.</exception>
     /// <exception cref="NotSupportedException">
     /// <typeparamref name="T"/> isn't mapped to a table, or its primary key is composite.
@@ -36,9 +38,9 @@ public static class DbSetDependencyExtensions
 
     /// <summary>
     /// Every dependency on <typeparamref name="T"/>: the whole set, and every foreign key and unique column it, a base
-    /// or a derived type declares, so every read of <typeparamref name="T"/> is evicted. Also the same for every type the model lets the
-    /// database delete or set to null when <typeparamref name="T"/> rows are deleted (<c>Cascade</c> or
-    /// <c>SetNull</c>, transitively), so it covers a delete in raw SQL.
+    /// or a derived type declares, so every read of <typeparamref name="T"/> is evicted. Also the same for every type
+    /// the model lets the database delete or set to null when <typeparamref name="T"/> rows are deleted
+    /// (<c>Cascade</c> or <c>SetNull</c>, transitively), so it covers a delete in raw SQL.
     /// </summary>
     /// <param name="set">The set that changed.</param>
     /// <exception cref="NotSupportedException"><typeparamref name="T"/> isn't mapped to a table.</exception>
