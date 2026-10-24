@@ -424,9 +424,10 @@ first caller's async state, and again without it. A body that reads the caller's
 values, or throws without the request, and the query throws `InvalidOperationException`,
 naming the filter and the property (never the values), rather than cache that caller's rows for
 everyone with the key. Set that state in the configure, from the key. The check costs about
-64 ns per query. What it can't see stays your promise: a body that reads the clock, a static,
-or a service it resolves later on the compute's flow and that keeps the caller's request,
-caches one value for every caller.
+64 ns per query. A body whose value changes between two reads (a fine-grained clock, usually) is
+refused the same way. What it can't see stays your promise: a body that reads a static, or a
+service it resolves later on the compute's flow and that keeps the caller's request,
+caches what it read for every caller.
 
 The property must hold a plain value, must have a body and mustn't be virtual or abstract,
 though an interface's implementation is fine; it may be private. The mark does nothing on an
@@ -461,7 +462,8 @@ read.Db<AppDb>(db => db.ReadAsTenant(tenantId))
 
 The configure's tenant must come first. With the user first, the property would read the
 first caller's user on the compute's flow and no user without the caller's async state, so a
-query through it would throw whenever the caller is signed in. On a request's context the
+query through it would throw whenever the caller is signed in (or, with a user service that
+middleware fills in, read no user at all). On a request's context the
 field is never set, so the user's tenant applies as before. Call `ReadAsTenant` only from a
 compute's configure: on a request's context it would override the user's tenant.
 

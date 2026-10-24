@@ -20,6 +20,7 @@ internal static class ModelSources
     private const string SourceAnnotation = "Sluice:Source";
     private const string RowSharersAnnotation = "Sluice:RowSharers";
     private const string RoundTripsAnnotation = "Sluice:RoundTrips";
+    private const string SourcesAnnotation = "Sluice:Sources";
     private const string CascadeAnnotation = "Sluice:Cascades";
     private const string TablePatternAnnotation = "Sluice:TablePattern";
     private const string RowVersionAnnotation = "Sluice:RowVersion";
@@ -389,7 +390,7 @@ internal static class ModelSources
         foreach (var mapping in entityType.GetTableMappings().Where(m => m.Table.IsShared))
         {
             var table = mapping.Table;
-            var own = mapping.ColumnMappings.ToList();
+            var own = mapping.ColumnMappings.Concat(ComplexColumns(entityType, table)).ToList();
             IReadOnlyList<IProperty> Writing(IEnumerable<IColumn?> columns) =>
                 [.. own.Where(c => columns.Contains(c.Column)).Select(c => c.Property)];
 
@@ -407,7 +408,7 @@ internal static class ModelSources
                     .Select(column => own.FirstOrDefault(c => c.Column == column)?.Property)
                     .ToList();
                 var theirs = other
-                    .SelectMany(m => m.ColumnMappings)
+                    .SelectMany(m => m.ColumnMappings.Concat(ComplexColumns(m.TypeBase, table)))
                     .Select(c => c.Column)
                     .ToHashSet();
                 var shared = Writing(theirs.Except(keyColumns.OfType<IColumn>()));
@@ -448,6 +449,19 @@ internal static class ModelSources
 
         return [.. sharers];
     }
+
+    // The columns of a type's complex properties stored in the table's own columns, at any depth, which EF maps apart
+    // from the type's other columns. A complex collection is stored as JSON, in a column of its own.
+    private static IEnumerable<IColumnMapping> ComplexColumns(ITypeBase type, ITable table) =>
+        type.GetComplexProperties()
+            .Where(property => !property.IsCollection)
+            .SelectMany(property =>
+                property
+                    .ComplexType.GetTableMappings()
+                    .Where(mapping => mapping.Table == table)
+                    .SelectMany(mapping => mapping.ColumnMappings)
+                    .Concat(ComplexColumns(property.ComplexType, table))
+            );
 
     /// <summary>
     /// Another root entity type whose rows share a table with a saved type's (<see cref="RowSharers"/>).
@@ -794,6 +808,47 @@ internal static class ModelSources
         entityType.FindOwnership() is { } ownership
             ? Unowned(ownership.PrincipalEntityType)
             : entityType;
+
+    /// <summary>
+    /// Refuses the model as <see cref="EnsureRoundTrips"/> does, then builds every source it implies: each keyed
+    /// entity type's (<see cref="Entity"/>), each foreign key's but an ownership's (<see cref="ForeignKey"/>) and each
+    /// unique column's (<see cref="Unique"/>). Once per model, before a save or bulk write on it runs, so a source
+    /// name the core refuses (one an app's own <see cref="Source{TKey}"/> took) throws there, before anything is
+    /// written, rather than where the write publishes, where a throw would lose the rest of its invalidations.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The model has a converter Sluice can't trust.</exception>
+    /// <exception cref="ArgumentException">The core refuses one of the model's source names.</exception>
+    internal static void EnsureSources(IModel model) =>
+        model.GetOrAddRuntimeAnnotationValue(
+            SourcesAnnotation,
+            static model =>
+            {
+                EnsureRoundTrips(model!);
+                foreach (var entityType in model!.GetEntityTypes())
+                {
+                    if (!entityType.IsOwned() && entityType.FindPrimaryKey() is not null)
+                    {
+                        _ = Entity(entityType);
+                        foreach (var property in UniqueColumns(entityType))
+                        {
+                            _ = Unique(property);
+                        }
+                    }
+
+                    foreach (
+                        var foreignKey in entityType
+                            .GetDeclaredForeignKeys()
+                            .Where(foreignKey => !foreignKey.IsOwnership)
+                    )
+                    {
+                        _ = ForeignKey(foreignKey);
+                    }
+                }
+
+                return true;
+            },
+            model
+        );
 
     /// <summary>
     /// Refuses a model with a key, foreign key or unique column (<see cref="UniqueColumns"/>) whose value converter

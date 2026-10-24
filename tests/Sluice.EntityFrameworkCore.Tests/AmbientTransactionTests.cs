@@ -266,6 +266,63 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
             );
     }
 
+    // The leftover is a save an interceptor saves again after, from SavedChanges, before Sluice sees the first save
+    // complete. Neither save can see the scope: the connection was opened in it on the scope's thread, and both run on
+    // another. The leftover publishes at once, and again when the transaction its connection was opened in completes.
+    // A concurrency conflict's leftover is handed to that transaction by the conflict itself, so it can't show this.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Inside_a_TransactionScope_without_async_flow_a_save_left_over_when_its_context_saves_again_is_evicted_again_once_the_scope_completes(
+        bool complete
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb(enlist: false);
+        var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        // A cold pool, as for HiddenScope.OpenedOnTheScopeThreadSavedFromAnother: the open completes off the scope's
+        // thread, so EF doesn't hold the scope against the saves made from another.
+        await using var connection = new NpgsqlConnection(
+            $"{postgres.ConnectionString};Application Name=sluice-{Guid.NewGuid():N}"
+        );
+        var saveAgain = new SaveAgain(whileSaving: false);
+        await using var db = postgres.CreateDb(node, before: [saveAgain], connection: connection);
+        db.Customers.Attach(new Customer { Id = ada, Name = "Ada" }).Entity.Name = "Ada (edited)";
+        saveAgain.Once(() =>
+            db.Customers.Attach(new Customer { Id = bob, Name = "Bob" }).Entity.Name =
+                "Bob (edited)"
+        );
+        var evictedInScope = false;
+        Task completed = Task.CompletedTask;
+
+        await OnAThreadOfItsOwn(() =>
+        {
+            using var scope = new TransactionScope();
+            db.Database.OpenConnectionAsync().GetAwaiter().GetResult();
+            Task.Run(() => db.SaveChangesAsync()).GetAwaiter().GetResult();
+            completed = Completion.Of(Transaction.Current!);
+
+            // Another request caches Ada's committed row again.
+            evictedInScope = adaRead.WasEvictedForAnotherCaller().GetAwaiter().GetResult();
+            if (complete)
+            {
+                scope.Complete();
+            }
+        });
+
+        await completed;
+        evictedInScope.Should().BeTrue("the leftover published at once");
+        (await reader.NameOf(ada))
+            .Should()
+            .Be(complete ? "Ada (edited)" : "Ada", "the save was in the scope");
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the scope's completion published the leftover again");
+        (await bobRead.WasEvicted()).Should().BeTrue("the second save was in the scope too");
+    }
+
     // Runs body on a new thread, as code holding a TransactionScope that doesn't flow into async code must.
     internal static Task OnAThreadOfItsOwn(Action body)
     {

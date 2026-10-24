@@ -70,6 +70,10 @@ public sealed class MultiNodeTests
         var republished = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously
         );
+        // Node A raises RemoveByTag once its tag write has returned, and that write awaits the backplane publish (tag
+        // writes don't run backplane operations in the background), which MemoryBackplane completes only once node B
+        // has handled the message. Node B's own Backplane.MessageReceived would be too early: B raises it before it
+        // handles the message.
         var tags = 0;
         a.Fusion.Events.RemoveByTag += (_, _) =>
         {

@@ -15,4 +15,4 @@ Sluice.Infrastructure.StoreChecks
 Sluice.SluiceCache.Dispose() -> void
 Sluice.SluiceCache.DisposeAsync() -> System.Threading.Tasks.ValueTask
 static Sluice.Infrastructure.ModelSource.Create<TKey>(string! name, System.Func<TKey, string!>! format) -> Sluice.Source<TKey>!
-static Sluice.Infrastructure.StoreChecks.Add(Sluice.SluiceCache! cache, System.Func<object!, System.Exception?>! check) -> void
+static Sluice.Infrastructure.StoreChecks.Add(Microsoft.Extensions.DependencyInjection.IServiceCollection! services, System.Func<object!, System.Exception?>! check) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!

@@ -48,10 +48,13 @@ internal sealed class CapturedSave
     /// The model has a key, foreign key or unique column whose value converter isn't known to round-trip
     /// (<see cref="ModelSources.EnsureRoundTrips"/>).
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// The core refuses one of the model's source names (<see cref="ModelSources.EnsureSources"/>).
+    /// </exception>
     internal static CapturedSave Capture(DbContext context, ContextTransaction transaction)
     {
         // Before the save writes anything: once it has, a refusal could only be logged.
-        ModelSources.EnsureRoundTrips(context.Model);
+        ModelSources.EnsureSources(context.Model);
         var save = new CapturedSave(transaction);
         var tracker = context.ChangeTracker;
 
@@ -98,11 +101,15 @@ internal sealed class CapturedSave
 
     // The entry's own state. Before a save's first command, EF marks every unchanged entry that shares a row with a
     // changed one (table splitting, an owned type in its owner's table) Modified with nothing modified, so the row's
-    // command carries it; what it writes is the other entry's, which is captured as itself.
+    // command carries it; what it writes is the other entry's, which is captured as itself. "Nothing modified" is EF's
+    // own test for setting a Modified entry back to Unchanged: no property flagged, nor any complex collection, which
+    // EntityEntry.ComplexProperties leaves out (a complex property's entry counts the collections nested in it).
+    // Members isn't that test: its navigations report changes to other entries.
     private static EntityState StateOf(EntityEntry entry) =>
         entry.State is EntityState.Modified
         && !entry.Properties.Any(property => property.IsModified)
         && !entry.ComplexProperties.Any(property => property.IsModified)
+        && !entry.ComplexCollections.Any(collection => collection.IsModified)
             ? EntityState.Unchanged
             : entry.State;
 
@@ -252,12 +259,7 @@ internal sealed class CapturedSave
                 entry,
                 state,
                 state is EntityState.Modified && ModelSources.RowSharers(entry.Metadata).Length > 0
-                    ?
-                    [
-                        .. entry
-                            .Properties.Where(property => property.IsModified)
-                            .Select(property => property.Metadata),
-                    ]
+                    ? [.. Modified(entry.Properties, entry.ComplexProperties)]
                     : []
             )
         );
@@ -320,6 +322,20 @@ internal sealed class CapturedSave
             }
         }
     }
+
+    // The modified properties, and those of the complex properties, at any depth, each stored in a column of the row.
+    private static IEnumerable<IProperty> Modified(
+        IEnumerable<PropertyEntry> properties,
+        IEnumerable<ComplexPropertyEntry> complexProperties
+    ) =>
+        properties
+            .Where(property => property.IsModified)
+            .Select(property => property.Metadata)
+            .Concat(
+                complexProperties.SelectMany(complex =>
+                    Modified(complex.Properties, complex.ComplexProperties)
+                )
+            );
 
     // Whether the database holds the original values of the properties when a save that succeeds runs. A primary key
     // can't change. EF's UPDATE or DELETE of a row it writes, stored in one table, matches the originals of its

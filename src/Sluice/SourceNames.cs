@@ -5,7 +5,8 @@ namespace Sluice;
 /// <summary>
 /// The source name guard, as <see cref="QueryNames"/> is for queries: a name keeps one key type and one key format.
 /// Two declarations that disagree would give one key different text, so a write through one misses the readers of
-/// the other. Nothing ever reads a declaration back from here.
+/// the other. A name a data model's package builds (the EF Core package's table names) belongs to the model, so no
+/// application source can take it, whichever is declared first. Nothing ever reads a declaration back from here.
 /// </summary>
 internal static class SourceNames
 {
@@ -14,14 +15,23 @@ internal static class SourceNames
         StringComparer.Ordinal
     );
 
+    // Model sources aren't checked against each other: two models over one table share its names on purpose, each
+    // building its own format.
+    private static readonly HashSet<string> _modelNames = new(StringComparer.Ordinal);
+
     /// <exception cref="ArgumentException">
-    /// The name is already declared with another key type or another format.
+    /// The name is a model's, or already declared with another key type or another format.
     /// </exception>
     internal static void Claim(string name, Type key, Delegate format)
     {
         var method = FormatIdentity.Of(format);
         lock (_lock)
         {
+            if (_modelNames.Contains(name))
+            {
+                throw ModelOwned(name);
+            }
+
             if (!_sources.TryGetValue(name, out var existing))
             {
                 _sources[name] = (key, method);
@@ -57,4 +67,28 @@ internal static class SourceNames
             }
         }
     }
+
+    /// <exception cref="ArgumentException">An application source already has the name.</exception>
+    internal static void ClaimForModel(string name)
+    {
+        lock (_lock)
+        {
+            if (_sources.ContainsKey(name))
+            {
+                throw ModelOwned(name);
+            }
+
+            _modelNames.Add(name);
+        }
+    }
+
+    private static ArgumentException ModelOwned(string name) =>
+        new(
+            $"Source '{name}' is declared by the application and is also a name the EF Core package gives the "
+                + "dependencies it derives from a model (after a table, a foreign key's columns or a unique column), so "
+                + "one row would get different key text in each, and a write through one would miss the readers of the "
+                + "other. To invalidate those dependencies, use the EF Core package's set.Dependency(key) or "
+                + "set.AllDependencies() on the DbSet; give an application source another name.",
+            nameof(name)
+        );
 }

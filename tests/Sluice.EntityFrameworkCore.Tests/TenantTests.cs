@@ -512,15 +512,15 @@ public sealed class TenantTests : IAsyncLifetime
     [InlineData(
         "desk",
         "*HelpQueue's query filter \"desk\" reads [SluiceContextState] HelpdeskDb.DeskTenant, which gives a different "
-            + "value with the caller's async state (IHttpContextAccessor, an AsyncLocal) than without it, so it reads "
-            + "the caller rather than what read.Db's configure set*read.Db<HelpdeskDb>(db => …), or "
+            + "value when read again without the caller's async state, so it reads something other than what "
+            + "read.Db's configure set*read.Db<HelpdeskDb>(db => …), or "
             + "(db, services) => … for a scoped service."
     )]
     [InlineData(
         "request",
         "*HelpQueue's query filter \"request\" reads [SluiceContextState] HelpdeskDb.RequestTenant, which throws "
-            + "without the caller's async state (InvalidOperationException: There's no request.), so it reads the "
-            + "caller*"
+            + "without the caller's async state (InvalidOperationException: There's no request.), so it reads "
+            + "something other than what read.Db's configure set*"
     )]
     public async Task A_marked_property_reading_the_caller_s_async_state_throws_unless_the_configure_set_it(
         string filter,

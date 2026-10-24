@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -230,15 +231,13 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         (await bobRead.WasEvicted()).Should().BeTrue("the commit publishes the second save");
     }
 
-    // Sluice can't tell a transaction disposed without commit from one committed outside EF and then disposed: neither
-    // raises an event. So what it held publishes when its DbTransaction object is handed out again (Npgsql reuses it),
-    // which over-invalidates the first, and is needed for the second.
+    // Sluice can't tell a transaction disposed without commit from one committed outside EF and then disposed: EF
+    // raises only its transaction-disposed diagnostic for either. So what it held publishes then, which over-invalidates
+    // the first, and is needed for the second.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task A_transaction_disposed_without_commit_evicts_when_its_connection_begins_the_next(
-        bool sync
-    )
+    public async Task A_transaction_disposed_without_commit_evicts_when_it_is_disposed(bool sync)
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
@@ -249,30 +248,28 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
 
         var abandoned = await db.Database.BeginTransactionAsync();
         await db.Rename(ada, "Ada Lovelace");
-        var abandonedTransaction = abandoned.GetDbTransaction();
-        await abandoned.DisposeAsync();
-        (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the transaction end yet");
+        (await adaRead.WasEvicted()).Should().BeFalse("the transaction hasn't ended");
 
-        await using var next = sync
-            ? db.Database.BeginTransaction()
-            : await db.Database.BeginTransactionAsync();
-        next.GetDbTransaction()
-            .Should()
-            .BeSameAs(abandonedTransaction, "Npgsql reuses a connection's transaction object");
+        await Dispose(abandoned, sync);
+        (await adaRead.WasEvicted()).Should().BeTrue("disposing it published what it held");
 
-        (await adaRead.WasEvicted())
-            .Should()
-            .BeTrue("the next transaction on the object published what the abandoned one held");
+        await using var next = await db.Database.BeginTransactionAsync();
         await next.CommitAsync();
         (await adaRead.WasEvicted()).Should().BeFalse("the next transaction wrote nothing");
         (await reader.NameOf(ada)).Should().Be("Ada");
     }
 
-    // Npgsql refuses a command in a transaction committed on the DbTransaction itself, so the save fails before it
-    // writes; Sluice sees the save start, which is where it looks. Without savepoints, since EF making one there fails
-    // and is reported as a failed transaction, which publishes too.
-    [Fact]
-    public async Task A_write_after_its_transaction_was_committed_outside_EF_evicts_what_the_transaction_wrote()
+    // Npgsql refuses a command in a transaction committed on the DbTransaction itself as EF creates it, so the write
+    // fails before it writes, and before EF raises any event Sluice captures a write from: the write has nothing to
+    // publish. A save's start publishes what the transaction held; so does the creation of a bulk write's command, which
+    // has no start. Without savepoints, since EF making one there fails and is reported as a failed transaction, which
+    // publishes too.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_write_after_its_transaction_was_committed_outside_EF_evicts_what_the_transaction_wrote(
+        bool bulk
+    )
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
@@ -287,46 +284,208 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
 
         await transaction.GetDbTransaction().CommitAsync();
         (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
-        customers.Single(c => c.Id == bob).Name = "Bob Babbage";
-        var save = () => db.SaveChangesAsync();
+        if (bulk)
+        {
+            var write = () =>
+                db
+                    .Customers.Where(c => c.Id == bob)
+                    .ExecuteUpdateAsync(set => set.SetProperty(c => c.Name, "Bob Babbage"));
+            await write
+                .Should()
+                .ThrowAsync<InvalidOperationException>()
+                .WithMessage(
+                    "Transaction is already completed",
+                    "Npgsql refuses the ended transaction"
+                );
+        }
+        else
+        {
+            customers.Single(c => c.Id == bob).Name = "Bob Babbage";
+            var save = () => db.SaveChangesAsync();
+            (await save.Should().ThrowAsync<DbUpdateException>())
+                .WithInnerException<InvalidOperationException>()
+                .WithMessage(
+                    "Transaction is already completed",
+                    "Npgsql refuses the ended transaction"
+                );
+        }
 
-        (
-            await save.Should().ThrowAsync<DbUpdateException>()
-        ).WithInnerException<InvalidOperationException>("Npgsql refuses the ended transaction");
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
-        (await adaRead.WasEvicted()).Should().BeTrue("the save saw the transaction had ended");
+        (await reader.NameOf(bob)).Should().Be("Bob");
+        (await adaRead.WasEvicted()).Should().BeTrue("the write saw the transaction had ended");
     }
 
+    // The transaction ends after the write has run and before Sluice sees it complete, so the write and what the
+    // transaction held publish then, rather than being handed to the transaction, which can't commit them again.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task A_transaction_committed_outside_EF_then_disposed_is_evicted_when_its_connection_closes(
-        bool sync
+    public async Task A_write_whose_transaction_an_interceptor_commits_outside_EF_before_Sluice_sees_it_complete_is_evicted_with_what_the_transaction_wrote(
+        bool bulk
     )
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
-        await using var db = postgres.CreateDb(node);
-        var (ada, _) = await db.AddCustomers();
+        var commit = new CommitOutsideEf();
+        await using var db = postgres.CreateDb(node, before: [commit]);
+        var (ada, bob) = await db.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
-        var transaction = await db.Database.BeginTransactionAsync();
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        await using var transaction = await db.Database.BeginTransactionAsync();
         await db.Rename(ada, "Ada Lovelace");
 
-        await transaction.GetDbTransaction().CommitAsync();
-        (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
-        if (sync)
+        commit.Arm();
+        if (bulk)
         {
-            transaction.Dispose();
+            await db
+                .Customers.Where(c => c.Id == bob)
+                .ExecuteUpdateAsync(set => set.SetProperty(c => c.Name, "Bob Babbage"));
         }
         else
         {
-            await transaction.DisposeAsync();
+            await db.Rename(bob, "Bob Babbage");
         }
 
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+        (await reader.NameOf(bob)).Should().Be("Bob Babbage");
         (await adaRead.WasEvicted())
             .Should()
-            .BeTrue("disposing the transaction closed the connection EF opened for it");
+            .BeTrue("the transaction had ended when the write completed");
+        (await bobRead.WasEvicted()).Should().BeTrue("the transaction committed the write");
+    }
+
+    // The leftover is a concurrency conflict from before the commit. The next save starts after it, publishing the
+    // leftover with what the ended transaction held, and hands it to nothing: the transaction can't commit it again.
+    [Fact]
+    public async Task A_save_left_over_in_a_transaction_committed_outside_EF_is_evicted_when_its_context_saves_again_and_not_kept_for_the_transaction()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node);
+        db.Database.AutoSavepointsEnabled = false;
+        var (ada, bob) = await db.AddCustomers();
+        var cy = new Customer { Name = "Cy" };
+        reader.Customers.Add(cy);
+        await reader.SaveChangesAsync();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        var customers = await db
+            .Customers.Where(c => c.Id == ada || c.Id == bob || c.Id == cy.Id)
+            .ToListAsync();
+        var transaction = await db.Database.BeginTransactionAsync();
+        customers.Single(c => c.Id == ada).Name = "Ada Lovelace";
+        await db.SaveChangesAsync();
+        await reader.Customers.Where(c => c.Id == cy.Id).ExecuteDeleteAsync();
+        customers.Where(c => c.Id != ada).ToList().ForEach(c => c.Name += " (edited)");
+        var conflict = () => db.SaveChangesAsync();
+        await conflict.Should().ThrowAsync<DbUpdateConcurrencyException>();
+
+        await transaction.GetDbTransaction().CommitAsync();
+        (await bobRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
+        db.ChangeTracker.Clear();
+        await db.SaveChangesAsync();
+
+        (await reader.NameOf(bob)).Should().Be("Bob (edited)", "the commit kept Bob's update");
+        (await adaRead.WasEvicted()).Should().BeTrue("the save saw the transaction had ended");
+        (await bobRead.WasEvicted()).Should().BeTrue("the save published the leftover");
+        await transaction.DisposeAsync();
+        (await bobRead.WasEvicted())
+            .Should()
+            .BeFalse(
+                "closing the transaction's connection found nothing of the leftover left on the ended transaction"
+            );
+    }
+
+    public enum Abandoned
+    {
+        // Disposing the transaction closes the connection EF opened for it.
+        TransactionDisposed,
+
+        // Disposing the context closes the connection the app opened without an event, then disposes it.
+        ContextDisposed,
+
+        // Returning a pooled context closes the connection the app opened without an event; its next lease opens it.
+        PooledContextLeasedAgain,
+
+        // Disposing a context on a connection the app created closes nothing; EF only disposes its transaction.
+        ContextDisposedOnTheAppsConnection,
+    }
+
+    [Theory]
+    [InlineData(Abandoned.TransactionDisposed, false)]
+    [InlineData(Abandoned.TransactionDisposed, true)]
+    [InlineData(Abandoned.ContextDisposed, false)]
+    [InlineData(Abandoned.ContextDisposed, true)]
+    [InlineData(Abandoned.PooledContextLeasedAgain, false)]
+    [InlineData(Abandoned.PooledContextLeasedAgain, true)]
+    [InlineData(Abandoned.ContextDisposedOnTheAppsConnection, false)]
+    [InlineData(Abandoned.ContextDisposedOnTheAppsConnection, true)]
+    public async Task A_transaction_committed_outside_EF_and_left_is_evicted_when_EF_closes_reopens_or_disposes_its_connection(
+        Abandoned abandoned,
+        bool sync
+    )
+    {
+        void Configure(IServiceProvider sp, DbContextOptionsBuilder options) =>
+            options.UseNpgsql(postgres.ConnectionString).UseSluice(sp);
+        await using var node = new SluiceNode(services: services =>
+            services.AddPooledDbContextFactory<ShopDb>(Configure, poolSize: 1)
+        );
+        await using var reader = postgres.CreateDb();
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var pool = node.Services.GetRequiredService<IDbContextFactory<ShopDb>>();
+        await using var connection = new NpgsqlConnection(postgres.ConnectionString);
+        var db = abandoned switch
+        {
+            Abandoned.PooledContextLeasedAgain => await pool.CreateDbContextAsync(),
+            Abandoned.ContextDisposedOnTheAppsConnection => postgres.CreateDb(
+                node,
+                connection: connection
+            ),
+            _ => postgres.CreateDb(node),
+        };
+        if (abandoned is Abandoned.ContextDisposedOnTheAppsConnection)
+        {
+            await connection.OpenAsync();
+        }
+        else if (abandoned is not Abandoned.TransactionDisposed)
+        {
+            await db.Database.OpenConnectionAsync();
+        }
+
+        var transaction = await db.Database.BeginTransactionAsync();
+        await db.Rename(ada, "Ada Lovelace");
+        await transaction.GetDbTransaction().CommitAsync();
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
+
+        if (abandoned is Abandoned.TransactionDisposed)
+        {
+            await Dispose(transaction, sync);
+        }
+
+        await Dispose(db, sync);
+        if (abandoned is Abandoned.PooledContextLeasedAgain)
+        {
+            await using var next = await pool.CreateDbContextAsync();
+            next.ContextId.InstanceId.Should()
+                .Be(db.ContextId.InstanceId, "the pool hands out the same instance");
+            await next.NameOf(ada);
+        }
+
+        (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+        (await adaRead.WasEvicted()).Should().BeTrue();
+    }
+
+    private static async Task Dispose(IAsyncDisposable disposable, bool sync)
+    {
+        if (sync)
+        {
+            ((IDisposable)disposable).Dispose();
+        }
+        else
+        {
+            await disposable.DisposeAsync();
+        }
     }
 
     // A provider or interceptor that writes without a SaveChanges command looks like this to Sluice.

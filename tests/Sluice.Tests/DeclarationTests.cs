@@ -346,22 +346,52 @@ public sealed class DeclarationTests
 
     // A package's model names are unique by construction, and two models over one table share them on purpose.
     [Fact]
-    public void A_model_source_is_not_checked_against_other_declarations_and_claims_nothing()
+    public void Model_sources_are_not_checked_against_each_other()
     {
-        _ = new Source<int>("decl-model");
-
         var model = () =>
         {
             _ = ModelSource.Create<int>("decl-model", id => $"#{id}");
             _ = ModelSource.Create<string>("decl-model", id => id);
-            _ = ModelSource.Create<object>("decl-model-only", id => $"{id}");
+            _ = ModelSource.Create<object>("decl-model", id => $"{id}");
         };
 
         model.Should().NotThrow();
-        new Func<object>(() => new Source<string>("decl-model-only")).Should().NotThrow();
         new Func<object>(() => ModelSource.Create<int>(" ", id => $"{id}"))
             .Should()
             .Throw<ArgumentException>();
+    }
+
+    // An app source named like a table has its own key text, so a save through EF would miss its readers, and its
+    // writes would miss EF's. The result mustn't depend on which is declared first.
+    [Theory]
+    [InlineData("the model's")]
+    [InlineData("the app's")]
+    public void An_app_source_cannot_share_a_name_with_a_model_source(string first)
+    {
+        var name = first == "the model's" ? "decl-table-model-first" : "decl-table-app-first";
+        var model = () => ModelSource.Create<object>(name, id => $"{id}");
+        var app = () => new Source<int>(name);
+
+        if (first == "the model's")
+        {
+            _ = model();
+            app.Should()
+                .Throw<ArgumentException>()
+                .WithMessage(
+                    $"Source '{name}' is declared by the application and is also a name the EF Core package gives*"
+                        + "use the EF Core package's set.Dependency(key) or set.AllDependencies()*"
+                );
+            model.Should().NotThrow("a model can still be built again");
+        }
+        else
+        {
+            _ = app();
+            model
+                .Should()
+                .Throw<ArgumentException>()
+                .WithMessage($"Source '{name}' is declared by the application*");
+            app.Should().NotThrow("the app's declaration stands");
+        }
     }
 
     [Theory]

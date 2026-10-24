@@ -38,6 +38,75 @@ public sealed class ComputeContextTests(PostgresFixture postgres)
             .Throw<ObjectDisposedException>();
     }
 
+    // As the compute disposes what it holds (SLUICE-CORE-015): a context whose dispose throws doesn't stop the rest,
+    // the probe scope included, and the caller gets what it threw.
+    [Fact]
+    public async Task When_one_context_s_dispose_throws_the_compute_s_other_contexts_and_scopes_are_still_disposed()
+    {
+        var made = new List<ShopDb>();
+        await using var node = new SluiceNode(services: services =>
+        {
+            void Pooled<TContext>()
+                where TContext : DbContext =>
+                services.AddDbContextPool<TContext>(
+                    (provider, options) =>
+                        options
+                            .UseNpgsql(HelpdeskModel.ConnectionString(HelpdeskModel.A))
+                            .UseSluice(provider)
+                );
+
+            Pooled<FailingDisposeHelpdeskDb>();
+            Pooled<PooledHelpdeskDb>();
+            services.AddScoped(provider =>
+            {
+                var db = new ShopDb(
+                    new DbContextOptionsBuilder<ShopDb>()
+                        .UseNpgsql(postgres.ConnectionString)
+                        .UseSluice(provider)
+                        .Options
+                );
+                made.Add(db);
+                return db;
+            });
+        });
+        PooledHelpdeskDb? builtAfter = null;
+        var computes = 0;
+
+        var read = () =>
+            CachedRead.Of(
+                node.Cache,
+                async (r, ct) =>
+                {
+                    computes++;
+                    r.Db<FailingDisposeHelpdeskDb>();
+                    builtAfter = r.Db<PooledHelpdeskDb>();
+                    await r.Db<ShopDb>().Customers.CountAsync(ct);
+                }
+            );
+
+        await read.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(FailingDisposeHelpdeskDb.Failure);
+        await read.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(FailingDisposeHelpdeskDb.Failure);
+        computes.Should().Be(2, "nothing was cached");
+        builtAfter!
+            .Invoking(context => context.Model)
+            .Should()
+            .Throw<ObjectDisposedException>(
+                "a context built after the one that threw is disposed too"
+            );
+        made.Should()
+            .HaveCount(
+                3,
+                "each compute's scope made one, and the first compute's probe scope another"
+            )
+            .And.AllSatisfy(db =>
+                db.Invoking(context => context.Model).Should().Throw<ObjectDisposedException>()
+            );
+    }
+
     [Fact]
     public async Task UseSluice_twice_on_one_context_adds_its_interceptors_once()
     {

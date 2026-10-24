@@ -6,11 +6,21 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class ChildrenReadTests(PostgresFixture postgres)
 {
-    // The sources the model implies for these foreign keys: "<root's table>[<FK columns>]", keyed by the FK value.
-    // Declaring them by hand pins those names, which are wire format.
-    private static readonly Source<int> _ordersByCustomer = new("Orders[CustomerId]");
-    private static readonly Source<int> _notesByCustomer = new("Notes[CustomerId]");
     private static readonly Query<int, string[]> _items = new("ef-children-items");
+
+    // Whether removing the raw tag `tag` evicts a cached value whose compute runs `read`. The model names a foreign
+    // key's source "<root's table>[<FK columns>]" and keys it by the FK value; tags are wire format, so this pins both
+    // where an app can't declare a source of that name.
+    private static async Task<bool> IsEvictedByTag(
+        Func<SluiceReads, CancellationToken, Task> read,
+        string tag
+    )
+    {
+        await using var node = new SluiceNode();
+        var cached = await CachedRead.Of(node.Cache, read);
+        await node.Fusion.RemoveByTagAsync(tag);
+        return await cached.WasEvicted();
+    }
 
     private async Task<(int Ada, int Bob)> AddCustomersWithOrdersAndNotes(ShopDb db)
     {
@@ -84,12 +94,12 @@ public sealed class ChildrenReadTests(PostgresFixture postgres)
             read.Children(read.Db<ShopDb>().Notes, n => EF.Property<int>(n, "CustomerId"), ada)
                 .ToListAsync(ct);
 
-        (await CachedRead.IsEvictedBy(ByProperty, _ordersByCustomer.For(ada))).Should().BeTrue();
-        (await CachedRead.IsEvictedBy(ByProperty, _ordersByCustomer.For(bob))).Should().BeFalse();
-        (await CachedRead.IsEvictedBy(ByNavigation, _ordersByCustomer.For(ada))).Should().BeTrue();
-        (await CachedRead.IsEvictedBy(ByNavigation, _ordersByCustomer.For(bob))).Should().BeFalse();
-        (await CachedRead.IsEvictedBy(ByShadowKey, _notesByCustomer.For(ada))).Should().BeTrue();
-        (await CachedRead.IsEvictedBy(ByShadowKey, _notesByCustomer.For(bob))).Should().BeFalse();
+        (await IsEvictedByTag(ByProperty, $"Orders[CustomerId]:{ada}")).Should().BeTrue();
+        (await IsEvictedByTag(ByProperty, $"Orders[CustomerId]:{bob}")).Should().BeFalse();
+        (await IsEvictedByTag(ByNavigation, $"Orders[CustomerId]:{ada}")).Should().BeTrue();
+        (await IsEvictedByTag(ByNavigation, $"Orders[CustomerId]:{bob}")).Should().BeFalse();
+        (await IsEvictedByTag(ByShadowKey, $"Notes[CustomerId]:{ada}")).Should().BeTrue();
+        (await IsEvictedByTag(ByShadowKey, $"Notes[CustomerId]:{bob}")).Should().BeFalse();
     }
 
     [Fact]

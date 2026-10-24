@@ -106,13 +106,10 @@ public sealed class FlagIdConverter()
     : ValueConverter<FlagId, string>(id => id.Value, value => new FlagId(value));
 ```
 
-Each converter is a class of its own, marked `[SluiceRoundTrips]`. A save tells Sluice the value
-it would write back for what EF loaded, and a read the value it asked for, so a converter on a
-key, foreign key or unique column must give back exactly the value it loaded (`"alice"` loaded and
-written as `"alice"`). Only you know that, so you say so once, on the class. Sluice refuses a
-model with an unmarked converter there the first time it uses it, naming the property;
-`HasConversion(id => id.Value, value => new UserId(value))` has no class to mark, which is why the
-lambdas move into one. See [Key folding](/guides/ef-core#key-folding).
+Each converter on a key, foreign key or unique column is a class of its own, marked
+`[SluiceRoundTrips]` to say it gives back exactly the value it loaded; Sluice refuses an unmarked
+one, naming the property. Lambdas passed to `HasConversion` have no class to mark, which is why
+they move into one. See [Key folding](/guides/ef-core#key-folding) for why.
 
 And a greeting API that isn't EF. In a real app it might be an HTTP API, Dapper or a file:
 

@@ -531,6 +531,60 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
         (await db.NameOf(ada)).Should().Be("Ada");
     }
 
+    // An interceptor after Sluice saves again from SavingChanges, so the inner save runs, and completes, before the
+    // outer one makes its savepoint. The outer save then writes what another interceptor changed after, and fails.
+    [Fact]
+    public async Task A_save_that_fails_after_a_save_ran_inside_it_leaves_nothing_of_its_own_pending()
+    {
+        await using var node = new SluiceNode();
+        await using var setup = postgres.CreateDb();
+        var (ada, bob) = await setup.AddCustomers();
+        var slug = $"taken-{Guid.NewGuid():N}";
+        setup.Pages.Add(new Page { Slug = slug, Section = $"taken-{Guid.NewGuid():N}" });
+        await setup.SaveChangesAsync();
+        var saveAgain = new SaveAgain(whileSaving: true);
+        var savings = 0;
+        var changeAfter = new ChangeWhileSaving(context =>
+        {
+            // The inner save's turn comes first, inside the outer save's.
+            if (++savings == 2)
+            {
+                var shop = (ShopDb)context;
+                shop.Customers.Local.Single(c => c.Id == ada).Name = "Ada Lovelace";
+                shop.Pages.Add(new Page { Slug = slug, Section = $"taken-{Guid.NewGuid():N}" });
+            }
+        });
+        await using var db = postgres.CreateDb(node, after: [saveAgain, changeAfter]);
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
+
+        saveAgain.Once(() => customers.Single(c => c.Id == bob).Name = "Bob Babbage");
+        var save = () => db.SaveChangesAsync();
+        await save.Should().ThrowAsync<DbUpdateException>();
+
+        savings.Should().Be(2);
+        await adaRead
+            .Awaiting(read => read.WasEvicted())
+            .Should()
+            .NotThrowAsync("the outer save's writes were rolled back to its savepoint");
+        await bobRead
+            .Awaiting(read => read.WasEvicted())
+            .Should()
+            .ThrowAsync<InvalidOperationException>(
+                "the inner save's write is still in the transaction"
+            )
+            .WithMessage(Uncommitted);
+        await transaction.CommitAsync();
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the commit publishes what the outer save may have written");
+        (await db.NameOf(ada)).Should().Be("Ada");
+        (await db.NameOf(bob)).Should().Be("Bob Babbage");
+    }
+
     [Fact]
     public async Task A_concurrency_conflict_inside_the_flow_s_transaction_leaves_nothing_pending()
     {

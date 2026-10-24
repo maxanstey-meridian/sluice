@@ -223,6 +223,28 @@ public sealed class Label
 }
 
 /// <summary>
+/// Has a complex property, its yield, stored in the recipe's own columns, and a complex collection, its ingredients,
+/// stored as a JSON column. Neither is an entry of its own.
+/// </summary>
+public sealed class Recipe
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public Yield Yield { get; set; } = new();
+    public List<Ingredient> Ingredients { get; set; } = [];
+}
+
+public sealed class Yield
+{
+    public int Portions { get; set; }
+}
+
+public sealed class Ingredient
+{
+    public string Item { get; set; } = "";
+}
+
+/// <summary>
 /// Found by its slug, unique among the pages that have one (a filtered unique index), or by its section and number,
 /// unique only together. Has PostgreSQL's <c>xmin</c> as its row version, so a save knows the slug a row had.
 /// </summary>
@@ -619,7 +641,7 @@ public sealed class Perch
 /// Shares its table with its door (table splitting): both map the label, only a locker its zone, and only a door its
 /// colour. A door's owner and code are a foreign key and a unique column, which a locker maps as plain columns. Its
 /// door goes with it, deleted by EF when it's loaded and with the row when it isn't. A smart locker is stored in the
-/// same table (table-per-hierarchy).
+/// same table (table-per-hierarchy). A door's serial, unique too, a locker maps through a complex property, its plate.
 /// </summary>
 public class Locker
 {
@@ -628,7 +650,13 @@ public class Locker
     public string Zone { get; set; } = "";
     public int? OwnerId { get; set; }
     public string? Code { get; set; }
+    public Plate Plate { get; set; } = new();
     public LockerDoor? Door { get; set; }
+}
+
+public sealed class Plate
+{
+    public string? Serial { get; set; }
 }
 
 public sealed class SmartLocker : Locker
@@ -643,6 +671,7 @@ public sealed class LockerDoor
     public string Colour { get; set; } = "";
     public int? OwnerId { get; set; }
     public string? Code { get; set; }
+    public string? Serial { get; set; }
 }
 
 /// <summary>A tenant scope the context holds as a whole, so a configure sets it with a new one.</summary>
@@ -673,6 +702,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
     public DbSet<Trailer> Trailers => Set<Trailer>();
     public DbSet<Parcel> Parcels => Set<Parcel>();
+    public DbSet<Recipe> Recipes => Set<Recipe>();
     public DbSet<Warehouse> Warehouses => Set<Warehouse>();
     public DbSet<Bin> Bins => Set<Bin>();
     public DbSet<Crate> Crates => Set<Crate>();
@@ -856,6 +886,8 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Parcel>().OwnsOne(p => p.Address, address => address.OwnsOne(a => a.Contact));
         model.Entity<Parcel>().OwnsMany(p => p.Stops);
         model.Entity<Parcel>().OwnsOne(p => p.Label, label => label.ToJson());
+        model.Entity<Recipe>().ComplexProperty(r => r.Yield);
+        model.Entity<Recipe>().ComplexCollection(r => r.Ingredients, i => i.ToJson());
         model.Entity<Delivery>().OwnsOne(d => d.Signature);
         model
             .Entity<Bin>()
@@ -1011,6 +1043,14 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .WithMany()
             .HasForeignKey(door => door.OwnerId);
         model.Entity<LockerDoor>().HasIndex(door => door.Code).IsUnique();
+        model.Entity<LockerDoor>().HasIndex(door => door.Serial).IsUnique();
+        model.Entity<LockerDoor>().Property(door => door.Serial).HasColumnName("Serial");
+        model
+            .Entity<Locker>()
+            .ComplexProperty(
+                locker => locker.Plate,
+                plate => plate.Property(p => p.Serial).HasColumnName("Serial")
+            );
         foreach (
             var shared in new[]
             {

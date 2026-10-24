@@ -57,7 +57,6 @@ no longer than the entry's duration.
 - **Work started under `ExecutionContext.SuppressFlow`** can't see the compute, so the nesting
   and read checks are off there. See
   [What isn't checked](/guides/strict-reads#what-isn-t-checked).
-
 - **Callers waiting on a `read.DoNotCache()` compute don't share its value.** Each runs its own
   compute once the first ends, one at a time, since FusionCache hands a waiter only what was
   stored. See [Leaving a value uncached](/guides/sources-and-queries#leaving-a-value-uncached).
@@ -125,8 +124,8 @@ no longer than the entry's duration.
   [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes) and
   [Bulk writes by key](/guides/ef-core#bulk-writes-by-key).
 - **A `DbTransaction` committed or rolled back outside EF is invalidated late**: when Sluice
-  next looks, such as the flow's next cached read or the connection closing, since EF raises no
-  event for it. A read in between can cache the old value. Commit through EF. See
+  next looks, such as the flow's next cached read, the context's next command or the
+  transaction's disposal, since EF raises no event for it. A read in between can cache the old value. Commit through EF. See
   [Committing outside EF](/guides/transactions#committing-outside-ef).
 - **A cached read of your own uncommitted writes is caught only where Sluice sees the
   transaction**: a `TransactionScope` by itself, and an EF or enlisted transaction once the
@@ -161,7 +160,7 @@ no longer than the entry's duration.
   service through a context property marked with it, set by
   `read.Db<AppDb>((db, services) => …)`. Sluice checks that the property reads the same with and
   without the caller's async state, which catches a body reading the request, but a body that
-  reads a static, the clock, or a service it resolves later and that keeps the caller, caches
+  reads a static, a clock coarse enough to read the same twice, or a service it resolves later and that keeps the caller, caches
   one value for everyone with that key. See
   [A tenant read through a scoped service](/guides/strict-reads#a-tenant-read-through-a-scoped-service).
 - **Invalidation isn't per tenant.** A write in one tenant evicts other tenants' cached reads

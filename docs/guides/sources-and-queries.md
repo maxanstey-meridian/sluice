@@ -64,6 +64,16 @@ declarations with the same key type and format are allowed, and share evictions.
 source once and use that one declaration everywhere. As for queries, see below for how formats
 are compared.
 
+With the EF Core package, the names it gives a model's dependencies are its own: `Customers`,
+`Orders[CustomerId]`, `Pages(Slug)` and the rest are named after tables (see
+[EF Core](/guides/ef-core)). A source of yours with one of those names would have its own key
+text, so a save through EF would miss its readers, and your writes would miss EF's. So it
+throws `ArgumentException`, whichever comes first: declaring your source after EF has used
+that dependency (in a read, a save or `set.Dependency`), or EF's first use of it after you
+declared your source. To invalidate a table's
+dependencies after a write Sluice can't see, use `set.Dependency(key)` or
+`set.AllDependencies()` on its `DbSet`.
+
 ## Queries
 
 A query has a name, a key type and a value type (or just a name and a value type, for a

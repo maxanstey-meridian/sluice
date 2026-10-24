@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
+using Sluice.Infrastructure;
 using ZiggyCreatures.Caching.Fusion;
 
 namespace Sluice;
@@ -23,9 +24,9 @@ public static class SluiceServiceCollectionExtensions
     /// The entry lifetimes configured here are checked against the tag-data lifetimes when <see cref="SluiceCache"/>
     /// is first resolved, which throws <see cref="InvalidOperationException"/> if an entry could outlive the tag data
     /// that invalidates it, or if the <c>InternalStrings</c> set here could mix tags with entries or dependencies with
-    /// clears: a <c>TagCacheKeyPrefix</c> that doesn't start with <c>__fc</c>, or a clear tag with ':' in it. A
-    /// <see cref="TimeProvider"/> registered here times the re-publishing of invalidations; otherwise it's
-    /// <see cref="TimeProvider.System"/>.
+    /// clears: a <c>TagCacheKeyPrefix</c> that doesn't start with <c>__fc</c>, or a clear tag with ':' after a
+    /// non-blank start (<c>a:b</c>, but not <c>:rem</c>). A <see cref="TimeProvider"/> registered here times the
+    /// re-publishing of invalidations; otherwise it's <see cref="TimeProvider.System"/>.
     /// </remarks>
     public static IServiceCollection AddSluice(
         this IServiceCollection services,
@@ -78,7 +79,8 @@ public static class SluiceServiceCollectionExtensions
                     provider,
                     tagOptions,
                     internalStrings,
-                    provider.GetService<TimeProvider>() ?? TimeProvider.System
+                    provider.GetService<TimeProvider>() ?? TimeProvider.System,
+                    [.. provider.GetServices<StoreChecks.Registered>().Select(check => check.Check)]
                 );
         });
 

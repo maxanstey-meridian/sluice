@@ -23,9 +23,11 @@ builder.Services.AddDbContextFactory<ShopDb>(
   registers `ShopDb` as a scoped service. A pooled registration works too, but a compute's
   context never comes from the pool (see [Pooling and factories](#pooling-and-factories)). If
   you register it more than one way, `UseSluice` runs once per context either way. Registered
-  only through a factory class of your own (EF's pattern for setting a pooled context's
-  tenant)? Register the context too, so the scope can make it:
-  `services.AddScoped(sp => sp.GetRequiredService<TenantDbFactory>().CreateDbContext())`.
+  only through a factory class of your own over a context that isn't pooled? Register the
+  context too, so the scope can make it:
+  `services.AddScoped(sp => sp.GetRequiredService<TenantDbFactory>().CreateDbContext())`. A
+  pooled registration needs nothing more: Sluice builds the compute's context from the pool's
+  options.
 - Register the context scoped (every EF registration's default) or transient, never as a
   singleton. `read.Db` checks, once per context type, that two DI scopes get different
   instances, and throws `InvalidOperationException` before the compute's first query if they
@@ -94,9 +96,11 @@ uses, but not your fields, and not a connection string you set, so what a comput
 [configure](/guides/strict-reads#tenants-and-other-context-state) set (a tenant, a tenant's
 database) would still be there for the next use, a request's. Instead, Sluice builds the
 compute's context from the pool's options, with its constructor's other services from the
-compute's own DI scope, and disposes it when the compute ends. A factory of your own that
-leases from the pool is still called (it's how the scope makes the context), but its lease goes
-back untouched. EF's model and internal services are shared, so this costs one context
+compute's own DI scope, and disposes it when the compute ends. For a pool registered through
+EF (`AddDbContextPool`, `AddPooledDbContextFactory`), nothing is leased and no factory of yours
+is called. A pool you built by hand (`new PooledDbContextFactory<T>(options)`) is leased once, to
+see that it's a pool, and the lease goes back untouched. EF's model and internal services are
+shared, so this costs one context
 construction per compute that uses one. Requests keep using the pool as before, and you still
 set a request's tenant on every lease, as
 [EF's docs do for tenants](https://learn.microsoft.com/ef/core/performance/advanced-performance-topics#managing-state-in-pooled-contexts).
@@ -163,7 +167,10 @@ through either evicts reads through the other, by key, by foreign key, by unique
 whole. Moving or renaming a class changes nothing. Two classes link only when they agree on the
 key columns and spell the schema the same way (`null` and `"public"` are different names); a
 read model over just one table of a TPT or TPC hierarchy isn't linked. Renaming a table or its
-schema, which comes with a migration, renames its dependencies.
+schema, which comes with a migration, renames its dependencies. These names are the model's: a
+`Source` of your own with one of them throws (see
+[Names](/guides/sources-and-queries#names)), so reach EF data through `set.Dependency(key)` and
+`set.AllDependencies()`.
 
 ### Narrowing to rows
 
@@ -318,8 +325,7 @@ Cached entities aren't attached to any context; to edit one, load it again on yo
 Every caller also gets the same object, so never modify one; see
 [Shared instances](/guides/configuration#shared-instances-and-auto-clone).
 
-Once a model with entities that load lazily or hold their context has been seen, Sluice checks
-every value before it's stored. A value that holds a lazy loader or a `DbContext` anywhere in
+Sluice checks every value before it's stored. A value that holds a lazy loader or a `DbContext` anywhere in
 its fields, such as an entity wrapped in your own record, throws `InvalidOperationException`,
 naming the query and the path to it, and nothing is cached: the cached value would load related
 rows later, outside the compute, or keep the compute's context alive. Select the values you need

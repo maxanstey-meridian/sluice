@@ -22,7 +22,7 @@ public sealed class PoolingTests(PostgresFixture postgres)
     [InlineData(Registration.DbContextPool)]
     [InlineData(Registration.PooledDbContextFactory)]
     [InlineData(Registration.DbContextFactory)]
-    public async Task Each_lease_evicts_what_it_wrote_and_nothing_an_earlier_lease_wrote(
+    public async Task Each_lease_evicts_what_it_wrote_and_a_later_lease_s_save_publishes_nothing_an_earlier_lease_wrote(
         Registration registration
     )
     {

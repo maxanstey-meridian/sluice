@@ -3,7 +3,6 @@ using System.Reflection;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Metadata;
 using Sluice.Infrastructure;
 
 namespace Sluice.EntityFrameworkCore;
@@ -20,15 +19,12 @@ namespace Sluice.EntityFrameworkCore;
 /// set of what it has visited by reference. Each runtime type's fields worth following are worked out once: those
 /// whose type may hold a loader or a context. Primitives, strings, enums and reflection objects are skipped, as are
 /// structs and sealed types (and arrays of them) whose fields can't hold one, so a list of sealed records costs one
-/// look at the list. It's off until the analysis has seen a model whose entities load lazily or hold their context,
-/// since only EF injects either; a model seen once keeps it on for the process.
+/// look at the list. It walks every value the cache stores, whatever model it comes from: the app can put a context in
+/// a value itself, and a lazy entity can come from a context without <c>UseSluice</c>, or from before the compute,
+/// which no analysis saw.
 /// </remarks>
 internal static class CachedValues
 {
-    private const string SeenAnnotation = "Sluice:HoldsLoaders";
-
-    private static volatile bool _on;
-
     // The fields of each runtime type to follow; null when there are none.
     private static readonly ConcurrentDictionary<Type, FieldInfo[]?> _plans = new();
 
@@ -36,45 +32,26 @@ internal static class CachedValues
     private static readonly ConcurrentDictionary<Type, bool> _closed = new();
 
     /// <summary>
-    /// Turns the check on if <paramref name="model"/> has entity types EF gives a lazy loader or their context, once
-    /// per model. Called by the analysis whenever EF compiles a query, before it runs.
-    /// </summary>
-    internal static void Watch(IModel model)
-    {
-        if (
-            !_on
-            && model.GetOrAddRuntimeAnnotationValue(
-                SeenAnnotation,
-                static model =>
-                    model!.GetEntityTypes().Any(type => TrackedReads.HoldsServices(type)),
-                model
-            )
-        )
-        {
-            _on = true;
-        }
-    }
-
-    /// <summary>
     /// The store check the EF package adds to each cache: why <paramref name="value"/> mustn't be stored, or null.
     /// </summary>
     internal static Exception? Check(object value)
     {
-        if (!_on || Find(value) is not ({ } found, var holder))
+        if (Find(value) is not ({ } found, var holder))
         {
             return null;
         }
 
-        var query = ActiveCompute.Reads is { } reads ? $"'{ActiveCompute.QueryName(reads)}'" : "A";
+        // Store checks run on the compute's flow, before it closes.
+        var query = ActiveCompute.QueryName(ActiveCompute.Reads!);
         var where = holder is null
             ? $"as the value itself ({Display(found.GetType())})"
             : $"in a {Display(holder.GetType())} at {PathTo(value, found)}";
         return new InvalidOperationException(
             found is DbContext
-                ? $"Query {query} returned a value holding a DbContext {where}, so the cached value would keep that "
+                ? $"Query '{query}' returned a value holding a DbContext {where}, so the cached value would keep that "
                     + "context, and what it tracks, alive and shared by every caller. Select the values you need into "
                     + "your own type instead of the entity."
-                : $"Query {query} returned a value holding a lazy loader {where}, so the cached value would load "
+                : $"Query '{query}' returned a value holding a lazy loader {where}, so the cached value would load "
                     + "related rows later, outside the compute and with no dependency recorded. Select the values you "
                     + "need into your own type instead of the entity."
         );

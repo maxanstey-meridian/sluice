@@ -632,7 +632,6 @@ public sealed class ComputeScopeTests
     [Fact]
     public async Task A_store_check_that_refuses_a_value_fails_the_call_and_caches_nothing()
     {
-        await using var node = new SluiceNode();
         var refused = new object();
         var refusal = new InvalidOperationException("refused");
         var log = new List<string>();
@@ -649,8 +648,11 @@ public sealed class ComputeScopeTests
             return value == refused ? refusal : null;
         }
 
-        StoreChecks.Add(node.Cache, Check);
-        StoreChecks.Add(node.Cache, Check);
+        await using var node = new SluiceNode(services: services =>
+        {
+            StoreChecks.Add(services, Check);
+            StoreChecks.Add(services, Check);
+        });
 
         Task<object?> Get(string key, object? value) =>
             node
@@ -691,15 +693,16 @@ public sealed class ComputeScopeTests
     [InlineData("runs while the flow has uncommitted writes")]
     public async Task Store_checks_do_not_run_when_nothing_will_be_stored(string ending)
     {
-        await using var node = new SluiceNode();
         var ran = false;
-        StoreChecks.Add(
-            node.Cache,
-            _ =>
-            {
-                ran = true;
-                return new InvalidOperationException("refused");
-            }
+        await using var node = new SluiceNode(services: services =>
+            StoreChecks.Add(
+                services,
+                _ =>
+                {
+                    ran = true;
+                    return new InvalidOperationException("refused");
+                }
+            )
         );
         using var flow = SluiceFlow.Begin();
         if (ending == "runs while the flow has uncommitted writes")

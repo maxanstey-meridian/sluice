@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
@@ -43,6 +44,9 @@ internal sealed class ComputeContexts(IServiceProvider root, AsyncServiceScope s
 
     // The contexts this built from pooled options, which are this compute's to dispose, not the scope's. Under the lock.
     private readonly List<DbContext> _built = [];
+
+    // The scopes SharedByScopes opened to compare with, disposed with the compute's. Under the lock.
+    private readonly List<AsyncServiceScope> _probes = [];
 
     // The scope's services as the configure gets them. Made under the lock.
     private IServiceProvider? _configureServices;
@@ -233,16 +237,10 @@ internal sealed class ComputeContexts(IServiceProvider root, AsyncServiceScope s
         bool shared;
         try
         {
+            // Disposed with the compute's own scope, not here, under the lock.
             var probe = root.CreateAsyncScope();
-            try
-            {
-                shared = ReferenceEquals(probe.ServiceProvider.GetService<TContext>(), context);
-            }
-            finally
-            {
-                // A context that never opened a connection disposes synchronously.
-                probe.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            }
+            _probes.Add(probe);
+            shared = ReferenceEquals(probe.ServiceProvider.GetService<TContext>(), context);
         }
         catch (Exception)
         {
@@ -268,19 +266,34 @@ internal sealed class ComputeContexts(IServiceProvider root, AsyncServiceScope s
                 + $"read.Db<{name}> call, and call read.Db<{name}>() after that."
         );
 
-    // What this built goes first: the scope may hold services those contexts use.
+    // What this built goes first: the scope may hold services those contexts use. Each is disposed even when one
+    // before it throws, as the compute disposes what it holds (SLUICE-CORE-015), and the caller gets what they threw.
     public async ValueTask DisposeAsync()
     {
-        try
+        List<Exception>? failures = null;
+        IAsyncDisposable[] disposables = [.. _built, .. _probes, scope];
+        foreach (var disposable in disposables)
         {
-            foreach (var context in _built)
+            try
             {
-                await context.DisposeAsync().ConfigureAwait(false);
+                await disposable.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception failure)
+            {
+                (failures ??= []).Add(failure);
             }
         }
-        finally
+
+        switch (failures)
         {
-            await scope.DisposeAsync().ConfigureAwait(false);
+            case [var only]:
+                ExceptionDispatchInfo.Throw(only);
+                break;
+            case { Count: > 1 }:
+                throw new AggregateException(
+                    "Disposing the compute's EF contexts and DI scope threw more than once.",
+                    failures
+                );
         }
     }
 }

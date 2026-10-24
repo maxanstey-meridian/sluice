@@ -20,8 +20,9 @@ Sluice maps each dependency to a pair of tags. For a source named `n` and a key 
 | `source.All` | `n:*`, `n:` | `n:` |
 
 So invalidating a key evicts readers of that key and readers of the whole source; invalidating
-the whole source evicts every reader of anything in it. Every tag contains `:`, so none can
-collide with FusionCache's own clear markers. Two sources whose tags happen to coincide only
+the whole source evicts every reader of anything in it. Every tag contains `:`, and Sluice refuses a
+clear tag with `:` after its first character, so none can collide with FusionCache's own clear
+markers. Two sources whose tags happen to coincide only
 share evictions.
 
 ## A cached read
@@ -183,7 +184,8 @@ A second interceptor, one per `SluiceCache`, handles writes. For a save:
      first command ran in: invalidate now, and again from that scope's `TransactionCompleted`.
 
 An `ExecuteUpdate` or `ExecuteDelete` publishes the same way, once it has run: EF drops query tags
-from these statements, so the tables it wrote are found by their quoted names in its SQL, and
+from these statements, so the tables it wrote are found by their names in its SQL, quoted
+or not, wherever one stands alone, and
 every read of the entity types stored in them is invalidated, reads by unique column included
 (for a delete, what it cascades into too). One that reports it changed no rows publishes nothing.
 

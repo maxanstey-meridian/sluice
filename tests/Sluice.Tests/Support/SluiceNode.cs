@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Time.Testing;
 using ZiggyCreatures.Caching.Fusion;
 using ZiggyCreatures.Caching.Fusion.Backplane.Memory;
 using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
@@ -12,7 +14,10 @@ public sealed class SluiceNode : IAsyncDisposable, IDisposable
     private readonly ServiceProvider _provider;
 
     /// <param name="configure">The app's FusionCache configuration, passed to <c>AddSluice</c>.</param>
-    /// <param name="services">The app's other registrations, such as a <see cref="TimeProvider"/>.</param>
+    /// <param name="services">
+    /// The app's other registrations, such as a <see cref="TimeProvider"/>. Without one, the node's clock never moves,
+    /// so an invalidation's re-publish waits for the node's disposal, whatever the test's timing.
+    /// </param>
     public SluiceNode(
         Action<IFusionCacheBuilder>? configure = null,
         Action<IServiceCollection>? services = null
@@ -21,6 +26,7 @@ public sealed class SluiceNode : IAsyncDisposable, IDisposable
         var collection = new ServiceCollection();
         collection.AddSluice(configure);
         services?.Invoke(collection);
+        collection.TryAddSingleton<TimeProvider>(new FakeTimeProvider());
         _provider = collection.BuildServiceProvider();
         try
         {

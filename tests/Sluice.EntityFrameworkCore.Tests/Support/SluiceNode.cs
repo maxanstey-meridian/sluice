@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Testing;
+using Microsoft.Extensions.Time.Testing;
 using ZiggyCreatures.Caching.Fusion;
 
 namespace Sluice.EntityFrameworkCore.Tests.Support;
@@ -17,7 +19,8 @@ public sealed class SluiceNode : IAsyncDisposable
     /// <param name="configure">The app's FusionCache configuration, passed to <c>AddSluice</c>.</param>
     /// <param name="services">
     /// The app's other registrations, such as a pooled context. One that registers <see cref="ShopDb"/> or its
-    /// factory replaces the default factory.
+    /// factory replaces the default factory. Without a <see cref="TimeProvider"/>, the node's clock never moves, so an
+    /// invalidation's re-publish waits for the node's disposal, whatever the test's timing.
     /// </param>
     /// <param name="validateScopes">Whether the provider refuses scoped services from the root, as in Development.</param>
     public SluiceNode(
@@ -31,6 +34,7 @@ public sealed class SluiceNode : IAsyncDisposable
             .AddSluice(configure)
             .AddSluiceEntityFrameworkCore();
         services?.Invoke(collection);
+        collection.TryAddSingleton<TimeProvider>(new FakeTimeProvider());
         if (
             !collection.Any(service =>
                 service.ServiceType == typeof(IDbContextFactory<ShopDb>)

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
@@ -697,6 +698,58 @@ public sealed class WriteDerivationTests : IAsyncLifetime
 
         parcel.Stops.RemoveAt(0);
         await SaveAndExpectEviction("the owned stops");
+    }
+
+    // A complex value isn't an entry of its own: changing one marks its entity Modified, with nothing but that value
+    // modified. EF lists a complex collection apart from the other complex properties.
+    [Fact]
+    public async Task Changing_only_a_complex_value_evicts_readers_of_its_row()
+    {
+        var recipe = new Recipe
+        {
+            Name = "Soup",
+            Yield = new() { Portions = 2 },
+            Ingredients = [new() { Item = "Leek" }],
+        };
+        var other = new Recipe { Name = "Stew" };
+        _db.Recipes.AddRange(recipe, other);
+        await _db.SaveChangesAsync();
+        var recipeRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().Recipes, recipe.Id).SingleAsync(ct)
+        );
+        var otherRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().Recipes, other.Id).SingleAsync(ct)
+        );
+
+        async Task SaveAndExpectEviction(string change)
+        {
+            _db.ChangeTracker.DetectChanges();
+            _db.Entry(recipe)
+                .Properties.Should()
+                .OnlyContain(property => !property.IsModified, "only {0} changed", change);
+            await _db.SaveChangesAsync();
+            (await recipeRead.WasEvicted()).Should().BeTrue("{0} changed", change);
+            (await otherRead.WasEvicted()).Should().BeFalse();
+        }
+
+        recipe.Yield.Portions = 4;
+        await SaveAndExpectEviction("the complex property");
+
+        recipe.Ingredients[0].Item = "Onion";
+        await SaveAndExpectEviction("an element of the complex collection");
+
+        recipe.Ingredients.Add(new() { Item = "Salt" });
+        await SaveAndExpectEviction("the complex collection");
+
+        recipe.Ingredients.RemoveAt(0);
+        await SaveAndExpectEviction("the complex collection");
+
+        await using var check = _postgres.CreateDb();
+        var saved = await check.Recipes.SingleAsync(r => r.Id == recipe.Id);
+        saved.Yield.Portions.Should().Be(4);
+        saved.Ingredients.Select(i => i.Item).Should().Equal("Salt");
     }
 
     [Fact]
@@ -1567,8 +1620,8 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             .BeTrue("a locker's AllDependencies covers its door, whose rows a delete deletes too");
     }
 
-    // A locker maps the door's owner and code as plain columns, so its save changes the door's foreign key and unique
-    // column, whose values before are unknown: the door isn't loaded.
+    // A locker maps the door's owner and code as plain columns, and its serial through a complex property, so its save
+    // changes the door's foreign key and unique columns, whose values before are unknown: the door isn't loaded.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1585,10 +1638,18 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         var door = await ReadDoor(locker.Id, ada.Id, code);
         var bobsDoors = await DoorsOf(bob.Id);
         var byNewCode = await DoorBy(newCode);
+        var serial = $"serial-{Guid.NewGuid():N}";
+        var bySerial = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().LockerDoors, d => d.Serial, serial)
+                    .SingleOrDefaultAsync(ct)
+        );
         var loaded = await _db.Lockers.SingleAsync(l => l.Id == locker.Id);
 
         loaded.OwnerId = bob.Id;
         loaded.Code = newCode;
+        loaded.Plate.Serial = serial;
         await _db.SaveChangesAsync();
 
         (
@@ -1603,6 +1664,10 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         (await bobsDoors.WasEvicted()).Should().BeTrue("the door joined Bob");
         (await door.ByCode.WasEvicted()).Should().BeTrue("the door left its code");
         (await byNewCode.WasEvicted()).Should().BeTrue("the door took the new code");
+        (await _reader.LockerDoors.SingleAsync(d => d.Id == locker.Id)).Serial.Should().Be(serial);
+        (await bySerial.WasEvicted())
+            .Should()
+            .BeTrue("the door took the serial, which the locker writes through a complex property");
     }
 
     // Sources are named after tables, so another context's class over the same tables, keyed by the same columns,
@@ -1663,24 +1728,24 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         (await shopBobOrders.WasEvicted()).Should().BeTrue("the other way, by the foreign key");
     }
 
-    // An abstract TPC root has no table, so its source is named for its concrete types' tables.
-    private static readonly Source<int> _shapes = new("Circles+Square");
-
+    // An abstract TPC root has no table, so its source is named for its concrete types' tables. The name is pinned by
+    // the tag a key's readers carry, since an app's Source can't take a name the model's sources own.
     [Fact]
     public async Task A_TPC_hierarchy_with_an_abstract_root_is_named_for_its_concrete_types_tables()
     {
         var circle = new Circle { Radius = 1 };
         _db.Circles.Add(circle);
         await _db.SaveChangesAsync();
+        var circleRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().Shapes, circle.Id).SingleAsync(ct)
+        );
 
-        (
-            await CachedRead.IsEvictedBy(
-                (read, ct) => read.Entity(read.Db<ShopDb>().Shapes, circle.Id).SingleAsync(ct),
-                _shapes.For(circle.Id)
-            )
-        )
-            .Should()
-            .BeTrue();
+        await _node.Fusion.RemoveByTagAsync(
+            string.Create(CultureInfo.InvariantCulture, $"Circles+Square:{circle.Id}")
+        );
+
+        (await circleRead.WasEvicted()).Should().BeTrue();
     }
 
     // A token in one table doesn't guard the columns of another: a table-per-type row is split across two.

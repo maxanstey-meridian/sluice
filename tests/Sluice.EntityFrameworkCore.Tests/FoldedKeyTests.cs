@@ -113,6 +113,44 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         await bulk.Should().ThrowAsync<InvalidOperationException>(converter).WithMessage(message);
     }
 
+    // An app source named like a table would share its readers' tags with a key text of its own. Every source of the
+    // model is built before its first write runs a command, so the clash throws there, whichever write comes first: the
+    // table doesn't exist, so a write that ran would fail on the database instead.
+    [Fact]
+    public async Task A_table_named_like_an_app_source_is_refused_before_a_save_or_bulk_write_runs()
+    {
+        _ = new Source<int>(ClashingDb.Table);
+        await using var node = new SluiceNode();
+        await using var db = new ClashingDb(
+            new DbContextOptionsBuilder()
+                .UseNpgsql(postgres.ConnectionString)
+                .UseSluice(node.Services)
+                .Options
+        );
+
+        db.Add(new Gadget { Id = new GadgetNo(1) });
+        var save = () => db.SaveChangesAsync();
+        (await save.Should().ThrowAsync<DbUpdateException>())
+            .WithInnerException<ArgumentException>()
+            .WithMessage($"*'{ClashingDb.Table}'*");
+        var bulk = () => db.Set<Gadget>().ExecuteDeleteAsync();
+        await bulk.Should().ThrowAsync<ArgumentException>().WithMessage($"*'{ClashingDb.Table}'*");
+    }
+
+    private sealed class ClashingDb(DbContextOptions options) : DbContext(options)
+    {
+        public const string Table = "gadgets_named_like_an_app_source";
+
+        protected override void OnModelCreating(ModelBuilder model)
+        {
+            Gadgets(
+                model,
+                gadget => gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter())
+            );
+            model.Entity<Gadget>().ToTable(Table);
+        }
+    }
+
     [Fact]
     public void A_marked_converter_and_EF_s_built_ins_that_round_trip_are_trusted()
     {

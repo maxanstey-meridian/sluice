@@ -126,9 +126,6 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb();
-
-        // Configuring a context with UseSluice starts Sluice's watch on every EF context.
-        await using var tracked = postgres.CreateDb(node);
         var made = new MadeContexts(
             new DbContextOptionsBuilder<ShopDb>().UseNpgsql(postgres.ConnectionString).Options
         );

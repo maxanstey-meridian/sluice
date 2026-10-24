@@ -117,7 +117,7 @@ when it's stored across several tables. Those are under the category
 
 Two more, under the same category, mean something to fix:
 
-- event id 5, at `Warning`, once per cache: a save inside a `TransactionScope` created without
+- event id 5, at `Warning`, once per cache: a save or bulk write inside a `TransactionScope` created without
   `TransactionScopeAsyncFlowOption.Enabled` couldn't see the scope where it completed, so Sluice
   invalidated at once and will again when the scope completes. See
   [TransactionScope with async code](/guides/transactions#transactionscope-with-async-code).

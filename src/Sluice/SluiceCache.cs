@@ -31,8 +31,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     private readonly FusionCacheEntryOptions _tagOptions;
     private readonly TimeProvider _time;
     private volatile Func<Transaction, IReadOnlyCollection<Dependency>>? _ambientWrites;
-    private readonly Lock _storeChecksLock = new();
-    private volatile Func<object, Exception?>[] _storeChecks = [];
+    private readonly Func<object, Exception?>[] _storeChecks;
 
     // Cancelled on dispose, which ends every re-publish's wait at once. Each re-publish waiting or running, completed
     // when it has, so dispose can wait for them before FusionCache is disposed after it.
@@ -44,13 +43,15 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         IServiceProvider services,
         FusionCacheEntryOptions tagOptions,
         FusionCacheInternalStrings internalStrings,
-        TimeProvider time
+        TimeProvider time,
+        Func<object, Exception?>[] storeChecks
     )
     {
         _cache = cache;
         _services = services;
         _tagOptions = tagOptions;
         _time = time;
+        _storeChecks = storeChecks;
 
         // Per-call pins: every one of these would let a compute outlive its caller or stamp its entry at
         // completion, which reopens the invalidation race.
@@ -74,18 +75,6 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     // Transaction.Current for nothing.
     internal void OnAmbient(Func<Transaction, IReadOnlyCollection<Dependency>> pending) =>
         _ambientWrites = pending;
-
-    // Copied on write, so a compute reads the checks without a lock. Packages add theirs once, at registration.
-    internal void AddStoreCheck(Func<object, Exception?> check)
-    {
-        lock (_storeChecksLock)
-        {
-            if (!_storeChecks.Contains(check))
-            {
-                _storeChecks = [.. _storeChecks, check];
-            }
-        }
-    }
 
     /// <summary>
     /// Returns the cached value for <paramref name="key"/>, or runs <paramref name="compute"/> and caches
@@ -201,11 +190,10 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         // The caller's token goes to the compute, not to FusionCache: on a cancelled token FusionCache throws
         // without awaiting its factory, so the caller would resume while the compute still uses its resources.
         // Cancelling ends the compute first, and the caller resumes after it.
-        var storeChecks = _storeChecks;
         var value = await _cache
             .GetOrSetAsync<TValue>(
                 entryKey,
-                (ctx, _) => FactoryAsync(reads, compute, storeChecks, ctx, ct),
+                (ctx, _) => FactoryAsync(reads, compute, _storeChecks, ctx, ct),
                 options: options
             )
             .ConfigureAwait(false);
@@ -359,7 +347,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         );
 
     // Publishes again after the delay, or at once when the cache is disposed (or already is). Nothing awaits it but
-    // dispose, so a failure ends here: FusionCache has logged it.
+    // dispose, so every failure ends here, and no faulted task is left unobserved: FusionCache logs a failed write.
     private void PublishAgainLater(Func<Task> publish)
     {
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -397,9 +385,9 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
 
             await publish().ConfigureAwait(false);
         }
-        catch (ObjectDisposedException)
+        catch (Exception)
         {
-            // FusionCache was disposed first, at shutdown.
+            // FusionCache logged the failed write, or was disposed first, at shutdown.
         }
         finally
         {
@@ -487,7 +475,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     // the value, the tags it recorded and whether it asked not to be cached; a guard violation is left on reads, for
     // the caller to check. The compute's own exception is rethrown. When its tags are checked against the flow's
     // uncommitted writes, the steps run even if it asked not to be cached: what they record is checked too. The store
-    // checks run last, on a value that will be stored.
+    // checks (none when nothing will be stored) run last, on a value that will be stored.
     private static async Task<(TValue Value, string[] Tags, bool Uncached)> ComputeAsync<TValue>(
         SluiceReads reads,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,

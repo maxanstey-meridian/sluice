@@ -41,7 +41,7 @@ public sealed class Dependency
         if (colon > 0 && !string.IsNullOrWhiteSpace(clearTag[..colon]))
         {
             throw new InvalidOperationException(
-                $"The Sluice cache's InternalStrings.{option} is '{clearTag}', which is also a tag Sluice uses for "
+                $"The Sluice cache's InternalStrings.{option} is '{clearTag}', which could be the tag Sluice uses for "
                     + $"source '{clearTag[..colon]}', so invalidating that source would clear the cache on every node. "
                     + "Use a clear tag without ':': leave InternalStrings at its defaults, or call SetToSafeStrings."
             );

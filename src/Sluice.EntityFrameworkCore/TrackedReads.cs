@@ -69,10 +69,6 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     internal static bool IsOn(IDbContextOptions options) =>
         options.FindExtension<CoreOptionsExtension>()?.Interceptors?.Contains(Instance) == true;
 
-    /// <summary>Whether EF gives the entity type's instances a lazy loader or the context that loads them.</summary>
-    internal static bool HoldsServices(IEntityType entityType) =>
-        Analysis.Holds(entityType) is not null;
-
     /// <summary>
     /// Refuses a context the checks don't run on: one without <c>UseSluice</c>, one with a query expression interceptor
     /// that EF runs after the analysis, or one with a provider that isn't relational, which runs no commands for
@@ -166,7 +162,6 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             return queryExpression;
         }
 
-        CachedValues.Watch(context.Model);
         IReadOnlyList<string> tags;
         try
         {
@@ -199,11 +194,12 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         return result;
     }
 
-    // A write, anywhere in a compute, whoever built it. Outside a fused fetch, a command from a context the compute
-    // didn't get from read.Db, or that isn't a query Sluice analysed, or whose reads it couldn't work out; otherwise
-    // its reads are recorded. Then any read inside a transaction, where a compute would cache rows other callers
-    // can't see yet, or an old snapshot under RepeatableRead or Serializable. The transaction is read as the write
-    // side reads it, from EF's own inputs: the command's own transaction would miss an enlisted or ambient one.
+    // A write, anywhere in a compute, whoever built it. Outside a fused fetch, a command with no context, or from a
+    // context the compute didn't get from read.Db, or that isn't a query Sluice analysed, or whose reads it couldn't
+    // work out; otherwise its reads are recorded. ForeignContexts sees a command with no context first, and refuses it
+    // the same way. Then any read inside a transaction, where a compute would cache rows other callers can't see yet,
+    // or an old snapshot under RepeatableRead or Serializable. The transaction is read as the write side reads it, from
+    // EF's own inputs: the command's own transaction would miss an enlisted or ambient one.
     private static InvalidOperationException? Read(
         SluiceReads reads,
         DbCommand command,
@@ -218,11 +214,13 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         var context = eventData.Context;
         if (!ActiveCompute.InFetch(reads))
         {
-            if (
-                context is null
-                || ComputeContexts.StateOf(reads, context) is var configured
-                    && configured == ComputeContext.Foreign
-            )
+            if (context is null)
+            {
+                return NotALinqQuery(command);
+            }
+
+            var configured = ComputeContexts.StateOf(reads, context);
+            if (configured == ComputeContext.Foreign)
             {
                 return ForeignContext($"An EF command ({Statement(command)})");
             }
@@ -237,11 +235,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
             if (tags.Reads is not { } read || Dependencies(context, read) is not { } dependencies)
             {
-                return new(
-                    $"An EF command that isn't a LINQ query ran inside a compute ({Statement(command)}), so Sluice "
-                        + "can't tell what it read. Run it in the fetch of read.From(dependency, fetch), with a "
-                        + "dependency on a Source you declare."
-                );
+                return NotALinqQuery(command);
             }
 
             // The state is the context's, so it's right for this compute only if the compute set it, from its
@@ -296,10 +290,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
         if (context is not null && !ContextTransaction.Of(context).IsNone)
         {
-            return new(
-                "Sluice's EF reads can't run inside a transaction: the compute would cache rows other callers can't "
-                    + "see yet, or an old snapshot. Compute the value outside the transaction, or after it commits."
-            );
+            return InTransaction();
         }
 
         return null;
@@ -309,6 +300,19 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         new(
             $"An EF write ran inside a compute ({Statement(command)}). Writes can't run inside a compute, which is "
                 + "a read: run them before or after GetOrSetAsync."
+        );
+
+    internal static InvalidOperationException InTransaction() =>
+        new(
+            "Sluice's EF reads can't run inside a transaction: the compute would cache rows other callers can't "
+                + "see yet, or an old snapshot. Compute the value outside the transaction, or after it commits."
+        );
+
+    internal static InvalidOperationException NotALinqQuery(DbCommand command) =>
+        new(
+            $"An EF command that isn't a LINQ query ran inside a compute ({Statement(command)}), so Sluice "
+                + "can't tell what it read. Run it in the fetch of read.From(dependency, fetch), with a "
+                + "dependency on a Source you declare."
         );
 
     // So that reading whole types is a choice, not a surprise: a busy type evicts such a query on every write.
@@ -356,8 +360,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 if (!Equals(onFlow, CleanFlow.Run(read.Get, context)))
                 {
                     differs =
-                        "gives a different value with the caller's async state (IHttpContextAccessor, an "
-                        + "AsyncLocal) than without it";
+                        "gives a different value when read again without the caller's async state";
                 }
             }
             catch (Exception failure)
@@ -372,7 +375,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 var name = context.GetType().Name;
                 return new(
                     $"Sluice can't track an EF query inside a compute ({Statement(command)}): {read.Filter} reads "
-                        + $"[SluiceContextState] {read.Property}, which {differs}, so it reads the caller rather than "
+                        + $"[SluiceContextState] {read.Property}, which {differs}, so it reads something other than "
                         + "what read.Db's configure set, and the cached value is served to every caller with this "
                         + $"key. Set that state in the configure, from the cache key: read.Db<{name}>(db => …), or "
                         + "(db, services) => … for a scoped service."

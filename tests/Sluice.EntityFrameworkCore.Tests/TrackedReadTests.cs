@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
@@ -57,6 +58,10 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ),
         ["scalar async"] = (
             (db, ct) => SelectOne(db).ExecuteScalarAsync(Parameters(db), ct),
+            NotLinq
+        ),
+        ["scalar with no context"] = (
+            (db, ct) => SelectOne(db).ExecuteScalarAsync(NoContext(db), ct),
             NotLinq
         ),
         ["non-query"] = ((db, _) => Task.FromResult(db.Database.ExecuteSqlRaw(Rename)), Write),
@@ -661,6 +666,19 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         ["ToListAsync"] = ((db, ct) => db.Customers.ToListAsync(ct), WithoutSluice),
         ["ToList"] = ((db, _) => Task.FromResult(db.Customers.ToList()), WithoutSluice),
         ["ExecuteSqlRaw"] = ((db, _) => Task.FromResult(db.Database.ExecuteSqlRaw(Rename)), Write),
+
+        // EF's raw command builder given no context, on this context's connection and logger.
+        ["a read with no context"] = (
+            (db, ct) => SelectOne(db).ExecuteScalarAsync(NoContext(db), ct),
+            NotLinq
+        ),
+        ["a write with no context"] = (
+            (db, ct) =>
+                db.GetService<IRawSqlCommandBuilder>()
+                    .Build(Rename)
+                    .ExecuteNonQueryAsync(NoContext(db, CommandSource.ExecuteSqlRaw), ct),
+            Write
+        ),
     };
 
     private const string WithoutSluice =
@@ -706,6 +724,41 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
 
     public static TheoryData<string> ValuesHolding => new(_holding.Keys);
 
+    // Values holding what a cached value mustn't, where no UseSluice context ever analyses a model with lazy entities.
+    private static readonly Dictionary<
+        string,
+        (Func<SluiceReads, LazyHelpdeskDb, CancellationToken, Task<object>> Compute, string Message)
+    > _holdingFromAnyContext = new()
+    {
+        ["a lazy entity from a context without UseSluice, in a fused fetch"] = (
+            (r, lazy, _) =>
+                r.From(
+                    _totals.All,
+                    async fetchCt =>
+                        (object)new TenantHolder(await lazy.Tenants.FirstAsync(fetchCt))
+                ),
+            "Query 'ef-tracked-wrapped' returned a value holding a lazy loader in a LazyHelpTenant at "
+                + "TenantHolder.Tenant._loader, so the cached value would load related rows later*"
+        ),
+        ["the compute's own context, of a model with no lazy entities, boxed"] = (
+            async (r, _, ct) =>
+            {
+                var db = r.Db<PooledHelpdeskDb>();
+                await db.Set<HelpTenant>().CountAsync(ct);
+                return new Boxed(db);
+            },
+            "Query 'ef-tracked-wrapped' returned a value holding a DbContext in a Boxed at Boxed.Context, so the "
+                + "cached value would keep that context*"
+        ),
+        ["a context without UseSluice that ran no command, boxed in a fused fetch"] = (
+            (r, lazy, _) => r.From(_totals.All, _ => Task.FromResult<object>(new Boxed(lazy))),
+            "*returned a value holding a DbContext in a Boxed at Boxed.Context*"
+        ),
+    };
+
+    public static TheoryData<string> ValuesHoldingFromAnyContext =>
+        new(_holdingFromAnyContext.Keys);
+
     // Generic code reaches the navigation through the interface its type parameter is constrained to.
     private static IQueryable<string> CustomerNames<T>(IQueryable<T> rows)
         where T : IHasCustomer => rows.Select(row => row.Customer!.Name);
@@ -736,6 +789,20 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
             null,
             db,
             db.GetService<IRelationalCommandDiagnosticsLogger>()
+        );
+
+    // A command's inputs with the context's logger, so EF raises its events, but no context.
+    private static RelationalCommandParameterObject NoContext(
+        ShopDb db,
+        CommandSource source = CommandSource.Unknown
+    ) =>
+        new(
+            db.GetService<IRelationalConnection>(),
+            null,
+            null,
+            null,
+            db.GetService<IRelationalCommandDiagnosticsLogger>(),
+            source
         );
 
     [Theory]
@@ -1387,7 +1454,6 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     )
     {
         await using var node = new SluiceNode();
-        await using var tracked = postgres.CreateDb(node);
         await using var plain = postgres.CreateDb();
         var (command, message) = _withoutSluice[kind];
         var runs = 0;
@@ -1422,7 +1488,6 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     public async Task A_command_on_a_context_without_UseSluice_throws_inside_a_compute_even_right_after_it_ran_outside_one()
     {
         await using var node = new SluiceNode();
-        await using var tracked = postgres.CreateDb(node);
         await using var plain = postgres.CreateDb();
 
         await plain.Customers.CountAsync();
@@ -1431,16 +1496,25 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         await call.Should().ThrowAsync<InvalidOperationException>().WithMessage(WithoutSluice);
     }
 
+    // A fetch is a declared read, but a write there still publishes mid-compute, and a read inside a transaction still
+    // caches rows other callers can't see. A command with no context is read for its own transaction.
     [Fact]
-    public async Task A_query_on_a_context_without_UseSluice_runs_in_a_fused_fetch_and_a_save_there_throws()
+    public async Task A_query_on_a_context_without_UseSluice_runs_in_a_fused_fetch_and_a_save_or_a_read_in_a_transaction_there_throws()
     {
         await using var node = new SluiceNode();
-        await using var tracked = postgres.CreateDb(node);
         await using var plain = postgres.CreateDb();
 
         var fetched = await CachedRead.Of(
             node.Cache,
             (read, _) => read.From(_totals.All, fetchCt => plain.Customers.ToListAsync(fetchCt))
+        );
+        var noContext = await CachedRead.Of(
+            node.Cache,
+            (read, _) =>
+                read.From(
+                    _totals.All,
+                    fetchCt => SelectOne(plain).ExecuteScalarAsync(NoContext(plain), fetchCt)
+                )
         );
         var save = () =>
             CachedRead.Of(
@@ -1455,9 +1529,77 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
                         }
                     )
             );
+        var inTransaction = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, _) => read.From(_totals.All, fetchCt => plain.Customers.ToListAsync(fetchCt))
+            );
+        var noContextInTransaction = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, _) =>
+                    read.From(
+                        _totals.All,
+                        fetchCt => SelectOne(plain).ExecuteScalarAsync(NoContext(plain), fetchCt)
+                    )
+            );
 
         (await fetched.WasEvicted()).Should().BeFalse("the fetch's value was cached");
+        (await noContext.WasEvicted()).Should().BeFalse("the fetch's value was cached");
         await save.Should().ThrowAsync<InvalidOperationException>().WithMessage(Write);
+        await using (await plain.Database.BeginTransactionAsync())
+        {
+            await inTransaction
+                .Should()
+                .ThrowAsync<InvalidOperationException>()
+                .WithMessage(Messages.InTransaction);
+            await noContextInTransaction
+                .Should()
+                .ThrowAsync<InvalidOperationException>()
+                .WithMessage(Messages.InTransaction);
+        }
+    }
+
+    // The walk runs whatever model the value comes from, so it finds a lazy entity no analysis saw, and a context the
+    // app put in the value itself, from a model with no lazy entities, or that ran no command at all.
+    [Theory]
+    [MemberData(nameof(ValuesHoldingFromAnyContext))]
+    public async Task A_value_holding_a_lazy_loader_or_a_context_is_refused_whatever_context_it_comes_from(
+        string kind
+    )
+    {
+        await HelpdeskModel.EnsureCreated();
+        await using var node = new SluiceNode(services: services =>
+            services.AddDbContext<PooledHelpdeskDb>(
+                (provider, options) =>
+                    options
+                        .UseNpgsql(HelpdeskModel.ConnectionString(HelpdeskModel.A))
+                        .UseSluice(provider)
+            )
+        );
+
+        // The store check is added to the node's cache when a UseSluice context's options are first built for it.
+        await using var registers = postgres.CreateDb(node);
+        await using var lazy = LazyHelpdeskDb.Create();
+        var (compute, message) = _holdingFromAnyContext[kind];
+        var runs = 0;
+
+        var call = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _wrapped,
+                    kind,
+                    (r, ct) =>
+                    {
+                        runs++;
+                        return compute(r, lazy, ct);
+                    }
+                )
+                .AsTask();
+
+        await call.Should().ThrowAsync<InvalidOperationException>().WithMessage(message);
+        await call.Should().ThrowAsync<InvalidOperationException>();
+        runs.Should().Be(2, "nothing was cached");
     }
 
     // The analysis refuses entities by the query's result type; a lazy entity inside the app's own type, or the
@@ -1499,6 +1641,8 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
     private sealed record ReceiptView(int Id, Receipt Receipt);
 
     private sealed record Boxed(object Context);
+
+    private sealed record TenantHolder(LazyHelpTenant Tenant);
 
     // Ada and Bob, a parcel of Ada's with its owned values, and a review of Ada, saved and then forgotten.
     private static async Task<OwnRows> AddOwnRows(ShopDb db)

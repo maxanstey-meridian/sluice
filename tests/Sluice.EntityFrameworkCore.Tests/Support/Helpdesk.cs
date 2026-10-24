@@ -1,6 +1,7 @@
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Npgsql;
 
 namespace Sluice.EntityFrameworkCore.Tests.Support;
@@ -325,5 +326,69 @@ public sealed class TenantLeases(IDbContextFactory<PooledHelpdeskDb> pool, ITena
         var context = pool.CreateDbContext();
         context.TenantId = tenant.TenantId;
         return context;
+    }
+}
+
+/// <summary>A helpdesk context EF can pool whose dispose throws once it has disposed.</summary>
+public sealed class FailingDisposeHelpdeskDb(DbContextOptions<FailingDisposeHelpdeskDb> options)
+    : HelpdeskModel(options)
+{
+    public const string Failure = "The helpdesk context's dispose failed.";
+
+    public override async ValueTask DisposeAsync()
+    {
+        await base.DisposeAsync();
+        throw new InvalidOperationException(Failure);
+    }
+}
+
+/// <summary>A helpdesk tenant whose tickets load lazily, through the lazy loader EF passes its constructor.</summary>
+public sealed class LazyHelpTenant
+{
+    private readonly ILazyLoader? _loader;
+    private List<HelpTicket>? _tickets;
+
+    public LazyHelpTenant() { }
+
+    public LazyHelpTenant(ILazyLoader loader) => _loader = loader;
+
+    public string Id { get; set; } = "";
+
+    public List<HelpTicket>? Tickets
+    {
+        get
+        {
+            _loader?.Load(this);
+            return _tickets;
+        }
+        set => _tickets = value;
+    }
+}
+
+/// <summary>
+/// The helpdesk's tenants as entities that load lazily, on a context never configured with <c>UseSluice</c>, so no
+/// analysis ever sees its model.
+/// </summary>
+public sealed class LazyHelpdeskDb(DbContextOptions<LazyHelpdeskDb> options) : DbContext(options)
+{
+    public DbSet<LazyHelpTenant> Tenants => Set<LazyHelpTenant>();
+
+    /// <summary>A context on <see cref="HelpdeskModel.A"/>, without <c>UseSluice</c>.</summary>
+    public static LazyHelpdeskDb Create() =>
+        new(
+            new DbContextOptionsBuilder<LazyHelpdeskDb>()
+                .UseNpgsql(HelpdeskModel.ConnectionString(HelpdeskModel.A))
+                .Options
+        );
+
+    protected override void OnModelCreating(ModelBuilder model)
+    {
+        model.Entity<HelpTicket>().ToTable("Tickets");
+        model
+            .Entity<LazyHelpTenant>()
+            .ToTable("HelpTenant")
+            .HasMany(tenant => tenant.Tickets)
+            .WithOne()
+            .HasForeignKey(ticket => ticket.TenantId);
     }
 }

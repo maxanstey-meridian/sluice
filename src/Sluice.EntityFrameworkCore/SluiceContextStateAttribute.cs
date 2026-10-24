@@ -13,9 +13,10 @@ namespace Sluice;
 /// the compute's flow, which is the first caller's, and again without the caller's async state, as the compute's
 /// context and the services its configure asks for are made. A body that reads the caller's request
 /// (<c>IHttpContextAccessor</c>, an <c>AsyncLocal</c>, <c>Activity.Current</c>, the current culture) gives two values,
-/// or throws without one, and the query throws rather than cache that caller's rows for every caller with the key.
-/// What Sluice can't see stays on trust: a body reading the clock, a static, or a service it resolves later on the
-/// compute's flow caches one value for every caller. The property must hold a plain value (a primitive, an enum, a
+/// or throws without one, and the query throws rather than cache that caller's rows for every caller with the key. A
+/// body whose value changes between two reads is refused the same way, as one reading a fine-grained clock usually is.
+/// What Sluice can't see stays on trust: a body reading a static, or a service it resolves later on the compute's
+/// flow, caches what it read for every caller. The property must hold a plain value (a primitive, an enum, a
 /// string, or a struct of those, nullable or not), must have a body, and mustn't be virtual or abstract: a derived
 /// context could give it another body. An interface's implementation is fine. The mark does nothing on an
 /// auto-property: a settable one is state the configure can already set, and a get-only or init-only one is refused,

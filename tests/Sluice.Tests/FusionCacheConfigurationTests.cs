@@ -246,7 +246,7 @@ public sealed class FusionCacheConfigurationTests
             .Should()
             .Throw<InvalidOperationException>()
             .WithMessage(
-                $"The Sluice cache's InternalStrings.{option} is '{tag}', which is also a tag Sluice uses for source "
+                $"The Sluice cache's InternalStrings.{option} is '{tag}', which could be the tag Sluice uses for source "
                     + $"'{source}', so invalidating that source would clear the cache on every node.*"
             );
     }

@@ -1,3 +1,4 @@
+using System.Transactions;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
@@ -162,8 +163,14 @@ public sealed class RaceTests
         services.AddSingleton<TimeProvider>(_time);
 
     // Advances the node's clock by `by` and waits for FusionCache to report `publishes` tag or clear writes, so a test
-    // reads only once the re-publish has landed. The bound only turns a regression into a failure instead of a hang.
-    private async Task AdvanceUntilPublishedAsync(SluiceNode node, TimeSpan by, int publishes)
+    // reads only once the re-publish has landed; `onPublish` runs on the flow of each. The bound only turns a regression
+    // into a failure instead of a hang.
+    private async Task AdvanceUntilPublishedAsync(
+        SluiceNode node,
+        TimeSpan by,
+        int publishes,
+        Action? onPublish = null
+    )
     {
         var seen = 0;
         var published = new TaskCompletionSource(
@@ -171,6 +178,7 @@ public sealed class RaceTests
         );
         void Count(object? sender, EventArgs e)
         {
+            onPublish?.Invoke();
             if (Interlocked.Increment(ref seen) == publishes)
             {
                 published.TrySetResult();
@@ -181,7 +189,15 @@ public sealed class RaceTests
         node.Fusion.Events.Clear += Count;
         try
         {
-            _time.Advance(by);
+            // On a flow of its own, as a real timer fires: a re-publish resumes on the thread that advanced the clock,
+            // so advancing it from the test's flow would lend the re-publish the test's async state.
+            Task advancing;
+            using (ExecutionContext.SuppressFlow())
+            {
+                advancing = Task.Run(() => _time.Advance(by));
+            }
+
+            await advancing;
             await published.Task.WaitAsync(TimeSpan.FromSeconds(10));
         }
         finally
@@ -307,6 +323,92 @@ public sealed class RaceTests
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#3");
     }
 
+    // The re-publish outlives the call, so it mustn't hold the caller's transaction or anything else on its flow.
+    [Fact]
+    public async Task A_re_publish_holds_none_of_the_caller_s_async_state()
+    {
+        await using var node = new SluiceNode(services: OnFakeTime);
+        var callerState = new AsyncLocal<string>();
+        var seen = new List<(Transaction? Transaction, string? State)>();
+
+        using (new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+        {
+            callerState.Value = "the caller's";
+            await node.Cache.InvalidateAsync(_rows.For(1));
+
+            await AdvanceUntilPublishedAsync(
+                node,
+                _republishDelay,
+                publishes: 2,
+                onPublish: () =>
+                {
+                    lock (seen)
+                    {
+                        seen.Add((Transaction.Current, callerState.Value));
+                    }
+                }
+            );
+        }
+
+        seen.Should().Equal((null, null), (null, null));
+    }
+
+    // Nothing awaits a re-publish but dispose, so one that fails must end in Sluice: the dispose doesn't throw, and no
+    // faulted task is left for the finalizer to report as unobserved.
+    [Theory]
+    [InlineData("FusionCache was disposed first")]
+    [InlineData("FusionCache's memory write throws")]
+    public async Task A_failing_re_publish_reaches_no_one(string failure)
+    {
+        var memory = new HookedMemoryCache();
+        await using var node = new SluiceNode(cache => cache.WithMemoryCache(memory), OnFakeTime);
+        var thrown = new InvalidOperationException(
+            $"Simulated memory cache failure {Guid.NewGuid()}"
+        );
+        var unobserved = new List<Exception>();
+        void Unobserved(object? sender, UnobservedTaskExceptionEventArgs e)
+        {
+            lock (unobserved)
+            {
+                unobserved.AddRange(e.Exception.Flatten().InnerExceptions);
+            }
+        }
+
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        if (failure == "FusionCache was disposed first")
+        {
+            node.Fusion.Dispose();
+        }
+        else
+        {
+            memory.OnWrite = _ => throw thrown;
+        }
+
+        TaskScheduler.UnobservedTaskException += Unobserved;
+        try
+        {
+            await node.Cache.Awaiting(cache => cache.DisposeAsync()).Should().NotThrowAsync();
+
+            // The failed task completes just after the dispose's wait ends, so collect until it's had time to.
+            for (var i = 0; i < 10; i++)
+            {
+                await Task.Delay(10);
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= Unobserved;
+            memory.OnWrite = null;
+        }
+
+        lock (unobserved)
+        {
+            unobserved.Should().NotContain(thrown);
+        }
+    }
+
     [Fact]
     public async Task ClearAsync_is_published_again_after_the_delay()
     {
@@ -328,9 +430,14 @@ public sealed class RaceTests
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#3");
     }
 
-    /// <summary>A memory cache that reports each miss of a key, counted from when <see cref="OnMiss"/> is set.</summary>
+    /// <summary>
+    /// A memory cache that reports each miss of a key, counted from when <see cref="OnMiss"/> is set, and each write,
+    /// before it's made.
+    /// </summary>
     private sealed class HookedMemoryCache : IMemoryCache
     {
+        public Action<object>? OnWrite { get; set; }
+
         private readonly MemoryCache _inner = new(new MemoryCacheOptions());
         private readonly Dictionary<object, int> _misses = [];
         private Action<object, int>? _onMiss;
@@ -370,7 +477,11 @@ public sealed class RaceTests
             return false;
         }
 
-        public ICacheEntry CreateEntry(object key) => _inner.CreateEntry(key);
+        public ICacheEntry CreateEntry(object key)
+        {
+            OnWrite?.Invoke(key);
+            return _inner.CreateEntry(key);
+        }
 
         public void Remove(object key) => _inner.Remove(key);
 
