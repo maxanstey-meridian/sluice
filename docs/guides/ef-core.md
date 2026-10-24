@@ -203,8 +203,27 @@ a row whose value is null would hold a value a reader finds, but no save would r
 Each save of a row reports one more value per unique column of its type. Without a row version
 the value the database holds when an update or delete runs may not be the one EF loaded, so,
 as with `Children` lists, such a save evicts every reader by that column; see
-[Row versions](#row-versions). `set.Dependency(key)` doesn't evict readers by a unique column;
-after a write Sluice can't see, use `set.AllDependencies()`.
+[Row versions](#row-versions).
+
+Once the compute returns, before its value is stored, Sluice runs one more query on the
+compute's context: the keys of the rows holding the value
+(`SELECT id FROM forms WHERE slug = @value`), ignoring query filters. It records each row it
+finds by its key, so a write to that row by key evicts the reader too: `set.Dependency(key)`,
+and a [bulk write by key](#bulk-writes-by-key), even one that doesn't touch the column. Query
+filters are ignored so that a row they hide, such as a soft-deleted one, is recorded as well,
+and a write that brings it back evicts the reader. A filtered unique index lets rows outside its filter
+share a value: each is recorded, and past 100 rows the reader depends on every row of the type
+instead. Naming the primary key runs no lookup, and nor does a type with a composite primary
+key, which no write by key reaches.
+
+That's one more round trip per compute, on the column's index; a cache hit runs neither query.
+If the lookup fails, the compute fails: nothing is cached and the caller gets the exception. A
+write that moves the value between the two queries still evicts the entry, as any write during
+a compute does.
+
+`set.Dependency(key)` reaches only readers that found that row. A reader whose value no row
+held, a cached "not found", depends on the value alone, so after a write Sluice can't see that
+may have given a row that value, use `set.AllDependencies()`.
 
 A key that comes from public input, such as a slug from a URL, caches every miss. Leave misses
 uncached with [`read.DoNotCache()`](/guides/sources-and-queries#leaving-a-value-uncached).
@@ -443,13 +462,16 @@ same way: still correct, just broader.
 ### Bulk updates and deletes
 
 `ExecuteUpdate` and `ExecuteDelete` on a `UseSluice` context need no Sluice code either. Sluice
-can't tell which rows they changed, so once one commits it evicts every cached read of the
-types stored in the table it wrote:
+can't tell which rows a plain one changed, so once it commits it evicts every cached read of
+the types stored in the table it wrote. Name the rows with `ForKey` and only their readers are
+evicted; see [Bulk writes by key](#bulk-writes-by-key).
 
 | Statement | Evicts |
 |---|---|
 | `ExecuteUpdate` | every read of the type, and every `Children` list of its foreign keys, since rows may have moved between parents |
 | `ExecuteDelete` | the same, every `Children` list pointing at the type, and what the delete [cascades into](#database-cascades) |
+| `ForKey(id).ExecuteUpdate` | that row's readers, every `Children` list of the type's foreign keys, and readers by any unique column the statement names |
+| `ForKey(id).ExecuteDelete` | that row's readers, every `Children` list of the type's foreign keys, and what the delete cascades into |
 
 They follow the same timing as saves: inside a transaction, at its commit or rollback. One that
 fails or is cancelled still invalidates, as a save does, because it may have committed. One that
@@ -464,6 +486,80 @@ for table names. The scan can match too much, never too little:
 
 Each of those evicts more than the statement changed, which costs a recompute but never serves
 an old value.
+
+### Bulk writes by key
+
+When a bulk write is about one row, or a few, put `.ForKey(id)` or `.ForKeys(ids)` just before
+the call. Sluice adds the key condition to the statement itself, alongside your `Where`, so the
+statement can only touch those rows, and it evicts only their readers:
+
+```csharp
+await db.Set<FormEntity>()
+    .Where(f => f.OrganisationId == organisationId && !f.IsLive && f.Status == FormStatus.Draft)
+    .ForKey(id)
+    .ExecuteUpdateAsync(s => s.SetProperty(f => f.IsLive, true), ct);
+
+await db.Set<FormEntity>().Where(f => f.OrganisationId == organisationId).ForKey(id).ExecuteDeleteAsync(ct);
+
+await db.Set<Order>().ForKeys(ids).ExecuteUpdateAsync(s => s.SetProperty(o => o.Item, item), ct);
+```
+
+Move the key condition (`f.Id == id`) out of your `Where` and into `ForKey`; the rest of the
+`Where` stays, so a conditional write is still conditional. Sluice doesn't recognise a key
+condition you write yourself: a bulk write without `ForKey` evicts every read of its type,
+whatever its `Where` says. `ForKey` and `ForKeys` return a `KeyedRows<T>`, not a query: it has
+`ExecuteUpdate`, `ExecuteUpdateAsync`, `ExecuteDelete` and `ExecuteDeleteAsync`, taking EF's own
+setters, and nothing else, so it can't end up inside another query.
+
+Once a keyed statement commits, Sluice evicts:
+
+| Keyed statement | Evicts |
+|---|---|
+| `ExecuteUpdate` | each row's `Entity` readers, by key and by unique column (those [recorded the row they found](#by-a-unique-column)); every plain query of the type; every `Children` list of the type's foreign keys, under every parent; and every reader by a unique column whose name appears in the statement |
+| `ExecuteDelete` | each row's `Entity` readers, by key and by unique column, and every plain query of the type; every `Children` list of the type's foreign keys, under every parent; the `Children` lists under each deleted row, of each foreign key that's `CASCADE` or `SET NULL`; and what the delete [cascades into](#database-cascades) |
+
+- **Readers by a unique column.** A reader that found one of the rows is evicted through its key
+  either way. One whose value no row held, a cached "not found", can only be reached through the
+  column, so an update that names the column evicts every reader by it. Sluice looks for the
+  column's name in the statement's SQL, as the provider quotes it, so a name that appears only in
+  the `WHERE` counts too. That evicts more than it needs to, never less. So a keyed update that
+  sets a form's `IsLive` leaves other forms' cached reads by slug alone, while one that sets its
+  `Slug` evicts every read by slug. A delete never evicts by column: every reader that found the row
+  recorded its key, and a reader that found no row still finds none.
+- **`Children` lists stay whole.** A keyed update or delete still evicts every list of the type's
+  foreign keys, under every parent. Sluice knows which rows changed, but not which parents they
+  were under, and a list holds its rows' contents, not just their keys. Linking each list to its
+  rows would add a tag per row to every cached list. A keyed delete also evicts the lists under
+  each deleted row, of each foreign key that's `CASCADE` or `SET NULL` in the model (every such
+  list, for a foreign key to an [alternate key](#model-shapes)).
+- **Other types stay whole.** Only the type you keyed narrows. Any other type the
+  [table-name scan](#bulk-updates-and-deletes) finds in the statement, such as one in a
+  subquery, is evicted whole, as before.
+- **More than 100 keys.** `ForKeys` with more than 100 keys evicts as a plain bulk write does,
+  every read of the type, so a mass update doesn't send thousands of invalidations.
+- **An update that may set the key.** EF lets `ExecuteUpdate` set the primary key, which would
+  move a row to a key whose readers cached "not found". So when the statement names the key's
+  column more than the once Sluice's own condition does, the update evicts as a plain bulk
+  update does. That includes a statement that only mentions another table's column of the same
+  name, in a join or a subquery: more than it needs to, never less.
+- **One statement.** The keys apply to the statement EF runs for the call. Any other bulk
+  statement on the same flow while it runs, such as one an interceptor of yours issues, or a
+  retry by the execution strategy, evicts whole.
+
+Keyed statements follow the same timing as the rest: inside a transaction, at its commit or
+rollback; a failure or cancellation still invalidates; and one that changed no rows, because
+your other conditions matched nothing, evicts nothing.
+
+These throw before anything runs:
+
+- a type with a composite primary key: `NotSupportedException`;
+- a key that isn't the exact .NET type of the primary key: `ArgumentException`, naming the type
+  expected, as for [`read.Entity`](#keys);
+- a null key in `ForKeys`: `ArgumentException` (and a null `ForKey`, `ArgumentNullException`);
+- a type not mapped to a table: `NotSupportedException`;
+- a query that doesn't start from an EF set of an entity type: `ArgumentException`.
+
+An empty `ForKeys` returns 0 and runs nothing.
 
 ## Writes Sluice can't see
 
@@ -481,11 +577,12 @@ await cache.InvalidateAsync(db.Orders.AllDependencies());
 | Dependency | Evicts |
 |---|---|
 | `set.AllDependencies()` | every read of the type, and what a delete of it [cascades into](#database-cascades) |
-| `set.Dependency(key)` | `Entity` readers of that row by its key and plain queries of the type, but **not** `Children` readers of its parent, nor `read.Entity` readers by a unique column |
+| `set.Dependency(key)` | `Entity` readers of that row, by its key or by a unique column that found it, and plain queries of the type, but **not** `Children` readers of its parent, nor readers by a unique value no row held |
 
-`set.Dependency(key)` can't evict `Children` readers or readers by a unique column, because
-Sluice can't see the row's foreign keys or unique values without loading it. If something reads
-the rows you changed through `Children` or by a unique column, use `set.AllDependencies()`.
+`set.Dependency(key)` can't evict `Children` readers, or a reader by a unique column whose value
+no row held, because Sluice can't see the row's foreign keys or new unique values without
+loading it. If something reads the rows you changed through `Children`, or by a unique value
+the write may have given a row, use `set.AllDependencies()`.
 
 EF dependencies batch with declared ones:
 

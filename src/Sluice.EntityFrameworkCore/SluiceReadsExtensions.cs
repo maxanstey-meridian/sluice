@@ -1,8 +1,8 @@
 using System.Linq.Expressions;
-using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Sluice.EntityFrameworkCore;
+using Sluice.Infrastructure;
 
 namespace Sluice;
 
@@ -25,12 +25,6 @@ namespace Sluice;
 /// </remarks>
 public static class SluiceReadsExtensions
 {
-    private static readonly MethodInfo _efProperty = typeof(EF).GetMethod(nameof(EF.Property))!;
-    private static readonly MethodInfo _objectEquals = typeof(object).GetMethod(
-        nameof(Equals),
-        [typeof(object), typeof(object)]
-    )!;
-
     /// <summary>
     /// The compute's own <typeparamref name="TContext"/>, taken on first use from a DI scope the compute opens for
     /// itself, as a request's scope makes one, and disposed with that scope when the compute ends. It doesn't track
@@ -167,7 +161,7 @@ public static class SluiceReadsExtensions
         var query = TrackedReads.Query(set);
 
         read.From(dependency);
-        return WhereEquals(query, ModelSources.KeyProperty(set.EntityType), key);
+        return ColumnFilters.WhereEquals(query, ModelSources.KeyProperty(set.EntityType), key);
     }
 
     /// <summary>
@@ -182,6 +176,14 @@ public static class SluiceReadsExtensions
     /// Without a row version (on PostgreSQL, <c>xmin</c>), or the column as a concurrency token, on a row stored in one
     /// table, a save that updates or deletes a <typeparamref name="T"/> can't know the value the database holds, so it
     /// evicts every such reader of <typeparamref name="T"/>, as it does <see cref="Children"/> lists.
+    /// <para>
+    /// Once the compute returns, before its value is stored, Sluice also looks up the keys of the rows holding the
+    /// value, ignoring query filters, and records each, so a write by key reaches the reader too:
+    /// <c>set.Dependency(key)</c>, and a keyed bulk write (<c>ForKey</c>) that doesn't touch the column. That's one
+    /// more indexed query per compute; if it fails, the compute fails. Past 100 such rows (a filtered unique index lets
+    /// rows outside its filter share a value), the reader depends on every <typeparamref name="T"/> row instead. The
+    /// primary key, and a type with a composite primary key, run no lookup.
+    /// </para>
     /// </remarks>
     /// <param name="read">The compute's reads.</param>
     /// <param name="set">The set to read, on the context <see cref="Db{TContext}(SluiceReads)"/> returns.</param>
@@ -230,12 +232,25 @@ public static class SluiceReadsExtensions
         ModelSources.EnsureStored(property, value, nameof(value));
         var query = TrackedReads.Query(set);
 
-        read.From(
-            property.IsPrimaryKey()
-                ? ModelSources.Entity(entityType).For(value)
-                : ModelSources.Unique(property).For(value)
-        );
-        return WhereEquals(query, property, value);
+        if (property.IsPrimaryKey())
+        {
+            read.From(ModelSources.Entity(entityType).For(value));
+        }
+        else
+        {
+            read.From(ModelSources.Unique(property).For(value));
+
+            // A composite key isn't recorded: nothing invalidates one row of such a type by key alone.
+            if (entityType.FindPrimaryKey()!.Properties is [var key])
+            {
+                ActiveCompute.BeforeStore(
+                    read,
+                    ct => RecordFoundKeysAsync(read, set, property, key, value, ct)
+                );
+            }
+        }
+
+        return ColumnFilters.WhereEquals(query, property, value);
     }
 
     /// <summary>
@@ -297,27 +312,33 @@ public static class SluiceReadsExtensions
         var query = TrackedReads.Query(set);
 
         read.From(ModelSources.ForeignKey(resolved).For(principalKey));
-        return WhereEquals(query, property, principalKey);
+        return ColumnFilters.WhereEquals(query, property, principalKey);
     }
 
-    // e => Equals(EF.Property<TKey>(e, name), (TKey)key), with the key captured so EF sends it as a parameter.
-    // object.Equals, as EF's own key lookups use, because a converted key type needn't define ==.
-    private static IQueryable<T> WhereEquals<T>(IQueryable<T> query, IProperty property, object key)
+    // Records the key of each row holding the value, so a write by key reaches the reader too: set.Dependency(key) and
+    // a keyed bulk write, which publish no unique column the statement doesn't name. Query filters are ignored, so a
+    // row they hide (soft-deleted, say) is recorded too, and a write that brings it back evicts the reader. A filtered
+    // unique index lets rows outside its filter share the value, so past the cap the reader depends on the whole type.
+    // It runs after the compute's own query, so the value may have moved in between; that write published the column
+    // after the compute started, which evicts the entry (SLUICE-CORE-003).
+    private static async Task RecordFoundKeysAsync<T>(
+        SluiceReads read,
+        DbSet<T> set,
+        IProperty column,
+        IProperty key,
+        object value,
+        CancellationToken ct
+    )
         where T : class
     {
-        var entity = Expression.Parameter(typeof(T), "e");
-        var column = Expression.Call(
-            _efProperty.MakeGenericMethod(property.ClrType),
-            entity,
-            Expression.Constant(property.Name)
-        );
-        Expression<Func<object>> captured = () => key;
-        var equals = Expression.Call(
-            _objectEquals,
-            Expression.Convert(column, typeof(object)),
-            Expression.Convert(Expression.Convert(captured.Body, property.ClrType), typeof(object))
-        );
+        var keys = await ColumnFilters
+            .WhereEquals(TrackedReads.Query(set).IgnoreQueryFilters(), column, value)
+            .Select(ColumnFilters.Select<T>(key))
+            .Take(ModelSources.KeyLimit + 1)
+            .ToListAsync(ct)
+            .ConfigureAwait(false);
 
-        return query.Where(Expression.Lambda<Func<T, bool>>(equals, entity));
+        var source = ModelSources.Entity(set.EntityType);
+        read.From(keys.Count > ModelSources.KeyLimit ? [source.All] : keys.Select(source.For));
     }
 }

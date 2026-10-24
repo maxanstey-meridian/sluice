@@ -1,3 +1,4 @@
+using System.Transactions;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
@@ -220,6 +221,7 @@ public sealed class ComputeGuardTests
     [InlineData("fetches")]
     [InlineData("holds")]
     [InlineData("leaves uncached")]
+    [InlineData("adds a step before the store")]
     public async Task Using_another_running_compute_s_read_throws_and_caches_nothing(string use)
     {
         await using var node = new SluiceNode();
@@ -269,6 +271,9 @@ public sealed class ComputeGuardTests
                                     break;
                                 case "leaves uncached":
                                     captured!.DoNotCache();
+                                    break;
+                                case "adds a step before the store":
+                                    ActiveCompute.BeforeStore(captured!, _ => Task.CompletedTask);
                                     break;
                                 default:
                                     ActiveCompute.Hold(captured!, _ => new Resource());
@@ -338,5 +343,261 @@ public sealed class ComputeGuardTests
             .ThrowAsync<InvalidOperationException>()
             .WithMessage("*which has already returned*");
         (await node.Cache.GetOrSetAsync(_outer, "b", Good)).Should().Be("good#1");
+    }
+
+    // A probe stands in for a package's transaction: what it has written and not yet committed.
+    private static Func<IReadOnlyCollection<Dependency>> Pending(params Dependency[] written) =>
+        () => written;
+
+    private const string Uncommitted =
+        "Query 'guard-outer' read *, which the caller's own transaction has written and not yet committed. The "
+        + "compute reads only what's committed, so the caller would get the data without its own writes. Read those "
+        + "rows on the transaction's own context, or after it commits.";
+
+    [Fact]
+    public async Task Without_a_flow_box_a_probe_is_not_kept()
+    {
+        await using var node = new SluiceNode();
+        var asked = false;
+
+        FlowWrites
+            .AddProbe(
+                node.Cache,
+                () =>
+                {
+                    asked = true;
+                    return [_rows.For(1)];
+                }
+            )
+            .Should()
+            .BeFalse();
+
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+        asked.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_read_of_the_flow_s_uncommitted_writes_throws_caches_nothing_and_after_the_flow_caches_as_usual()
+    {
+        await using var node = new SluiceNode();
+
+        using (SluiceFlow.Begin())
+        {
+            FlowWrites.AddProbe(node.Cache, Pending(_rows.For(1))).Should().BeTrue();
+            var call = () => node.Cache.GetOrSetAsync(_outer, "k", Good).AsTask();
+
+            await call.Should()
+                .ThrowAsync<InvalidOperationException>()
+                .WithMessage(Uncommitted.Replace("*", "guard-rows:1"));
+        }
+
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+    }
+
+    // The fresh value isn't the one cached before, and leaves it in place.
+    [Fact]
+    public async Task With_unrelated_uncommitted_writes_a_read_computes_fresh_and_stores_nothing()
+    {
+        await using var node = new SluiceNode();
+        await node.Cache.GetOrSetAsync(_outer, "k", Good);
+
+        using (SluiceFlow.Begin())
+        {
+            FlowWrites.AddProbe(node.Cache, Pending(_rows.For(2)));
+
+            (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+            (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#3");
+        }
+
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+    }
+
+    // The fresh compute runs as a miss does: a step that records the written row is checked like the compute's own
+    // reads.
+    [Theory]
+    [InlineData("records no dependencies")]
+    [InlineData("leaves uncached")]
+    [InlineData("records the written row in a step")]
+    [InlineData("leaves uncached and records the written row in a step")]
+    public async Task With_uncommitted_writes_a_read_keeps_its_guards_and_steps(string compute)
+    {
+        await using var node = new SluiceNode();
+        using var flow = SluiceFlow.Begin();
+        FlowWrites.AddProbe(node.Cache, Pending(_rows.For(2)));
+
+        var call = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _outer,
+                    "k",
+                    (read, ct) =>
+                    {
+                        switch (compute)
+                        {
+                            case "leaves uncached":
+                                read.DoNotCache();
+                                break;
+                            case "leaves uncached and records the written row in a step":
+                                read.DoNotCache();
+                                goto case "records the written row in a step";
+                            case "records the written row in a step":
+                                read.From(_rows.For(1));
+                                ActiveCompute.BeforeStore(
+                                    read,
+                                    _ =>
+                                    {
+                                        read.From(_rows.For(2));
+                                        return Task.CompletedTask;
+                                    }
+                                );
+                                break;
+                        }
+
+                        return Task.FromResult("value");
+                    }
+                )
+                .AsTask();
+
+        switch (compute)
+        {
+            case "records no dependencies":
+                await call.Should()
+                    .ThrowAsync<InvalidOperationException>()
+                    .WithMessage("The compute recorded no dependencies*");
+                break;
+            case "leaves uncached":
+                (await call()).Should().Be("value");
+                break;
+            default:
+                await call.Should()
+                    .ThrowAsync<InvalidOperationException>()
+                    .WithMessage(Uncommitted.Replace("*", "guard-rows:2"));
+                break;
+        }
+    }
+
+    [Fact]
+    public async Task A_probe_with_nothing_pending_leaves_reads_cached_as_usual()
+    {
+        await using var node = new SluiceNode();
+
+        using (SluiceFlow.Begin())
+        {
+            FlowWrites.AddProbe(node.Cache, Pending());
+
+            (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+            (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+        }
+    }
+
+    [Theory]
+    [InlineData("a key", "the whole source")]
+    [InlineData("the whole source", "a key")]
+    public async Task Uncommitted_writes_overlap_a_read_as_an_invalidation_would(
+        string reads,
+        string writes
+    )
+    {
+        await using var node = new SluiceNode();
+        var read = reads == "a key" ? _rows.For(1) : _rows.All;
+        var written = writes == "a key" ? _rows.For(5) : _rows.All;
+
+        using var flow = SluiceFlow.Begin();
+        FlowWrites.AddProbe(node.Cache, Pending(written));
+        var call = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _outer,
+                    "k",
+                    (r, _) =>
+                    {
+                        r.From(read);
+                        return Task.FromResult("value");
+                    }
+                )
+                .AsTask();
+
+        await call.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(
+                Uncommitted.Replace("*", writes == "a key" ? "guard-rows:5" : "guard-rows (all)")
+            );
+    }
+
+    [Fact]
+    public async Task Another_cache_s_uncommitted_writes_are_ignored()
+    {
+        await using var node = new SluiceNode();
+        await using var other = new SluiceNode();
+        var asked = false;
+
+        using var flow = SluiceFlow.Begin();
+        FlowWrites.AddProbe(
+            other.Cache,
+            () =>
+            {
+                asked = true;
+                return [_rows.For(1)];
+            }
+        );
+
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+        asked.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_read_inside_an_ambient_transaction_with_uncommitted_writes_it_depends_on_throws()
+    {
+        await using var node = new SluiceNode();
+        var asked = new List<Transaction>();
+        FlowWrites.OnAmbient(
+            node.Cache,
+            transaction =>
+            {
+                asked.Add(transaction);
+                return [_rows.For(1)];
+            }
+        );
+
+        using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+        {
+            var caller = Transaction.Current;
+            var call = () => node.Cache.GetOrSetAsync(_outer, "k", Good).AsTask();
+
+            await call.Should()
+                .ThrowAsync<InvalidOperationException>()
+                .WithMessage(Uncommitted.Replace("*", "guard-rows:1"));
+            asked.Should().ContainSingle().Which.Should().BeSameAs(caller);
+            Transaction.Current.Should().BeSameAs(caller);
+        }
+
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+        asked.Should().ContainSingle("without an ambient transaction there's nothing to ask about");
+    }
+
+    [Fact]
+    public async Task A_nested_flow_shares_the_outer_box_and_only_the_outermost_handle_removes_it()
+    {
+        await using var node = new SluiceNode();
+        var call = () => node.Cache.GetOrSetAsync(_outer, "k", Good).AsTask();
+
+        var outer = SluiceFlow.Begin();
+        using (SluiceFlow.Begin())
+        {
+            FlowWrites.AddProbe(node.Cache, Pending(_rows.For(1))).Should().BeTrue();
+        }
+
+        await call.Should().ThrowAsync<InvalidOperationException>().WithMessage(Uncommitted);
+        FlowWrites.AddProbe(node.Cache, Pending()).Should().BeTrue();
+
+        outer.Dispose();
+
+        FlowWrites.AddProbe(node.Cache, Pending()).Should().BeFalse();
+        (await call()).Should().Be("good#2");
+        (await call()).Should().Be("good#2");
     }
 }

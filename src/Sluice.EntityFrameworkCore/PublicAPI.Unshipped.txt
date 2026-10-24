@@ -3,3 +3,11 @@ static Sluice.SluiceReadsExtensions.Db<TContext>(this Sluice.SluiceReads! read, 
 static Sluice.SluiceReadsExtensions.Entity<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, System.Linq.Expressions.Expression<System.Func<T!, object?>!>! uniqueColumn, object! value) -> System.Linq.IQueryable<T!>!
 Sluice.SluiceContextStateAttribute
 Sluice.SluiceContextStateAttribute.SluiceContextStateAttribute() -> void
+Sluice.KeyedRows<T>
+Sluice.KeyedRows<T>.ExecuteDelete() -> int
+Sluice.KeyedRows<T>.ExecuteDeleteAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<int>!
+Sluice.KeyedRows<T>.ExecuteUpdate(System.Action<Microsoft.EntityFrameworkCore.Query.UpdateSettersBuilder<T!>!>! setPropertyCalls) -> int
+Sluice.KeyedRows<T>.ExecuteUpdateAsync(System.Action<Microsoft.EntityFrameworkCore.Query.UpdateSettersBuilder<T!>!>! setPropertyCalls, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<int>!
+Sluice.KeyedRowsExtensions
+static Sluice.KeyedRowsExtensions.ForKey<T>(this System.Linq.IQueryable<T!>! rows, object! key) -> Sluice.KeyedRows<T!>!
+static Sluice.KeyedRowsExtensions.ForKeys<T, TKey>(this System.Linq.IQueryable<T!>! rows, System.Collections.Generic.IEnumerable<TKey>! keys) -> Sluice.KeyedRows<T!>!

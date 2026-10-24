@@ -13,10 +13,11 @@ public static class DbSetDependencyExtensions
 {
     /// <summary>
     /// The dependency on the <typeparamref name="T"/> row with primary key <paramref name="key"/>. Invalidating it
-    /// evicts <see cref="SluiceReadsExtensions.Entity{T}(SluiceReads, DbSet{T}, object)"/> readers of that row and
-    /// other queries that read <typeparamref name="T"/>, but not <see cref="SluiceReadsExtensions.Children"/> readers
-    /// of the row's parent, nor readers of the row by a unique column: Sluice can't see the row's foreign keys or
-    /// column values. After a bypass that changed such rows, use <see cref="AllDependencies"/>.
+    /// evicts <see cref="SluiceReadsExtensions.Entity{T}(SluiceReads, DbSet{T}, object)"/> readers of that row, by its
+    /// key or by a unique column that found it, and other queries that read <typeparamref name="T"/>, but not
+    /// <see cref="SluiceReadsExtensions.Children"/> readers of the row's parent, nor readers by a unique value no row
+    /// held: Sluice can't see the row's foreign keys or new column values. After a bypass that changed such rows, use
+    /// <see cref="AllDependencies"/>.
     /// </summary>
     /// <param name="set">The set the row belongs to.</param>
     /// <param name="key">The primary key, of its CLR type in the EF model.</param>

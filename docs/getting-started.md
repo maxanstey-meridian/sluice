@@ -133,11 +133,12 @@ callback to `AddSluice`; see [Configuration](/guides/configuration).
 `AddDbContextFactory` registers `AppDb` for your own code (`AddDbContext` works too). Each
 cached value's computation takes an `AppDb` of its own from a DI scope it opens for itself.
 
-`UseSluice` does two things. Each time `SaveChanges` (or `ExecuteUpdate`, or `ExecuteDelete`)
-commits, it evicts what the write changed. And while a cached value is being built, it records
-the entity types each query reads, and makes queries it can't track throw (see
-[What a compute can't read](/guides/strict-reads)). It needs `AddSluice` and logging
-registered; ASP.NET Core and the Generic Host register logging for you.
+`UseSluice` does two things. Each time `SaveChanges` commits, it evicts what the save changed;
+an `ExecuteUpdate` or `ExecuteDelete` evicts every read of the types it wrote, or only its rows'
+readers when you name them with [`ForKey`](/guides/ef-core#bulk-writes-by-key). And while a
+cached value is being built, it records the entity types each query reads, and makes queries it
+can't track throw (see [What a compute can't read](/guides/strict-reads)). It needs `AddSluice`
+and logging registered; ASP.NET Core and the Generic Host register logging for you.
 
 Every caller gets the same cached object, EF entities included. Don't modify one, or turn on
 FusionCache's auto-clone to give each caller a copy; see

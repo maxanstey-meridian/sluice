@@ -4,8 +4,10 @@ using System.Runtime.CompilerServices;
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Sluice.Infrastructure;
 
 namespace Sluice.EntityFrameworkCore;
 
@@ -33,10 +35,21 @@ internal sealed partial class SluiceInterceptor
     // mid-save leaves nothing behind.
     private readonly ConditionalWeakTable<DbContext, CapturedSave> _saves = new();
 
+    // The keys a keyed bulk write (ForKey, ForKeys) pinned, held against the command that runs it from when EF
+    // initialises it until it ends. Weak, so a command EF drops leaves nothing behind.
+    private readonly ConditionalWeakTable<DbCommand, KeyPin> _pins = new();
+
     // What saves inside an EF transaction wrote, published when the transaction ends. Keyed by the DbTransaction,
     // which contexts sharing a transaction have in common. Weak, because a transaction disposed without commit or
     // rollback raises no event, and committed nothing.
-    private readonly ConditionalWeakTable<DbTransaction, List<Dependency>> _pending = new();
+    private readonly ConditionalWeakTable<DbTransaction, PendingWrites> _pending = new();
+
+    // What saves inside an enlisted or ambient transaction wrote, until it completes: each publishes from its own
+    // TransactionCompleted handler, so this is only for the uncommitted-write guard to read (SLUICE-EF-025).
+    private readonly ConditionalWeakTable<Transaction, PendingWrites> _ambientPending = new();
+
+    // How the core reads an ambient transaction's pending writes, made once so registering it again is the same value.
+    private readonly Func<Transaction, IReadOnlyCollection<Dependency>> _ambientWrites;
 
     // Each entity type that has logged invalidating its foreign keys and unique columns whole, so each logs once per
     // cache.
@@ -46,19 +59,30 @@ internal sealed partial class SluiceInterceptor
     {
         _cache = cache;
         _logger = logger;
+        _ambientWrites = transaction =>
+            _ambientPending.TryGetValue(transaction, out var pending) ? pending.Snapshot() : [];
     }
 
     /// <summary>The interceptor for the <see cref="SluiceCache"/> registered in <paramref name="services"/>.</summary>
     /// <exception cref="InvalidOperationException">Sluice isn't registered in <paramref name="services"/>.</exception>
-    internal static SluiceInterceptor For(IServiceProvider services) =>
-        _instances.GetValue(
+    internal static SluiceInterceptor For(IServiceProvider services)
+    {
+        var cache =
             services.GetService<SluiceCache>()
-                ?? throw new InvalidOperationException(
-                    "UseSluice needs Sluice registered in the application's services: call services.AddSluice() "
-                        + "where you register your services."
-                ),
+            ?? throw new InvalidOperationException(
+                "UseSluice needs Sluice registered in the application's services: call services.AddSluice() "
+                    + "where you register your services."
+            );
+        var interceptor = _instances.GetValue(
+            cache,
             cache => new(cache, services.GetRequiredService<ILogger<SluiceInterceptor>>())
         );
+
+        // From the instance the table kept, not its constructor: GetValue can construct one per racing caller and keep
+        // only one, and the cache holds one lookup, the last registered. Every call registers the kept one's.
+        FlowWrites.OnAmbient(cache, interceptor._ambientWrites);
+        return interceptor;
+    }
 
     public InterceptionResult<int> SavingChanges(
         DbContextEventData eventData,
@@ -202,6 +226,7 @@ internal sealed partial class SluiceInterceptor
     )
     {
         _pending.Remove(result);
+        AddProbe(eventData);
         return result;
     }
 
@@ -213,43 +238,66 @@ internal sealed partial class SluiceInterceptor
     )
     {
         _pending.Remove(result);
+        AddProbe(eventData);
+        return new(result);
+    }
+
+    // A context joining a transaction (UseTransaction) shares what the transaction has pending, so nothing is removed.
+    public DbTransaction TransactionUsed(
+        DbConnection connection,
+        TransactionEventData eventData,
+        DbTransaction result
+    )
+    {
+        AddProbe(eventData);
+        return result;
+    }
+
+    public ValueTask<DbTransaction> TransactionUsedAsync(
+        DbConnection connection,
+        TransactionEventData eventData,
+        DbTransaction result,
+        CancellationToken cancellationToken = default
+    )
+    {
+        AddProbe(eventData);
         return new(result);
     }
 
     public void TransactionCommitted(
         DbTransaction transaction,
         TransactionEndEventData eventData
-    ) => Publish(() => Take(_pending, transaction, keep: false) ?? []);
+    ) => Publish(() => Take(_pending, transaction, keep: false)?.Snapshot() ?? []);
 
     public Task TransactionCommittedAsync(
         DbTransaction transaction,
         TransactionEndEventData eventData,
         CancellationToken cancellationToken = default
-    ) => PublishAsync(() => Take(_pending, transaction, keep: false) ?? []);
+    ) => PublishAsync(() => Take(_pending, transaction, keep: false)?.Snapshot() ?? []);
 
     // A rollback publishes too: over-invalidating is safe.
     public void TransactionRolledBack(
         DbTransaction transaction,
         TransactionEndEventData eventData
-    ) => Publish(() => Take(_pending, transaction, keep: false) ?? []);
+    ) => Publish(() => Take(_pending, transaction, keep: false)?.Snapshot() ?? []);
 
     public Task TransactionRolledBackAsync(
         DbTransaction transaction,
         TransactionEndEventData eventData,
         CancellationToken cancellationToken = default
-    ) => PublishAsync(() => Take(_pending, transaction, keep: false) ?? []);
+    ) => PublishAsync(() => Take(_pending, transaction, keep: false)?.Snapshot() ?? []);
 
     // A failed commit's outcome is unknown, so it publishes. EF also reports a savepoint that failed to release
     // here and carries on, and the transaction may still commit more after it, so the pending writes are kept for
     // its commit or rollback to publish again.
     public void TransactionFailed(DbTransaction transaction, TransactionErrorEventData eventData) =>
-        Publish(() => Take(_pending, transaction, keep: true) ?? []);
+        Publish(() => Take(_pending, transaction, keep: true)?.Snapshot() ?? []);
 
     public Task TransactionFailedAsync(
         DbTransaction transaction,
         TransactionErrorEventData eventData,
         CancellationToken cancellationToken = default
-    ) => PublishAsync(() => Take(_pending, transaction, keep: true) ?? []);
+    ) => PublishAsync(() => Take(_pending, transaction, keep: true)?.Snapshot() ?? []);
 
     // Publishes what a write wrote: when the transaction it ran in ends, or at once outside one.
     private void Complete(Write? write)
@@ -278,26 +326,70 @@ internal sealed partial class SluiceInterceptor
     // reports ExecuteDelete as ExecuteUpdate (both pass CommandSource.BulkUpdate, its old name), so the statement says
     // which it was; anything but an UPDATE is taken for a delete, which also evicts the lists its rows were in and what
     // the database cascades to.
-    private static Write? BulkWrite(DbCommand command, CommandEventData eventData) =>
-        eventData
-            is {
+    // A keyed one (ForKey, ForKeys) names its rows: the pin the command took when EF initialised it.
+    private Write? BulkWrite(DbCommand command, CommandEventData eventData)
+    {
+        if (
+            eventData
+            is not {
                 Context: { } context,
                 CommandSource: CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete,
             }
-            ? new(context, () => BulkWritten(context, command))
-            : null;
+        )
+        {
+            return null;
+        }
 
-    private static List<Dependency> BulkWritten(DbContext context, DbCommand command)
+        _pins.TryGetValue(command, out var pin);
+        _pins.Remove(command);
+        return new(context, () => BulkWritten(context, command, pin));
+    }
+
+    // The first bulk command EF initialises on the flow while a keyed call runs takes its pin: the statement the call
+    // runs, initialised before any interceptor's NonQueryExecuting could start another, and before any command ends, so
+    // the pin goes to it whatever order interceptors run in and whatever its row count. A later command on the flow
+    // (another bulk write an interceptor runs, a retry by the execution strategy) finds the pin taken, and publishes
+    // whole.
+    public DbCommand CommandInitialized(CommandEndEventData eventData, DbCommand result)
+    {
+        if (
+            eventData.CommandSource is CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete
+            && KeyPin.Take() is { } pin
+        )
+        {
+            _pins.AddOrUpdate(result, pin);
+        }
+
+        return result;
+    }
+
+    // Only the pinned type narrows, and only when the statement names its table and the keys are within the limit;
+    // every other type it names, and the pinned one past the limit, publish whole. The pinned type is compared by
+    // root in the context's own model, so a pin from another model's query never matches.
+    private static List<Dependency> BulkWritten(DbContext context, DbCommand command, KeyPin? pin)
     {
         var update = IsUpdate(command);
+        var sql = command.CommandText;
+        var keyed = pin is { Keys.Count: <= ModelSources.KeyLimit }
+            ? pin.EntityType.GetRootType()
+            : null;
         return
         [
             .. ModelSources
-                .Named(context, command.CommandText)
+                .Named(context, sql)
                 .SelectMany(entityType =>
-                    update
-                        ? ModelSources.UpdateDependencies(entityType)
-                        : ModelSources.AllDependencies(entityType)
+                    entityType == keyed
+                        ? update
+                            ? ModelSources.KeyedUpdateDependencies(
+                                context,
+                                pin!.EntityType,
+                                pin.Keys,
+                                sql
+                            )
+                            : ModelSources.KeyedDeleteDependencies(pin!.EntityType, pin.Keys)
+                        : update
+                            ? ModelSources.UpdateDependencies(entityType)
+                            : ModelSources.AllDependencies(entityType)
                 ),
         ];
     }
@@ -317,18 +409,90 @@ internal sealed partial class SluiceInterceptor
         var transaction = ContextTransaction.Of(context);
         if (transaction.Ef is { } ef)
         {
-            // A transaction's connection runs one command at a time, so its writes never add here concurrently.
-            _pending.GetValue(ef, _ => []).AddRange(derive());
+            _pending.GetValue(ef, _ => new()).Add(derive());
             return true;
         }
 
         if (transaction.Ambient is { } ambient)
         {
-            PublishWhenCompleted(ambient, derive());
+            HandToAmbient(ambient, derive());
             return true;
         }
 
         return false;
+    }
+
+    // Adds a probe of the transaction to the flow's SluiceFlow box, if it has one, so a cached read on the flow sees
+    // what the transaction has written and not committed (SLUICE-EF-025). It reports the pending writes only while the
+    // context is still in this EF transaction, told apart by EF's id for it: the DbTransaction object may be handed out
+    // again for another flow's transaction (Npgsql reuses it), and a transaction disposed without commit or rollback,
+    // which committed nothing, raises no event. It holds the context's connection weakly, so the box keeps neither
+    // the context nor the transaction alive.
+    private void AddProbe(TransactionEventData eventData)
+    {
+        if (eventData.Context is not { } context)
+        {
+            return;
+        }
+
+        var connection = new WeakReference<IRelationalConnection>(
+            ContextTransaction.Connection(context)
+        );
+        var transactionId = eventData.TransactionId;
+        FlowWrites.AddProbe(
+            _cache,
+            () =>
+                connection.TryGetTarget(out var live)
+                && live.CurrentTransaction is { } current
+                && current.TransactionId == transactionId
+                && _pending.TryGetValue(current.GetDbTransaction(), out var pending)
+                    ? pending.Snapshot()
+                    : []
+        );
+    }
+
+    // Publishes the write when the ambient transaction completes, and keeps it as pending until then. The core's
+    // lookup finds it through the caller's Transaction.Current; an enlisted transaction that isn't the current one
+    // (EnlistTransaction without a scope) is found through a probe in the flow's box instead, added once per
+    // transaction, so nothing is reported twice.
+    private void HandToAmbient(Transaction ambient, List<Dependency> dependencies)
+    {
+        PublishWhenCompleted(ambient, dependencies);
+
+        var added = false;
+        var pending = _ambientPending.GetValue(
+            ambient,
+            _ =>
+            {
+                added = true;
+                return new();
+            }
+        );
+        pending.Add(dependencies);
+        if (added)
+        {
+            ambient.TransactionCompleted += (_, _) => _ambientPending.Remove(ambient);
+        }
+
+        if (!ReferenceEquals(Transaction.Current, ambient))
+        {
+            pending.ProbeOnce(() => AddProbe(ambient));
+        }
+    }
+
+    // Reports what the enlisted transaction has pending until it completes, which removes it. Held weakly, as the EF
+    // transaction's probe holds its connection.
+    private bool AddProbe(Transaction ambient)
+    {
+        var held = new WeakReference<Transaction>(ambient);
+        return FlowWrites.AddProbe(
+            _cache,
+            () =>
+                held.TryGetTarget(out var live)
+                && _ambientPending.TryGetValue(live, out var pending)
+                    ? pending.Snapshot()
+                    : []
+        );
     }
 
     private CapturedSave Capture(DbContext context)
@@ -385,13 +549,13 @@ internal sealed partial class SluiceInterceptor
             && ReferenceEquals(ef, ContextTransaction.Of(context).Ef)
         )
         {
-            _pending.GetValue(ef, _ => []).AddRange(dependencies);
+            _pending.GetValue(ef, _ => new()).Add(dependencies);
         }
         else if (leftover.Transaction.Ambient is { } ambient)
         {
             try
             {
-                PublishWhenCompleted(ambient, dependencies);
+                HandToAmbient(ambient, dependencies);
             }
             catch (ObjectDisposedException)
             {
@@ -492,4 +656,40 @@ internal sealed partial class SluiceInterceptor
 
     // A write that ended on a context, with how to derive what it may have changed.
     private readonly record struct Write(DbContext Context, Func<List<Dependency>> Derive);
+
+    // What one transaction's writes publish when it ends. Its own writes add one at a time, since a transaction's
+    // connection runs one command at a time, but a flow that fans out reads it through its probe from other tasks,
+    // meanwhile, so both take the lock, and a read gets a copy.
+    private sealed class PendingWrites
+    {
+        private readonly Lock _lock = new();
+        private readonly List<Dependency> _dependencies = [];
+        private bool _probed;
+
+        public void Add(List<Dependency> dependencies)
+        {
+            lock (_lock)
+            {
+                _dependencies.AddRange(dependencies);
+            }
+        }
+
+        public List<Dependency> Snapshot()
+        {
+            lock (_lock)
+            {
+                return [.. _dependencies];
+            }
+        }
+
+        // Runs addProbe until one call reports it kept the probe: a write on a flow without a box keeps nothing, and
+        // a later one on a flow with a box still adds it.
+        public void ProbeOnce(Func<bool> addProbe)
+        {
+            lock (_lock)
+            {
+                _probed = _probed || addProbe();
+            }
+        }
+    }
 }

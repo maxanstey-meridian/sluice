@@ -4,8 +4,9 @@ namespace Sluice.Infrastructure;
 
 /// <summary>
 /// The ambient "a compute is running" flag: the open <see cref="SluiceReads"/> of the current flow, whether the flow
-/// is in one of its fused fetches, and what the compute holds until it ends. For Sluice's own packages, which check
-/// and record reads against it; it isn't a supported API, and may change in any release.
+/// is in one of its fused fetches, what the compute holds until it ends, and what it runs before its value is stored.
+/// For Sluice's own packages, which check and record reads against it; it isn't a supported API, and may change in
+/// any release.
 /// </summary>
 [EditorBrowsable(EditorBrowsableState.Never)]
 public static class ActiveCompute
@@ -94,6 +95,28 @@ public static class ActiveCompute
     {
         ArgumentNullException.ThrowIfNull(reads);
         return reads.Held<T>();
+    }
+
+    /// <summary>
+    /// Adds <paramref name="step"/> to what <paramref name="reads"/>' compute runs once it returns, before its value
+    /// is stored. Steps run in the order they were added, with the compute's token, on its flow: <see cref="Reads"/>
+    /// is still this compute's, <c>read.From</c> still records, and what it holds isn't disposed yet. A step may add
+    /// another, which runs too. A step that throws fails the call, as the compute's own exception would: nothing is
+    /// cached and the caller gets it. Steps don't run when the compute threw or recorded a violation, nor when it called
+    /// <see cref="SluiceReads.DoNotCache"/>, unless the flow has uncommitted writes (see <see cref="SluiceFlow"/>):
+    /// then what the steps record is checked against them.
+    /// </summary>
+    /// <param name="reads">The compute's reads.</param>
+    /// <param name="step">What to run.</param>
+    /// <exception cref="InvalidOperationException">
+    /// The compute has already returned, or <paramref name="reads"/> is another compute's, used inside a running
+    /// compute.
+    /// </exception>
+    public static void BeforeStore(SluiceReads reads, Func<CancellationToken, Task> step)
+    {
+        ArgumentNullException.ThrowIfNull(reads);
+        ArgumentNullException.ThrowIfNull(step);
+        reads.BeforeStore(step);
     }
 
     /// <summary>

@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.5.0 — breaking
+
+Two gaps found in the Casebridge pilot: a conditional `ExecuteUpdate` of one form evicted every
+cached read of forms in every council, and a cached read inside a request's own transaction returned
+data older than the request's own write.
+
+- **Breaking: a cached read of your own uncommitted writes throws.** Inside a transaction that
+  has saved writes it hasn't committed, a cached read that depends on them throws
+  `InvalidOperationException`, in every environment, naming the query and saying to read those
+  rows on the transaction's own context, or after it commits. It used to return the value from
+  before the write: a hit from the cache, or a miss computed from what's committed. While such
+  writes are pending, every cached read on the flow computes fresh, stores nothing and skips
+  FusionCache entirely, so a cached value can't slip past the check and other callers never wait
+  on it; a read that doesn't depend on the writes gets the fresh value. A `TransactionScope` is
+  checked by itself. An EF transaction is checked only on a flow that called
+  `SluiceFlow.Begin()` before it began, below, and a transaction joined with
+  `Database.EnlistTransaction` (no scope) only on one that called it before its first save. Saves without a transaction of yours have
+  committed by the time they return, and never count.
+- **New: `SluiceFlow.Begin()`.** `using var _ = SluiceFlow.Begin();` once per entry point (HTTP
+  middleware, the message pipeline) lets Sluice see the EF transactions the flow opens, however
+  deep. A nested call does nothing. Without it, EF transactions aren't checked, which costs
+  nothing; with it, a flow with a transaction open but nothing pending makes one check per
+  cached read.
+- **New: `.ForKey(id)` and `.ForKeys(ids)` for `ExecuteUpdate` and `ExecuteDelete`.**
+  `db.Set<FormEntity>().Where(…).ForKey(id).ExecuteUpdateAsync(…)` adds the key condition to the
+  statement itself, alongside your `Where`, so a conditional write stays conditional, and evicts
+  only that row's readers once it commits, instead of every read of the type. An update still
+  evicts every `Children` list of the type's foreign keys, and every reader by a unique column
+  whose name appears in the statement; a delete still evicts what it cascades into. Other types
+  the statement names are evicted whole, as before, and so is the keyed type past 100 keys, or
+  when an update's statement names the key column again (it may set the key). They return a `KeyedRows<T>`, which only executes, so
+  call them last. A composite key or a type not mapped to a table throws
+  `NotSupportedException`, and a key of the wrong type, or a query that isn't an EF set of an
+  entity type, `ArgumentException`, before anything runs. Sluice doesn't recognise a key
+  condition in your own `Where`: move `f.Id == id` into `ForKey`.
+- **Changed: a read by a unique column records the row it found.** `read.Entity(set, column,
+  value)` runs one more query once the compute returns, an indexed lookup of the keys of the rows
+  holding the value, ignoring query filters, and records each by its key (the whole type past
+  100 rows). That's one more round trip per cache miss; hits are unchanged. If the lookup fails,
+  the compute fails and nothing is cached. Naming the primary key runs no lookup. SQL snapshot
+  or query-count tests will see the extra query.
+- **Changed: `set.Dependency(key)` evicts readers by a unique column that found that row,** and
+  so does a keyed bulk write. A cached "not found" by a unique column still needs
+  `AllDependencies()` after a write Sluice can't see.
+- **Docs:** how to keep a `[SluiceContextState]` setter safe: one helper on `read` as its only
+  caller, held by an architecture test. Limitations gains the refusal of unique columns and
+  foreign keys whose value converter stores null as a value, and the rule that converters on
+  keys, foreign keys and unique columns must round-trip.
+
 ## 0.4.0
 
 Three gaps found while planning Casebridge's first cached reads: a tenant filter that reads a

@@ -89,9 +89,14 @@ no longer than the entry's duration.
   [Row versions](/guides/ef-core#row-versions).
 - **Reading by a unique column needs the model to know it's unique**: a single-column unique
   index (filtered or not) or alternate key. Composite unique indexes, and owned types' columns,
-  can't be read by value. `set.Dependency(key)` doesn't evict readers by a unique column; use
-  `AllDependencies()` after a write Sluice can't see. See
-  [By a unique column](/guides/ef-core#by-a-unique-column).
+  can't be read by value. A unique column or foreign key whose value converter stores null as a
+  value (EF's internal `convertsNulls`) is refused with `NotSupportedException`. A value
+  converter on a key, foreign key or unique column must round-trip (stored value to .NET and
+  back gives the stored value), or readers by the stored value are missed; Sluice can't check
+  that. `set.Dependency(key)` evicts readers by a unique column that found that row, but not a
+  cached "not found"; use `AllDependencies()` after a write Sluice can't see that may have given
+  a row the value. See [By a unique column](/guides/ef-core#by-a-unique-column) and
+  [Key folding](/guides/ef-core#key-folding).
 - **A row saved from an object you built yourself**, of a type with a row version, misses its
   real old parent when its foreign key differs from the stored one, and its real old value of a
   unique column likewise. See
@@ -106,10 +111,20 @@ no longer than the entry's duration.
   [What a query records](/guides/ef-core#what-a-query-records).
 - **Broad eviction, by design**: a plain query is evicted by any write to any type it reads, a
   `Children` list by a change to any row in it, and every read of a type by an `ExecuteUpdate`
-  or `ExecuteDelete` on its table. See
-  [What a query records](/guides/ef-core#what-a-query-records) and [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes).
+  or `ExecuteDelete` on its table, unless it names its rows with `ForKey` or `ForKeys`. A keyed
+  one still evicts every `Children` list of the type's foreign keys, and every reader by a
+  unique column the statement names; past 100 keys it evicts the whole type. See
+  [What a query records](/guides/ef-core#what-a-query-records),
+  [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes) and
+  [Bulk writes by key](/guides/ef-core#bulk-writes-by-key).
 - **Commits Sluice doesn't see**: a raw `DbTransaction` committed outside EF, and some
   `TransactionScope` setups. See [Transactions](/guides/transactions#ef-core).
+- **A cached read of your own uncommitted writes is caught only where Sluice sees the
+  transaction**: a `TransactionScope`, or an EF transaction begun, or an enlisted one written to,
+  inside `SluiceFlow.Begin()`.
+  Elsewhere the read returns the committed value. While such writes are pending, every cached
+  read on the flow goes to the database. See
+  [Reading your own uncommitted writes](/guides/strict-reads#reading-your-own-uncommitted-writes).
 - **Interceptors that change entities in `SavingChanges`** must come before `UseSluice`. See
   [Interceptor order](/guides/ef-core#interceptor-order).
 - **Relational providers only, and no `UseInternalServiceProvider`.** Computes take the context

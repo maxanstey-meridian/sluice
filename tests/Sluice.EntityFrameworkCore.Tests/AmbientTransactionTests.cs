@@ -33,7 +33,9 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
             await using var db = postgres.CreateDb(node);
             await db.Rename(ada, "Ada Lovelace");
             completed = Completion.Of(Transaction.Current!);
-            (await adaRead.WasEvicted()).Should().BeFalse("the scope hasn't completed");
+            (await adaRead.WasEvictedForAnotherCaller())
+                .Should()
+                .BeFalse("the scope hasn't completed");
 
             if (complete)
             {
@@ -100,8 +102,12 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
             await first.Rename(ada, "Ada Lovelace");
             await second.Rename(bob, "Bob Babbage");
             completed = Completion.Of(Transaction.Current!);
-            (await adaRead.WasEvicted()).Should().BeFalse("the scope hasn't completed");
-            (await bobRead.WasEvicted()).Should().BeFalse("the scope hasn't completed");
+            (await adaRead.WasEvictedForAnotherCaller())
+                .Should()
+                .BeFalse("the scope hasn't completed");
+            (await bobRead.WasEvictedForAnotherCaller())
+                .Should()
+                .BeFalse("the scope hasn't completed");
 
             scope.Complete();
         }

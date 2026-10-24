@@ -58,6 +58,22 @@ route too, so it can't hide the compute's own exception or let fail-safe serve a
 "A compute is running" is an `AsyncLocal` set inside the factory, so it flows into tasks the
 compute starts, and not into anything else.
 
+### Reads inside your own transaction
+
+`SluiceFlow.Begin()` installs a box on the flow (another `AsyncLocal`); a nested call reuses the
+outer one. The EF package adds a probe to it for each EF transaction it sees begin or be used,
+returning that transaction's pending dependencies. The probe holds the context's connection
+weakly and reports only while the connection is still in the transaction it was added for,
+matched by EF's transaction id, since a provider may reuse the `DbTransaction` object for a later
+transaction. For an ambient transaction it keeps its own list, read with the caller's
+`Transaction.Current` before the compute suppresses it; for an enlisted transaction that isn't
+the current one (`EnlistTransaction` without a scope), it adds a probe for that list the first
+time a flow with a box writes in it. `GetOrSetAsync` asks the probes; with no box and no ambient
+transaction that's one `AsyncLocal` lookup. If anything is pending, the call skips FusionCache
+entirely, so it never joins another caller's stampede lock: it runs the compute through the same
+`read`, guards and held resources, stores nothing, and intersects the tags the compute read with
+the tags the pending writes will invalidate. Any overlap throws; none returns the fresh value.
+
 ## An invalidation
 
 `InvalidateAsync` turns the dependencies into tags, de-duplicates them, and removes each by tag,
@@ -104,6 +120,14 @@ column's value) or one parent's rows, then return the set as a no-tracking query
 auto-includes off, filtered to the key or value (`Entity`) or foreign key value (`Children`). The query is marked, so its tag leaves its own type out unless it
 reaches that type again.
 
+A read by a unique column also registers a step to run once the compute returns, before its
+value is stored, on its flow while `read` still records: a marked query on the compute's
+context, ignoring query filters, for the keys of the rows holding the value. It records each
+key's dependency, or the whole type past 100 rows. A step that throws fails the compute, and
+steps are skipped after a violation. They're skipped after `read.DoNotCache()` too, unless the
+caller's transaction has uncommitted writes: then what they record is checked against those
+writes, as the compute's own reads are.
+
 ## EF Core writes
 
 A second interceptor, one per `SluiceCache`, handles writes. For a save:
@@ -128,6 +152,17 @@ An `ExecuteUpdate` or `ExecuteDelete` publishes the same way, once it has run: E
 from these statements, so the tables it wrote are found by their quoted names in its SQL, and
 every read of the entity types stored in them is invalidated, reads by unique column included
 (for a delete, what it cascades into too). One that reports it changed no rows publishes nothing.
+
+A keyed one (`ForKey`, `ForKeys`) adds the key `Where` to the query itself, then sets an
+`AsyncLocal` pin, the entity type and its keys, around EF's call, and restores it afterwards,
+even when the call throws. The first bulk command on that flow takes the pin, so a later one
+never sees it. When it pins one of the types the command names, with no more than 100 keys, that
+type publishes per key instead: each key's
+dependency (which reaches whole-type readers too), every foreign key whole, and, for an update,
+each unique column whose quoted name appears in the SQL; for a delete, each `CASCADE` or
+`SET NULL` foreign key pointing at the type under each key, and what it cascades into. An update
+whose SQL names the key's column more than once, beyond Sluice's own condition, may set the key,
+so it publishes whole. Every other type the SQL names publishes whole.
 
 A failed, cancelled or conflicting save publishes the same way: never drop, because
 over-invalidating is safe. After a commit, a failure to invalidate is logged and never thrown.

@@ -18,6 +18,7 @@ public sealed class SluiceCache
     private readonly IServiceProvider _services;
     private readonly FusionCacheEntryOptions _entryOptions;
     private readonly FusionCacheEntryOptions _tagOptions;
+    private volatile Func<Transaction, IReadOnlyCollection<Dependency>>? _ambientWrites;
 
     internal SluiceCache(
         IFusionCache cache,
@@ -44,6 +45,11 @@ public sealed class SluiceCache
         );
     }
 
+    // How a package reads an ambient transaction's pending writes. Until one registers, a call doesn't read
+    // Transaction.Current for nothing.
+    internal void OnAmbient(Func<Transaction, IReadOnlyCollection<Dependency>> pending) =>
+        _ambientWrites = pending;
+
     /// <summary>
     /// Returns the cached value for <paramref name="key"/>, or runs <paramref name="compute"/> and caches
     /// its result, tagged with every dependency it recorded through <c>read.From</c>.
@@ -60,8 +66,9 @@ public sealed class SluiceCache
     /// </param>
     /// <exception cref="InvalidOperationException">
     /// The compute recorded no dependencies (and didn't call <c>read.DoNotCache()</c>), used another compute's
-    /// <c>read</c>, or this was called from inside
-    /// another compute, a fused <c>read.From(dependency, fetch)</c> fetch included. Nothing is cached in any case.
+    /// <c>read</c>, or depends on writes the caller's own transaction hasn't committed (see <see cref="SluiceFlow"/>),
+    /// or this was called from inside another compute, a fused <c>read.From(dependency, fetch)</c> fetch included.
+    /// Nothing is cached in any case.
     /// </exception>
     /// <exception cref="OperationCanceledException">
     /// The compute was cancelled (unless disposing what it held also threw), or <paramref name="ct"/> was already
@@ -144,16 +151,76 @@ public sealed class SluiceCache
         var options = OptionsFor(name, duration, size);
         var reads = new SluiceReads(name, _services, ct);
 
+        // A value cached or computed outside the caller's transaction lacks its uncommitted writes, and a hit can't
+        // be checked against them: FusionCache doesn't return an entry's tags. So the call computes fresh and leaves
+        // FusionCache alone, stampede lock included, so no other caller waits on it or inherits its violation.
+        if (PendingWrites() is { } pending)
+        {
+            return await BypassAsync(reads, compute, pending, ct).ConfigureAwait(false);
+        }
+
         // The caller's token goes to the compute, not to FusionCache: on a cancelled token FusionCache throws
         // without awaiting its factory, so the caller would resume while the compute still uses its resources.
         // Cancelling ends the compute first, and the caller resumes after it.
         var value = await _cache
             .GetOrSetAsync<TValue>(
                 entryKey,
-                (ctx, _) => ComputeAsync(reads, compute, ctx, ct),
+                (ctx, _) => FactoryAsync(reads, compute, ctx, ct),
                 options: options
             )
             .ConfigureAwait(false);
+
+        reads.ThrowIfViolated();
+        return value;
+    }
+
+    // What the caller's own transactions have written for this cache and not committed: from the flow's probes, and
+    // from the caller's ambient transaction, read here, before the compute suppresses it. Null when nothing is; without
+    // a box or a registered ambient lookup, that costs one AsyncLocal read.
+    private List<Dependency>? PendingWrites()
+    {
+        var pending = SluiceFlow.Pending(this);
+        if (
+            _ambientWrites is { } ambientWrites
+            && Transaction.Current is { } transaction
+            && ambientWrites(transaction) is { Count: > 0 } ambient
+        )
+        {
+            (pending ??= []).AddRange(ambient);
+        }
+
+        return pending;
+    }
+
+    // The compute runs as on a miss, guards and all, but nothing is stored. Its value goes to the caller unless it
+    // read what the pending writes invalidate: it read only what's committed, so it would hide them.
+    private static async ValueTask<TValue> BypassAsync<TValue>(
+        SluiceReads reads,
+        Func<SluiceReads, CancellationToken, Task<TValue>> compute,
+        List<Dependency> pending,
+        CancellationToken ct
+    )
+    {
+        var (value, tags, _) = await ComputeAsync(reads, compute, checkedAgainstWrites: true, ct)
+            .ConfigureAwait(false);
+
+        var read = tags.ToHashSet(StringComparer.Ordinal);
+        var overlapping = pending
+            .Where(dependency => dependency.InvalidationTags.Any(read.Contains))
+            .Select(dependency => dependency.Text)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (overlapping.Count > 0)
+        {
+            reads.Violate(
+                new InvalidOperationException(
+                    $"Query '{reads.Query}' read {string.Join(", ", overlapping)}, which the caller's own "
+                        + "transaction has written and not yet committed. The compute reads only what's committed, so "
+                        + "the caller would get the data without its own writes. Read those rows on the transaction's "
+                        + "own context, or after it commits."
+                )
+            );
+        }
 
         reads.ThrowIfViolated();
         return value;
@@ -240,10 +307,49 @@ public sealed class SluiceCache
         }
     }
 
-    private static async Task<TValue> ComputeAsync<TValue>(
+    // FusionCache's factory: stores the value with the tags its compute recorded, unless it asked not to be cached or
+    // a guard was violated.
+    private static async Task<TValue> FactoryAsync<TValue>(
         SluiceReads reads,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,
         FusionCacheFactoryExecutionContext<TValue> ctx,
+        CancellationToken ct
+    )
+    {
+        var (value, tags, uncached) = await ComputeAsync(
+                reads,
+                compute,
+                checkedAgainstWrites: false,
+                ct
+            )
+            .ConfigureAwait(false);
+
+        var violated = reads.HasViolation;
+        if (violated || uncached)
+        {
+            // Returning (rather than throwing) keeps FusionCache's fail-safe from serving a stale
+            // value over a guard violation; these flags make sure nothing is stored. A violation is
+            // rethrown once GetOrSetAsync returns; an uncached value goes to the caller.
+            var options = ctx.Options;
+            options.SkipMemoryCacheWrite = true;
+            options.SkipDistributedCacheWrite = true;
+            options.SkipBackplaneNotifications = true;
+            return violated ? default! : value;
+        }
+
+        ctx.Tags = tags;
+        return value;
+    }
+
+    // Runs the compute, whether its value is to be stored or not: as the flow's compute, outside the caller's ambient
+    // transaction, then the steps it added to run before the store, then closes it and disposes what it held. Returns
+    // the value, the tags it recorded and whether it asked not to be cached; a guard violation is left on reads, for
+    // the caller to check. The compute's own exception is rethrown. When its tags are checked against the flow's
+    // uncommitted writes, the steps run even if it asked not to be cached: what they record is checked too.
+    private static async Task<(TValue Value, string[] Tags, bool Uncached)> ComputeAsync<TValue>(
+        SluiceReads reads,
+        Func<SluiceReads, CancellationToken, Task<TValue>> compute,
+        bool checkedAgainstWrites,
         CancellationToken ct
     )
     {
@@ -269,6 +375,7 @@ public sealed class SluiceCache
             try
             {
                 value = await compute(reads, ct).ConfigureAwait(false);
+                await reads.RunBeforeStoreAsync(checkedAgainstWrites).ConfigureAwait(false);
             }
             catch (Exception failure)
             {
@@ -320,20 +427,6 @@ public sealed class SluiceCache
             );
         }
 
-        var violated = reads.HasViolation;
-        if (violated || uncached)
-        {
-            // Returning (rather than throwing) keeps FusionCache's fail-safe from serving a stale
-            // value over a guard violation; these flags make sure nothing is stored. A violation is
-            // rethrown once GetOrSetAsync returns; an uncached value goes to the caller.
-            var options = ctx.Options;
-            options.SkipMemoryCacheWrite = true;
-            options.SkipDistributedCacheWrite = true;
-            options.SkipBackplaneNotifications = true;
-            return violated ? default! : value;
-        }
-
-        ctx.Tags = tags;
-        return value;
+        return (value, tags, uncached);
     }
 }

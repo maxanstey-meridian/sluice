@@ -4,3 +4,9 @@ Sluice.Query<TValue>.Size.init -> void
 Sluice.Query<TKey, TValue>.Size.get -> long?
 Sluice.Query<TKey, TValue>.Size.init -> void
 Sluice.SluiceReads.DoNotCache() -> void
+Sluice.Infrastructure.FlowWrites
+Sluice.SluiceFlow
+static Sluice.Infrastructure.ActiveCompute.BeforeStore(Sluice.SluiceReads! reads, System.Func<System.Threading.CancellationToken, System.Threading.Tasks.Task!>! step) -> void
+static Sluice.Infrastructure.FlowWrites.AddProbe(Sluice.SluiceCache! cache, System.Func<System.Collections.Generic.IReadOnlyCollection<Sluice.Dependency!>!>! pending) -> bool
+static Sluice.Infrastructure.FlowWrites.OnAmbient(Sluice.SluiceCache! cache, System.Func<System.Transactions.Transaction!, System.Collections.Generic.IReadOnlyCollection<Sluice.Dependency!>!>! pending) -> void
+static Sluice.SluiceFlow.Begin() -> System.IDisposable!

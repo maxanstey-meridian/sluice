@@ -68,6 +68,18 @@ public sealed class CachedRead
         return _computes > before;
     }
 
+    /// <summary>
+    /// <see cref="WasEvicted"/>, read as another request would, on a flow of its own: outside the caller's ambient
+    /// transaction and its <see cref="SluiceFlow"/>, where a read of the caller's own uncommitted writes throws.
+    /// </summary>
+    public Task<bool> WasEvictedForAnotherCaller()
+    {
+        using (ExecutionContext.SuppressFlow())
+        {
+            return Task.Run(WasEvicted);
+        }
+    }
+
     private async Task Get() =>
         await _cache.GetOrSetAsync(
             _query,

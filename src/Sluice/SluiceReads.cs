@@ -17,6 +17,9 @@ public sealed class SluiceReads
     // Made on the first Hold: a hit, and a compute that holds nothing, never needs it. In creation order, so they're
     // disposed in reverse: one made later may use one made earlier.
     private List<(Type Type, IAsyncDisposable Resource)>? _held;
+
+    // What runs once the compute returns, before its value is stored: made on the first step, kept in order.
+    private List<Func<CancellationToken, Task>>? _beforeStore;
     private bool _open = true;
     private bool _uncached;
     private Exception? _violation;
@@ -165,6 +168,51 @@ public sealed class SluiceReads
             var created = create(_services);
             (_held ??= []).Add((typeof(T), created));
             return created;
+        }
+    }
+
+    internal void BeforeStore(Func<CancellationToken, Task> step)
+    {
+        ThrowIfAnotherCompute();
+        lock (_lock)
+        {
+            if (!_open)
+            {
+                throw new InvalidOperationException(
+                    "The compute has already returned, so nothing more can run before its value is stored "
+                        + "(read.Entity included). Await every read before returning from the compute."
+                );
+            }
+
+            (_beforeStore ??= []).Add(step);
+        }
+    }
+
+    // Once the compute has returned, while it's still open, so a step can record, hold and add steps. In order, with
+    // the compute's token; a step added while they run runs too. Stops once the compute has a violation, or asked not
+    // to be cached unless checked (the flow has uncommitted writes, and what the steps record is checked against
+    // them), since nothing would use what they record. A step that throws stops the rest, and fails the compute.
+    internal async Task RunBeforeStoreAsync(bool checkedAgainstWrites)
+    {
+        for (var i = 0; ; i++)
+        {
+            Func<CancellationToken, Task> step;
+            lock (_lock)
+            {
+                if (
+                    _beforeStore is null
+                    || i >= _beforeStore.Count
+                    || _violation is not null
+                    || (_uncached && !checkedAgainstWrites)
+                )
+                {
+                    return;
+                }
+
+                step = _beforeStore[i];
+            }
+
+            await step(_ct).ConfigureAwait(false);
         }
     }
 

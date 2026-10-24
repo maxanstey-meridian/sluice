@@ -231,6 +231,19 @@ public sealed class Page
     public uint Version { get; set; }
 }
 
+/// <summary>
+/// Found by its slug, unique among live forms only (a filtered unique index), so drafts can share one. A named query
+/// filter hides deleted forms. Has PostgreSQL's <c>xmin</c> as its row version.
+/// </summary>
+public sealed class Form
+{
+    public int Id { get; set; }
+    public string Slug { get; set; } = "";
+    public bool IsLive { get; set; }
+    public bool IsDeleted { get; set; }
+    public uint Version { get; set; }
+}
+
 /// <summary>Known to its bins by its code, an alternate key.</summary>
 public sealed class Warehouse
 {
@@ -629,6 +642,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Bin> Bins => Set<Bin>();
     public DbSet<Crate> Crates => Set<Crate>();
     public DbSet<Page> Pages => Set<Page>();
+    public DbSet<Form> Forms => Set<Form>();
     public DbSet<Dictionary<string, object>> CustomerCoupons =>
         Set<Dictionary<string, object>>("CustomerCoupons");
     public DbSet<Supplier> Suppliers => Set<Supplier>();
@@ -758,6 +772,9 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Page>().HasIndex(p => p.Slug).IsUnique().HasFilter("\"Slug\" is not null");
         model.Entity<Page>().HasIndex(p => new { p.Section, p.Number }).IsUnique();
         model.Entity<Page>().Property(p => p.Version).IsRowVersion();
+        model.Entity<Form>().HasIndex(f => f.Slug).IsUnique().HasFilter("\"IsLive\"");
+        model.Entity<Form>().Property(f => f.Version).IsRowVersion();
+        model.Entity<Form>().HasQueryFilter("SoftDelete", form => !form.IsDeleted);
         model
             .Entity<Page>()
             .Property(p => p.Slug)

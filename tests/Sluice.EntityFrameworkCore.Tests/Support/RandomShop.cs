@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -764,9 +765,19 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         Offer(1, any(state.Pages), () => UpdateDetachedPage(Pick(state.Pages)));
         Offer(1, any(state.Pages), () => DeletePage(Pick(state.Pages)));
         Offer(bulk ? 2 : 0, any(state.Pages), () => BulkSetSlug(Pick(state.Pages)));
+        Offer(bulk ? 2 : 0, any(state.Pages), () => KeyedEditPage(Pick(state.Pages)));
+        Offer(bulk ? 1 : 0, any(state.Pages), () => KeyedDeletePage(Pick(state.Pages)));
         Offer(bulk ? 3 : 0, any(state.Customers), () => BulkEditOrders(Pick(state.Customers)));
+        Offer(bulk ? 3 : 0, any(state.Orders), () => KeyedEditOrders(state));
         Offer(bulk ? 3 : 0, state.Customers.Length > 1, () => BulkMoveOrders(state));
+        Offer(
+            bulk ? 2 : 0,
+            any(state.Orders) && any(state.Customers),
+            () => KeyedMoveOrders(state)
+        );
+        Offer(bulk ? 1 : 0, any(state.Orders), () => KeyedDeleteOrders(state));
         Offer(bulk ? 2 : 0, any(state.Customers), () => BulkDeleteCustomer(Pick(state.Customers)));
+        Offer(bulk ? 2 : 0, any(state.Customers), () => KeyedDeleteCustomer(Pick(state.Customers)));
 
         var roll = random.Next(changes.Sum(change => change.Weight));
         foreach (var (weight, make) in changes)
@@ -1147,6 +1158,30 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
 
     private string? MaybeSlug() => random.Next(4) > 0 ? Pick(ShopViews.Slugs(first)) : null;
 
+    // By key, setting the slug or leaving it alone, and maybe on a condition that matches no row. A slug another page
+    // holds makes the database refuse the statement, so most leave it alone.
+    private async Task<string> KeyedEditPage(int id)
+    {
+        var (rows, condition) = Conditional(db.Pages, p => p.Title == "Ada");
+        if (random.Next(3) == 0)
+        {
+            var slug = MaybeSlug();
+            await rows.ForKey(id).ExecuteUpdateAsync(set => set.SetProperty(p => p.Slug, slug));
+            return $"bulk-set page {id}'s slug to {slug ?? "none"} by key{condition}";
+        }
+
+        var title = Pick(_names);
+        await rows.ForKey(id).ExecuteUpdateAsync(set => set.SetProperty(p => p.Title, title));
+        return $"bulk-retitle page {id} by key{condition}";
+    }
+
+    private async Task<string> KeyedDeletePage(int id)
+    {
+        var (rows, condition) = Conditional(db.Pages, p => p.Title == "Ada");
+        await rows.ForKey(id).ExecuteDeleteAsync();
+        return $"bulk-delete page {id} by key{condition}";
+    }
+
     private async Task<string> BulkEditOrders(int customer)
     {
         var item = Item();
@@ -1171,6 +1206,50 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         await db.Customers.Where(c => c.Id == id).ExecuteDeleteAsync();
         return $"bulk-delete customer {id}";
     }
+
+    private async Task<string> KeyedDeleteCustomer(int id)
+    {
+        var (rows, condition) = Conditional(db.Customers, c => c.Name == "Ada");
+        await rows.ForKey(id).ExecuteDeleteAsync();
+        return $"bulk-delete customer {id} by key{condition}";
+    }
+
+    private async Task<string> KeyedEditOrders(State state)
+    {
+        var ids = Some(state.Orders);
+        var item = Item();
+        var (rows, condition) = Conditional(db.Orders, o => o.Item == "big");
+        await rows.ForKeys(ids).ExecuteUpdateAsync(set => set.SetProperty(o => o.Item, item));
+        return $"bulk-make orders {string.Join(",", ids)} {item} by key{condition}";
+    }
+
+    // Re-parents rows by key: their old parents are unknown, so every list goes.
+    private async Task<string> KeyedMoveOrders(State state)
+    {
+        var (ids, to) = (Some(state.Orders), Pick(state.Customers));
+        await db
+            .Orders.ForKeys(ids)
+            .ExecuteUpdateAsync(set => set.SetProperty(o => o.CustomerId, to));
+        return $"bulk-move orders {string.Join(",", ids)} to customer {to} by key";
+    }
+
+    private async Task<string> KeyedDeleteOrders(State state)
+    {
+        var ids = Some(state.Orders);
+        var (rows, condition) = Conditional(db.Orders, o => o.Item == "big");
+        await rows.ForKeys(ids).ExecuteDeleteAsync();
+        return $"bulk-delete orders {string.Join(",", ids)} by key{condition}";
+    }
+
+    // Half the time, the rows narrowed further by a condition of the app's own, which may match none of the keys.
+    private (IQueryable<T> Rows, string Condition) Conditional<T>(
+        IQueryable<T> rows,
+        Expression<Func<T, bool>> condition
+    ) => random.Next(2) == 0 ? (rows.Where(condition), $" where {condition.Body}") : (rows, "");
+
+    // One to three of the rows, maybe the same one twice.
+    private int[] Some(int[] rows) =>
+        [.. Enumerable.Range(0, random.Next(1, 4)).Select(_ => Pick(rows))];
 
     private static bool IsFrom<T>(Exception? exception)
         where T : Exception =>

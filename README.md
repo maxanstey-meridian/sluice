@@ -209,9 +209,13 @@ await db.SaveChangesAsync(ct);
 Once a save commits, Sluice clears the cached reads of every row it inserted, updated or
 deleted, and of the lists those rows were in or moved between. `ExecuteUpdate` and
 `ExecuteDelete` work too: Sluice can't tell which rows they changed, so once they commit, every
-cached read of the types in the table they wrote is evicted. One more case is broad: when a
-delete makes the database delete rows EF never loaded, or set their foreign key to null
-(`ON DELETE CASCADE` or `SET NULL`), Sluice clears every cached read of those types.
+cached read of the types in the table they wrote is evicted. Name the rows with `.ForKey(id)` or
+`.ForKeys(ids)` just before the call, and only those rows' readers are evicted, plus the type's
+`Children` lists and readers by any unique column the statement names; see
+[Bulk writes by key](https://maxanstey-meridian.github.io/sluice/guides/ef-core#bulk-writes-by-key).
+One more case is broad: when a delete makes the database delete rows EF never loaded, or set
+their foreign key to null (`ON DELETE CASCADE` or `SET NULL`), Sluice clears every cached read
+of those types.
 [Database cascades](https://maxanstey-meridian.github.io/sluice/guides/ef-core#database-cascades)
 has the details.
 
@@ -234,6 +238,12 @@ as a static tenant accessor, or the context's own tenant id unless the compute s
 key with `read.Db<AppDb>(db => db.TenantId = tenantId)`. A filter reading a scoped tenant
 service runs when the context property it reads is marked `[SluiceContextState]` and the compute
 sets the service with `read.Db<AppDb>((db, services) => …)`.
+
+A cached read inside your own transaction, after saves you haven't committed, throws when it
+depends on them, rather than hand you data older than your own write. Sluice sees a
+`TransactionScope` by itself; for EF transactions, add `using var _ = SluiceFlow.Begin();` once
+per entry point, such as in middleware. See
+[Reading your own uncommitted writes](https://maxanstey-meridian.github.io/sluice/guides/strict-reads#reading-your-own-uncommitted-writes).
 
 One thing doesn't throw, and isn't tracked either: raw ADO.NET or Dapper on `read.Db`'s
 connection (`computeDb.Database.GetDbConnection()`) outside a `read.From` fetch. Sluice only
@@ -271,7 +281,8 @@ start.
   things at once or a whole source, fallback values that still get cleared, and clearing
   everything
 - [EF Core](https://maxanstey-meridian.github.io/sluice/guides/ef-core): what each query records,
-  foreign keys, database cascades, owned and inherited types, pooled contexts, and bulk updates
+  foreign keys, database cascades, owned and inherited types, pooled contexts, and bulk updates,
+  by key or not
 - [What a compute can't read](https://maxanstey-meridian.github.io/sluice/guides/strict-reads):
   the full list, how to read views and raw SQL anyway, and what Sluice can't check
 - [Transactions](https://maxanstey-meridian.github.io/sluice/guides/transactions): EF
@@ -284,7 +295,7 @@ start.
 
 - The EF Core tests run on a real PostgreSQL in Docker, not an in-memory fake.
 - A random workload makes saves, moves, deletes, deletes of rows it never loaded, bulk updates
-  and deletes, batches and transactions across cascades, set-null keys, inheritance, composite
+  and deletes (by key or not), batches and transactions across cascades, set-null keys, inheritance, composite
   keys and a many-to-many join. After every write, it checks each cached read, through the
   helpers and through plain queries that follow navigations, joins and `Include`, against the
   same read run fresh. A concurrent version runs four writers and four readers at once, and

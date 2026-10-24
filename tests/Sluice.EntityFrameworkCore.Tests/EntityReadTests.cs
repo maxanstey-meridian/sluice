@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Sluice.EntityFrameworkCore.Tests.Support;
 using ZiggyCreatures.Caching.Fusion;
@@ -266,6 +267,15 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .Be(1, "the context is free again");
     }
 
+    // As a write from another request, outside the running compute, whose writes would otherwise throw.
+    private static Task AsAnotherRequest(Func<Task> write)
+    {
+        using (ExecutionContext.SuppressFlow())
+        {
+            return Task.Run(write);
+        }
+    }
+
     // Each test makes its own pages, with slugs and a section no other test uses.
     private static string Fresh(string name) => $"{name}-{Guid.NewGuid():N}";
 
@@ -417,19 +427,179 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .And.Contain("Warehouse has no concurrency token");
     }
 
-    // Raw SQL leaves no trace of the value a row held, so only the whole type's dependencies reach its readers by value.
+    // The read records the key of the row it found, so a write by key reaches it. Raw SQL leaves no trace of the value
+    // a row took, so only the whole type's dependencies reach a reader of a value no row held.
     [Fact]
-    public async Task A_unique_column_read_is_evicted_by_AllDependencies_and_not_by_the_row_s_key()
+    public async Task A_unique_column_read_is_evicted_by_the_key_of_the_row_it_found_and_by_AllDependencies()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
-        var slug = Fresh("raw");
+        var (slug, missing) = (Fresh("raw"), Fresh("missing"));
         var page = await AddPage(db, slug);
+        var other = await AddPage(db, Fresh("other"));
         Task ReadIt(SluiceReads read, CancellationToken ct) =>
             read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleAsync(ct);
+        Task ReadMissing(SluiceReads read, CancellationToken ct) =>
+            read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, missing).SingleOrDefaultAsync(ct);
 
-        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(page.Id))).Should().BeFalse();
+        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(page.Id))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(other.Id))).Should().BeFalse();
         (await CachedRead.IsEvictedBy(ReadIt, db.Pages.AllDependencies())).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ReadMissing, db.Pages.Dependency(page.Id)))
+            .Should()
+            .BeFalse("a read that found no row recorded no key");
+        (await CachedRead.IsEvictedBy(ReadMissing, db.Pages.AllDependencies())).Should().BeTrue();
+    }
+
+    // The lookup ignores query filters, so a row they hide is recorded too: a write that brings it back reaches the
+    // reader by its key.
+    [Fact]
+    public async Task A_unique_column_read_records_the_key_of_a_row_its_query_filters_hide()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("deleted");
+        var form = new Form { Slug = slug, IsDeleted = true };
+        db.Forms.Add(form);
+        await db.SaveChangesAsync();
+        var cached = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().Forms, f => f.Slug, slug).SingleOrDefaultAsync(ct)
+        );
+
+        await db
+            .Forms.IgnoreQueryFilters()
+            .ForKey(form.Id)
+            .ExecuteUpdateAsync(set => set.SetProperty(f => f.IsDeleted, false));
+
+        (await cached.WasEvicted()).Should().BeTrue("the form it couldn't see came back");
+    }
+
+    // The lookup runs once the compute returns, so the value can move to another row in between. That write publishes
+    // the value after the compute started, which evicts the entry whatever the lookup found.
+    [Fact]
+    public async Task A_value_that_moves_between_the_read_and_its_key_lookup_still_evicts()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("moving");
+        var (from, to) = (await AddPage(db, slug), await AddPage(db, Fresh("to")));
+        var moved = false;
+
+        var cached = await CachedRead.Of(
+            node.Cache,
+            async (read, ct) =>
+            {
+                await read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleAsync(ct);
+                if (!moved)
+                {
+                    moved = true;
+                    await AsAnotherRequest(async () =>
+                    {
+                        from.Slug = null;
+                        await db.SaveChangesAsync();
+                        to.Slug = slug;
+                        await db.SaveChangesAsync();
+                    });
+                }
+            }
+        );
+
+        (await cached.WasEvicted())
+            .Should()
+            .BeTrue("the move published the slug during the compute");
+        (await cached.WasEvicted()).Should().BeFalse("the second compute cached as usual");
+        await node.Cache.InvalidateAsync(db.Pages.Dependency(to.Id));
+        (await cached.WasEvicted()).Should().BeTrue("it found the row that holds the slug now");
+    }
+
+    [Fact]
+    public async Task A_key_lookup_that_fails_fails_the_compute_and_caches_nothing()
+    {
+        var failing = new FailKeyLookups();
+        await using var node = new SluiceNode(services: services =>
+            services.AddDbContextFactory<ShopDb>(
+                (provider, options) =>
+                    options
+                        .UseNpgsql(PostgresFixture.Running.ConnectionString)
+                        .UseSluice(provider)
+                        .AddInterceptors(failing)
+            )
+        );
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("failing");
+        await AddPage(db, slug);
+        var computes = 0;
+        var query = new Query<string, int>(Fresh("ef-reads-lookup"));
+        Task<int> Read() =>
+            node
+                .Cache.GetOrSetAsync(
+                    query,
+                    slug,
+                    async (read, ct) =>
+                    {
+                        await read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug)
+                            .SingleAsync(ct);
+                        return ++computes;
+                    }
+                )
+                .AsTask();
+
+        await ((Func<Task>)Read)
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("The key lookup failed.");
+        failing.Fail = false;
+        (await Read()).Should().Be(2, "nothing was cached");
+        (await Read()).Should().Be(2);
+    }
+
+    // Rows outside a filtered unique index can share its column's value; each is recorded, and past 100 of them the
+    // reader depends on every row of the type instead.
+    [Fact]
+    public async Task A_value_several_rows_share_records_each_of_them_and_past_100_every_row()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (shared, crowded) = (Fresh("draft"), Fresh("crowded"));
+        var drafts = Enumerable.Range(0, 2).Select(_ => new Form { Slug = shared }).ToList();
+        db.Forms.AddRange(drafts);
+        db.Forms.AddRange(Enumerable.Range(0, 101).Select(_ => new Form { Slug = crowded }));
+        var bystander = new Form { Slug = Fresh("bystander") };
+        db.Forms.Add(bystander);
+        await db.SaveChangesAsync();
+        Task ReadBy(string slug, SluiceReads read, CancellationToken ct) =>
+            read.Entity(read.Db<ShopDb>().Forms, f => f.Slug, slug).ToListAsync(ct);
+
+        foreach (var draft in drafts)
+        {
+            (
+                await CachedRead.IsEvictedBy(
+                    (read, ct) => ReadBy(shared, read, ct),
+                    db.Forms.Dependency(draft.Id)
+                )
+            )
+                .Should()
+                .BeTrue();
+        }
+
+        (
+            await CachedRead.IsEvictedBy(
+                (read, ct) => ReadBy(shared, read, ct),
+                db.Forms.Dependency(bystander.Id)
+            )
+        )
+            .Should()
+            .BeFalse();
+        (
+            await CachedRead.IsEvictedBy(
+                (read, ct) => ReadBy(crowded, read, ct),
+                db.Forms.Dependency(bystander.Id)
+            )
+        )
+            .Should()
+            .BeTrue("past 100 rows the reader depends on the whole type");
     }
 
     // The database deletes the warehouse's bins without EF loading them, so their labels are unknown.

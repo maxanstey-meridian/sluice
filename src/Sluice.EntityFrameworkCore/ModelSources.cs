@@ -20,6 +20,13 @@ internal static class ModelSources
     private const string TablePatternAnnotation = "Sluice:TablePattern";
     private const string RowVersionAnnotation = "Sluice:RowVersion";
     private const string UniqueColumnsAnnotation = "Sluice:UniqueColumns";
+    private const string ColumnPatternsAnnotation = "Sluice:ColumnPatterns";
+
+    /// <summary>
+    /// The most keys one dependency list names row by row: a keyed bulk write's keys, and the rows a read by a unique
+    /// column found. Past it, the whole type stands in, so a mass write doesn't publish thousands of tags.
+    /// </summary>
+    internal const int KeyLimit = 100;
 
     /// <summary>
     /// The source of <paramref name="entityType"/>'s rows, keyed by primary key; a composite key is passed as an
@@ -300,6 +307,78 @@ internal static class ModelSources
             .. CascadingForeignKeys(entityType).Select(foreignKey => ForeignKey(foreignKey).All),
             .. Cascades(entityType),
         ];
+
+    /// <summary>
+    /// What an update of the <paramref name="entityType"/> rows with these primary keys may change, given its
+    /// <paramref name="sql"/>: each row, which also reaches the type's whole-type readers; every foreign key a row may
+    /// have, whole, since the rows may have moved between parents nobody knows; and every unique column a row may have
+    /// whose column <paramref name="sql"/> names, as the provider delimits it, whole, since a reader by a value no row
+    /// held recorded no key. A reader by a unique column that found one of the rows recorded its key
+    /// (<c>read.Entity</c>). A statement that names the primary key's column more than once, beyond the key condition
+    /// Sluice added, may set it, moving a row to a key whose readers found nothing, so it publishes
+    /// <see cref="UpdateDependencies"/> instead. Unchecked, like <see cref="Entity"/>.
+    /// </summary>
+    internal static IEnumerable<Dependency> KeyedUpdateDependencies(
+        DbContext context,
+        IEntityType entityType,
+        IReadOnlyList<object> keys,
+        string sql
+    ) =>
+        ColumnMentions(context, KeyProperty(entityType), sql) > 1
+            ? UpdateDependencies(entityType)
+            :
+            [
+                .. keys.Select(Entity(entityType).For),
+                .. RowForeignKeys(entityType).Select(foreignKey => ForeignKey(foreignKey).All),
+                .. RowUniqueColumns(entityType)
+                    .Where(property => ColumnMentions(context, property, sql) > 0)
+                    .Select(property => Unique(property).All),
+            ];
+
+    /// <summary>
+    /// What a delete of the <paramref name="entityType"/> rows with these primary keys may change: each row; every
+    /// foreign key a row may have, whole, since their parents are unknown; the rows under each one, through every
+    /// <see cref="CascadingForeignKeys"/> foreign key, by the key when it points at the primary key, or whole when it
+    /// points at an alternate key, whose value is unknown; and what the database cascades into (<see cref="Cascades"/>).
+    /// No unique column: a reader by one that found a row recorded its key, and one that found none still finds none.
+    /// Unchecked, like <see cref="Entity"/>.
+    /// </summary>
+    internal static IEnumerable<Dependency> KeyedDeleteDependencies(
+        IEntityType entityType,
+        IReadOnlyList<object> keys
+    ) =>
+        [
+            .. keys.Select(Entity(entityType).For),
+            .. RowForeignKeys(entityType).Select(foreignKey => ForeignKey(foreignKey).All),
+            .. CascadingForeignKeys(entityType)
+                .SelectMany(foreignKey =>
+                    foreignKey.PrincipalKey.IsPrimaryKey()
+                        ? keys.Select(key =>
+                            StoredValue(foreignKey.Properties[0], key) is { } principal
+                                ? ForeignKey(foreignKey).For(principal)
+                                : ForeignKey(foreignKey).All
+                        )
+                        : [ForeignKey(foreignKey).All]
+                ),
+            .. Cascades(entityType),
+        ];
+
+    // How many times the SQL names the property's columns, as the provider delimits them, each standing alone. A
+    // property stored in no column counts as named, many times.
+    private static int ColumnMentions(DbContext context, IProperty property, string sql)
+    {
+        var patterns = property.GetOrAddRuntimeAnnotationValue(
+            ColumnPatternsAnnotation,
+            static arg =>
+                arg.Property.GetTableColumnMappings()
+                    .Select(mapping => mapping.Column.Name)
+                    .Distinct()
+                    .Select(name => NamePattern(arg.Quote.DelimitIdentifier(name)))
+                    .ToArray(),
+            (Quote: context.GetService<ISqlGenerationHelper>(), Property: property)
+        );
+        return patterns.Length == 0 ? int.MaxValue : patterns.Sum(pattern => pattern.Count(sql));
+    }
 
     /// <summary>
     /// The dependency on the <paramref name="entityType"/> row whose primary key is <paramref name="key"/>, which

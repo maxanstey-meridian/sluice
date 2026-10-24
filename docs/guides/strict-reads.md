@@ -89,6 +89,10 @@ ambient `TransactionScope`. A query inside a transaction the compute opens itsel
 would cache rows other callers can't see yet, which may roll back, or an old snapshot. See
 [Transactions](/guides/transactions#computes-and-transactions).
 
+That's a transaction on the compute's side. A cached read made inside *your* transaction, after
+writes you haven't committed, has a check of its own: see
+[Reading your own uncommitted writes](#reading-your-own-uncommitted-writes).
+
 ### Catching doesn't help
 
 Sluice also remembers the violation. If the compute catches the exception and carries on, the
@@ -142,6 +146,102 @@ still need [invalidating by hand](/guides/ef-core#writes-sluice-can-t-see).
 Inside a fetch, writes still throw, nesting still throws, and so do reads inside a transaction.
 A query in a fetch on your own context can track, so add `AsNoTracking()` yourself.
 `read.From(dependency)` without a fetch allows nothing extra.
+
+## Reading your own uncommitted writes
+
+A compute runs outside your transaction (see
+[Computes and transactions](/guides/transactions#computes-and-transactions)), and a save's
+invalidation waits for the commit. So a cached read made inside your own transaction, after
+you've saved but before you commit, can't see what you saved. Say a request approves form 7 in
+a transaction, then makes a cached read of form 7 before it commits. A hit returns the value
+cached before the save; a miss computes from what's committed. Either way the request gets the
+form as it was before its own write, and whatever it does next, such as checking the form's
+status, works from that.
+
+So that read throws `InvalidOperationException`, the same in every environment. The message
+names the query, says your own transaction has uncommitted writes this read depends on, and
+says to read those rows on the transaction's own context, or after it commits:
+
+```csharp
+await using var transaction = await db.Database.BeginTransactionAsync(ct);
+var form = await db.Forms.SingleAsync(f => f.Id == formId, ct);
+form.Status = FormStatus.Approved;
+await db.SaveChangesAsync(ct);
+
+// Throws: GetForm is a cached read of form 7, and the save above hasn't committed.
+var cached = await GetForm(formId, ct);
+
+// Read it on the transaction's own context instead, or after the commit.
+var current = await db.Forms.AsNoTracking().SingleAsync(f => f.Id == formId, ct);
+await transaction.CommitAsync(ct);
+```
+
+While your transaction has saved writes it hasn't committed, every cached read on the flow skips
+the cache. It computes fresh, through the same checks as any compute, and stores nothing. Then
+Sluice compares what the compute read with what your pending writes will invalidate once they
+commit. If they meet, the read throws; if not, you get the fresh value. So a cached read of form
+8 in the same transaction works, while a plain query of every form throws, since it reads form 7
+too. Skipping the cache is what catches a hit: a cached value doesn't say what it was built
+from, so Sluice can't check one, and doesn't serve one.
+
+The fresh compute doesn't queue with other callers of the same key, nor they with it. Another
+request reading form 7 at the same moment computes or hits as usual, never waits on this one,
+and never gets its exception.
+
+What it costs: reads inside a transaction with pending writes go to the database every time. In
+a flow with a transaction open but nothing pending, each cached read makes one check. With
+neither, nothing. A save that ran without a transaction of yours has committed, and invalidated,
+by the time it returns, so it never counts. An `ExecuteUpdate` or `ExecuteDelete` in your
+transaction counts as a save does.
+
+### Where Sluice sees your transaction
+
+- **A `TransactionScope`**: always, with nothing to set up. Create it with
+  `TransactionScopeAsyncFlowOption.Enabled`, as
+  [async code needs anyway](/guides/transactions#transactionscope-with-async-code).
+- **An EF transaction** (`BeginTransaction`, or one a context joins with `UseTransaction`): only
+  on a flow that called `SluiceFlow.Begin()` before the transaction began.
+- **A transaction joined with `Database.EnlistTransaction`**, with no `TransactionScope` around
+  it: only on a flow that called `SluiceFlow.Begin()` before its first save in the transaction.
+  If several such flows write in one enlisted transaction, only the first is checked.
+
+EF tells Sluice when a transaction begins, but from inside EF's own async method, and anything
+an async method sets on the flow (an `AsyncLocal`) is undone when it returns. So Sluice can only
+note the transaction in something an outer method set up first, and that's what
+`SluiceFlow.Begin()` does. Call it once per entry point, not per unit of work: repositories
+often open their own transactions deep in a call, and one call at the top covers them all.
+
+```csharp
+// ASP.NET Core: early in the pipeline, before anything that opens a transaction.
+app.Use(async (context, next) =>
+{
+    using var _ = SluiceFlow.Begin();
+    await next(context);
+});
+```
+
+In a message pipeline (Brighter, a queue consumer, a hosted service's loop), do the same in
+whatever wraps each message's handler, so each message has a flow of its own that ends with it.
+`SluiceFlow.Begin()` inside a flow that already began does nothing, so calling it again further
+in is harmless. It flows into tasks the entry point starts, so a request that fans out is
+covered. Dispose it on the flow that began it.
+
+### What the check misses
+
+- **An EF transaction on a flow without `SluiceFlow.Begin()`.** Its writes aren't seen as
+  pending, so a cached read returns the committed value. It costs nothing, but leaves the trap
+  open.
+- **An EF transaction begun before `SluiceFlow.Begin()` ran**, such as one opened earlier in the
+  pipeline than the middleware.
+- **An enlisted transaction on a flow without `SluiceFlow.Begin()`**, or one first written to
+  before it ran.
+- **Edits you haven't saved.** They're only in your context's change tracker, not in the
+  database or the transaction, so no compute could read them and there's nothing to check. Save
+  first, or use the tracked entity.
+- **Writes Sluice can't see**, such as `ExecuteSql` or raw ADO.NET in your transaction: see
+  [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see). Sluice sees a transaction's
+  writes through the package that made them, so on the generic path, where you invalidate after
+  your own commit, nothing is ever pending.
 
 ## What isn't checked
 
@@ -224,7 +324,54 @@ those). A filter that reads it through a tenant service the context holds
 (`i.TenantId == _tenants.TenantId`), an unmarked property with a body, a method, a `readonly` field, a
 virtual property, or a `{ get; }` or `{ get; init; }` property is refused even on a configured context, since the
 configure can't set it. Copy the value into a settable field or property in the constructor, and
-filter by that, or mark the property, below.
+filter by that, or mark the property: see
+[A tenant read through a scoped service](#a-tenant-read-through-a-scoped-service).
+
+The configure can also point the context at a tenant's own database before its first query,
+for database-per-tenant:
+
+```csharp
+read.Db<AppDb>(db => db.Database.SetConnectionString(tenants.ConnectionStringOf(tenantId)))
+```
+
+Dependencies are per entity type and row, not per tenant or database, so a write in one tenant
+evicts other tenants' cached reads of the same type (or, through `read.Entity`, the same key).
+That's safe, just broader than it needs to be.
+
+With a pooled context, what the configure set stays on the context for its next use; see
+[Pooling and factories](/guides/ef-core#pooling-and-factories).
+
+When the tenant id is a foreign key to a tenants table, read through `read.Children` to narrow
+that: `read.Children(read.Db<AppDb>(db => db.TenantId = tenantId).Invoices, invoice =>
+invoice.TenantId, tenantId)` records one dependency on that tenant's invoices, so only their
+writes evict it, and the filter still applies.
+
+You can also filter by hand instead: ignore the tenant filter by name
+(`IgnoreQueryFilters(["Tenant"])`) and add your own `Where`, with the tenant in the key. Forget
+the `Where` once, though, and one tenant's rows are served to another; the filter doesn't
+forget. Don't reach for `IgnoreQueryFilters()` without names: it drops every query filter in
+the query, on every type it reads, so soft-deleted rows would land in the cached value. An
+unnamed filter (`HasQueryFilter(i => …)`) can only be ignored that way, so name it unless it's
+the only filter the query applies:
+
+```csharp
+// In OnModelCreating. Named filters can be ignored one at a time.
+model.Entity<Invoice>().HasQueryFilter("Tenant", invoice => invoice.TenantId == TenantId);
+model.Entity<Invoice>().HasQueryFilter("SoftDelete", invoice => !invoice.IsDeleted);
+```
+
+A filter that reads anything outside the rows that can change is refused too, for the same
+reason: a static tenant accessor (`HasQueryFilter(i => i.TenantId == TenantContext.Current)`), a
+method or field of a service captured where the filter was configured, a database function that
+reads the connection's settings (`current_setting`) or the clock, and `DateTime.Now`. Each can
+give a different value on each call, but the cached value is served whatever it is now. Put the
+value in the query key, ignore that filter by name and filter by it yourself (the message names
+each refused filter and what to pass); for time, put a rounded date in the key, such as today's,
+and filter by that. What a filter may read besides the rows: constants, `static
+readonly` fields and static `{ get; } = …` properties holding a plain value (a number, string,
+date, `Guid` or enum), and plain local values captured where the filter was written. Calling a
+method, or constructing a value of your own type (`new UserId(5)`), is refused even when it
+never changes, since Sluice can't see inside it.
 
 ### A tenant read through a scoped service
 
@@ -303,48 +450,53 @@ object from the one the property reads. Lease it through a scoped factory that h
 scope's service on every lease, as EF documents for pooled tenants, or point the context at the
 scope's service in the configure as well.
 
-The configure can also point the context at a tenant's own database before its first query,
-for database-per-tenant:
+#### Keep the setter behind one helper
+
+Sluice doesn't read a `[SluiceContextState]` body, and can't see what a configure sets. So
+`ReadAsTenant` is safe only while nothing but a compute's configure calls it, and a review
+won't always catch the call that breaks that. Make the safe call the only call: one extension
+method on `read` that opens the compute's context as a tenant, and is the setter's only caller.
+Casebridge's context reads its organisation the way `AppDb` above reads its tenant, and its
+helper is this:
 
 ```csharp
-read.Db<AppDb>(db => db.Database.SetConnectionString(tenants.ConnectionStringOf(tenantId)))
+public static class TenantScope
+{
+    // A compute's context, read as one organisation: the cache key's, never the request's.
+    public static CaseBridgeDbContext OrganisationDb(this SluiceReads read, Guid organisationId) =>
+        read.Db<CaseBridgeDbContext>(db => db.ReadAsOrganisation(organisationId));
+}
 ```
 
-Dependencies are per entity type and row, not per tenant or database, so a write in one tenant
-evicts other tenants' cached reads of the same type (or, through `read.Entity`, the same key).
-That's safe, just broader than it needs to be.
+A compute opens its context with `read.OrganisationDb(organisationId)`, never with a configure of
+its own. The helper takes a `read`, which only a compute has, so a request can't call it; the
+organisation must still come from the key, as every configure's values must.
 
-With a pooled context, what the configure set stays on the context for its next use; see
-[Pooling and factories](/guides/ef-core#pooling-and-factories).
-
-When the tenant id is a foreign key to a tenants table, read through `read.Children` to narrow
-that: `read.Children(read.Db<AppDb>(db => db.TenantId = tenantId).Invoices, invoice =>
-invoice.TenantId, tenantId)` records one dependency on that tenant's invoices, so only their
-writes evict it, and the filter still applies.
-
-You can also filter by hand instead: ignore the tenant filter by name
-(`IgnoreQueryFilters(["Tenant"])`) and add your own `Where`, with the tenant in the key. Forget
-the `Where` once, though, and one tenant's rows are served to another; the filter doesn't
-forget. Don't reach for `IgnoreQueryFilters()` without names: it drops every query filter in
-the query, on every type it reads, so soft-deleted rows would land in the cached value. An
-unnamed filter (`HasQueryFilter(i => …)`) can only be ignored that way, so name it unless it's
-the only filter the query applies:
+Then have an architecture test hold the rule. It fails when anything else calls the setter, and
+when nothing calls the helper. The second check proves the scan sees calls at all: one that
+found no calls, because it missed lambdas or async methods (which compile into nested types),
+would pass the first check with nothing checked.
 
 ```csharp
-// In OnModelCreating. Named filters can be ignored one at a time.
-model.Entity<Invoice>().HasQueryFilter("Tenant", invoice => invoice.TenantId == TenantId);
-model.Entity<Invoice>().HasQueryFilter("SoftDelete", invoice => !invoice.IsDeleted);
+public sealed class TenantScopeTests
+{
+    [Fact]
+    public void Only_OrganisationDb_calls_ReadAsOrganisation() =>
+        Assert.Equal(
+            new[] { typeof(TenantScope).FullName },
+            CallersOf(typeof(CaseBridgeDbContext), nameof(CaseBridgeDbContext.ReadAsOrganisation))
+        );
+
+    [Fact]
+    public void Computes_open_their_context_with_OrganisationDb() =>
+        Assert.NotEmpty(CallersOf(typeof(TenantScope), nameof(TenantScope.OrganisationDb)));
+
+    // The full names of the types in the app's assembly with a method that calls this one,
+    // counting a nested type (a lambda's closure, an async method's state machine) as the type
+    // it's nested in.
+    private static IReadOnlyList<string?> CallersOf(Type declaringType, string methodName) => …;
+}
 ```
 
-A filter that reads anything outside the rows that can change is refused too, for the same
-reason: a static tenant accessor (`HasQueryFilter(i => i.TenantId == TenantContext.Current)`), a
-method or field of a service captured where the filter was configured, a database function that
-reads the connection's settings (`current_setting`) or the clock, and `DateTime.Now`. Each can
-give a different value on each call, but the cached value is served whatever it is now. Put the
-value in the query key, ignore that filter by name and filter by it yourself (the message names
-each refused filter and what to pass); for time, put a rounded date in the key, such as today's,
-and filter by that. What a filter may read besides the rows: constants, `static
-readonly` fields and static `{ get; } = …` properties holding a plain value (a number, string,
-date, `Guid` or enum), and plain local values captured where the filter was written. Calling a
-method, or constructing a value of your own type (`new UserId(5)`), is refused even when it
-never changes, since Sluice can't see inside it.
+Casebridge's `CallersOf` reads each method body's IL with reflection; any tool that can list a
+method's callers will do.
