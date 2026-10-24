@@ -265,6 +265,38 @@ refused, since it holds only what the constructor set. Unmarked properties with 
 (`_tenants.TenantId` written straight into the filter) are still refused, and the refusal of an
 unmarked property says how to mark it.
 
+When the scoped service carries the user as well as the tenant (their id, their role), setting
+it in the compute's scope would make the compute run as a user who doesn't exist, and anything
+else in that scope that reads the user would see that one. Give the context a tenant of its own
+for the configure to set instead, and read it first:
+
+```csharp
+public sealed class AppDb(DbContextOptions<AppDb> options, UserContext user) : DbContext(options)
+{
+    private Guid? _readAsTenantId;
+
+    // Only a compute's configure calls this, never a request.
+    public void ReadAsTenant(Guid tenantId) => _readAsTenantId = tenantId;
+
+    // The compute's tenant wins over any user; a request's context never sets it.
+    [SluiceContextState]
+    private Guid? TenantId =>
+        _readAsTenantId ?? (user.IsAuthenticated ? user.TenantId : null);
+}
+```
+
+```csharp
+read.Db<AppDb>(db => db.ReadAsTenant(tenantId))
+```
+
+The configure's tenant must come first. A user service that reads `IHttpContextAccessor` gives
+the compute the user of whichever caller computes first (see above), and with the user first,
+that user's tenant would be cached for everyone with the key. On a request's context the field
+is never set, so the user's tenant applies as before. Call `ReadAsTenant` only from a compute's
+configure: on a request's context it would override the user's tenant. With a pooled context
+the field is still set for the next lease, which may be a request's, so clear it on every lease
+in the scoped factory, or don't pool this context.
+
 A context leased straight from `AddDbContextPool` was made by the pool, not the compute's scope,
 and keeps whatever service an earlier lease gave it, so the configure would set a different
 object from the one the property reads. Lease it through a scoped factory that hands it the
