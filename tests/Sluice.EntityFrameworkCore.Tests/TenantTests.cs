@@ -13,6 +13,7 @@ namespace Sluice.EntityFrameworkCore.Tests;
 public sealed class TenantTests : IAsyncLifetime
 {
     private static readonly Query<string, List<string>> _tickets = new("helpdesk-tickets");
+    private static readonly Query<string, List<string>> _forms = new("helpdesk-forms");
 
     public static TheoryData<string> Registrations => new(["AddDbContext", "scoped factory"]);
 
@@ -103,6 +104,9 @@ public sealed class TenantTests : IAsyncLifetime
         "a property with a body",
         "*HelpTag's query filter reads the context's state through HelpdeskModel.TenantName, which read.Db's configure can't set*"
             + "Read the context's state from a settable field or auto-property of the context*"
+            + "If the property's body reads only what the compute's configure sets, such as a scoped tenant service, "
+            + "mark it [SluiceContextState] (it mustn't be virtual) and set that state with "
+            + "read.Db<HelpdeskDb>((db, services) => …)*"
             + "Or filter by hand: the filter has no name, so only IgnoreQueryFilters() ignores it*"
     )]
     [InlineData(
@@ -138,6 +142,61 @@ public sealed class TenantTests : IAsyncLifetime
                 .AsTask();
 
         await read.Should().ThrowAsync<InvalidOperationException>().WithMessage(message);
+    }
+
+    // The compute's scope is the one its context was made in, so the configure sets the very tenant service the context
+    // holds, and a filter reading it through a marked property gives each tenant its own rows, whatever the caller's.
+    [Fact]
+    public async Task A_filter_reading_a_scoped_service_through_a_marked_property_gives_each_tenant_its_own_rows_and_entries()
+    {
+        await using var node = Node("AddDbContext");
+        var acme = await AddForm(node, "acme");
+        var globex = await AddForm(node, "globex");
+        var computes = 0;
+
+        ValueTask<List<string>> Forms(string tenant) =>
+            node.Cache.GetOrSetAsync(
+                _forms,
+                tenant,
+                (r, ct) =>
+                {
+                    computes++;
+                    return r.Db<HelpdeskDb>(
+                            (db, services) =>
+                                services.GetRequiredService<TenantContext>().Set(tenant)
+                        )
+                        .Forms.Select(f => f.Title)
+                        .ToListAsync(ct);
+                }
+            );
+
+        (await Forms("acme")).Should().Contain(acme).And.NotContain(globex);
+        (await Forms("globex")).Should().Contain(globex).And.NotContain(acme);
+        (await Forms("acme")).Should().Contain(acme);
+        (await Forms("globex")).Should().Contain(globex);
+        computes.Should().Be(2, "each tenant has its own entry, and the second reads were hits");
+    }
+
+    [Fact]
+    public async Task A_filter_reading_a_marked_property_is_refused_on_an_unconfigured_context()
+    {
+        await using var node = Node("AddDbContext");
+
+        var read = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    _forms,
+                    "acme",
+                    (r, ct) => r.Db<HelpdeskDb>().Forms.Select(f => f.Title).ToListAsync(ct)
+                )
+                .AsTask();
+
+        await read.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(
+                "*HelpForm's query filter reads the context's state (HelpdeskDb.FormTenant)*"
+                    + "read.Db<HelpdeskDb>((db, services) => …)*"
+            );
     }
 
     [Fact]
@@ -313,8 +372,12 @@ public sealed class TenantTests : IAsyncLifetime
         );
     }
 
-    [Fact]
-    public async Task A_configure_that_throws_reaches_the_caller_and_caches_nothing_even_if_the_compute_catches_it()
+    [Theory]
+    [InlineData("db")]
+    [InlineData("db, services")]
+    public async Task A_configure_that_throws_reaches_the_caller_and_caches_nothing_even_if_the_compute_catches_it(
+        string overload
+    )
     {
         await using var node = Node("AddDbContext");
         var computes = 0;
@@ -329,7 +392,14 @@ public sealed class TenantTests : IAsyncLifetime
                         computes++;
                         try
                         {
-                            r.Db<HelpdeskDb>(_ => throw new FormatException("bad tenant"));
+                            if (overload == "db")
+                            {
+                                r.Db<HelpdeskDb>(_ => throw new FormatException("bad tenant"));
+                            }
+                            else
+                            {
+                                r.Db<HelpdeskDb>((_, _) => throw new FormatException("bad tenant"));
+                            }
                         }
                         catch (FormatException) { }
 
@@ -539,6 +609,7 @@ public sealed class TenantTests : IAsyncLifetime
             services: services =>
             {
                 services.AddScoped<ITenantProvider, AmbientTenant>();
+                services.AddScoped<TenantContext>();
                 var connection = HelpdeskModel.ConnectionString(HelpdeskModel.A);
                 switch (registration)
                 {
@@ -602,6 +673,23 @@ public sealed class TenantTests : IAsyncLifetime
         );
 
     // Saved through a context with UseSluice, so its write invalidates the node's cache.
+    private static async Task<string> AddForm(SluiceNode node, string tenant)
+    {
+        var title = $"{tenant}-form-{Guid.NewGuid():N}";
+        await using var db = new HelpdeskDb(
+            new DbContextOptionsBuilder<HelpdeskDb>()
+                .UseNpgsql(HelpdeskModel.ConnectionString(HelpdeskModel.A))
+                .UseSluice(node.Services)
+                .Options,
+            new AmbientTenant(),
+            new TenantContext()
+        );
+        db.Forms.Add(new HelpForm { TenantId = tenant, Title = title });
+        await db.SaveChangesAsync();
+        return title;
+    }
+
+    // Saved through a context with UseSluice, so its write invalidates the node's cache.
     private static async Task<string> AddTicket(SluiceNode node, string database, string tenant)
     {
         var title = $"{tenant}-{Guid.NewGuid():N}";
@@ -610,7 +698,8 @@ public sealed class TenantTests : IAsyncLifetime
                 .UseNpgsql(HelpdeskModel.ConnectionString(database))
                 .UseSluice(node.Services)
                 .Options,
-            new AmbientTenant()
+            new AmbientTenant(),
+            new TenantContext()
         );
         db.Tickets.Add(new HelpTicket { TenantId = tenant, Title = title });
         await db.SaveChangesAsync();

@@ -26,7 +26,8 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         "*Run it in the fetch of read.From(dependency, fetch)*invalidate that source when its data changes*";
     private const string Configure =
         "*That state is whatever the context was made with*Set it from the cache key when the compute first asks for "
-        + "the context, with read.Db<ShopDb>(db => …). Or filter by hand: *";
+        + "the context, with read.Db<ShopDb>(db => …), or with read.Db<ShopDb>((db, services) => …) to set a "
+        + "scoped service the state is read from. Or filter by hand: *";
     private const string SelectValues = "*Select the values you need instead*";
     private const string ForeignContext = "*didn't get from read.Db<TContext>()*";
     private const string Rename = """update "Customers" set "Name" = 'Cy' where "Id" = -1""";

@@ -98,9 +98,9 @@ Recording what a query reads is one EF interceptor for the whole process:
   context the compute didn't configure. A read inside a transaction throws.
   Outside a compute it returns at once.
 
-`read.Entity` and `read.Children` record a narrower dependency, one row or one parent's rows, then
-return the set as a no-tracking query with auto-includes off, filtered to the key (`Entity`) or
-foreign key value (`Children`). The query is marked, so its tag leaves its own type out unless it
+`read.Entity` and `read.Children` record a narrower dependency, one row (by key, or by a unique
+column's value) or one parent's rows, then return the set as a no-tracking query with
+auto-includes off, filtered to the key or value (`Entity`) or foreign key value (`Children`). The query is marked, so its tag leaves its own type out unless it
 reaches that type again.
 
 ## EF Core writes
@@ -108,13 +108,13 @@ reaches that type again.
 A second interceptor, one per `SluiceCache`, handles writes. For a save:
 
 1. **`SavingChanges`**: reads the changed entries through `ChangeTracker.Entries()`, which detects
-   changes the way EF's own save does, and snapshots their foreign keys' original values. EF
-   overwrites those when it accepts the save. An original is what EF loaded, so it's only used
+   changes the way EF's own save does, and snapshots the original values of their foreign keys
+   and unique columns. EF overwrites those when it accepts the save. An original is what EF loaded, so it's only used
    where EF's `UPDATE` or `DELETE` checks the database still holds it: a key, a concurrency
-   token, or any column of a row with a row version. Otherwise the foreign key is invalidated
-   whole.
+   token, or any column of a row with a row version. Otherwise the foreign key, or the unique
+   column, is invalidated whole.
 2. **`SavedChanges`**: builds the dependencies, now that generated keys are real. Each row gives
-   its key and its foreign keys before and after (or whole); a deleted row also gives every
+   its key, and its foreign keys and unique columns before and after (or whole); a deleted row also gives every
    foreign key that points at it, and the whole of every type the model lets the database cascade
    into or set to null (worked out once per type); an owned row gives its owner.
 3. **Publish**, depending on the transaction EF used, read the way EF's batch executor reads it:
@@ -125,8 +125,8 @@ A second interceptor, one per `SluiceCache`, handles writes. For a save:
 
 An `ExecuteUpdate` or `ExecuteDelete` publishes the same way, once it has run: EF drops query tags
 from these statements, so the tables it wrote are found by their quoted names in its SQL, and
-every read of the entity types stored in them is invalidated (for a delete, what it cascades
-into too). One that reports it changed no rows publishes nothing.
+every read of the entity types stored in them is invalidated, reads by unique column included
+(for a delete, what it cascades into too). One that reports it changed no rows publishes nothing.
 
 A failed, cancelled or conflicting save publishes the same way: never drop, because
 over-invalidating is safe. After a commit, a failure to invalidate is logged and never thrown.

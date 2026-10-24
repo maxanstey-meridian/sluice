@@ -35,9 +35,10 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
 
     /// <summary>
     /// The compute's <typeparamref name="TContext"/>, taken from its scope on first use and configured there, before
-    /// anything else can use it, by <paramref name="configure"/>. Only that first call may configure it.
+    /// anything else can use it, by <paramref name="configure"/>, which gets the scope too. Only that first call may
+    /// configure it.
     /// </summary>
-    internal TContext Get<TContext>(SluiceReads read, Action<TContext>? configure)
+    internal TContext Get<TContext>(SluiceReads read, Action<TContext, IServiceProvider>? configure)
         where TContext : DbContext
     {
         lock (_lock)
@@ -63,7 +64,7 @@ internal sealed class ComputeContexts(AsyncServiceScope scope) : IAsyncDisposabl
                 // database), so the compute caches nothing, even if it catches the exception.
                 try
                 {
-                    configure(context);
+                    configure(context, scope.ServiceProvider);
                 }
                 catch (Exception failure)
                 {

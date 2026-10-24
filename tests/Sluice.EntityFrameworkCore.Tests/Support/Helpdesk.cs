@@ -37,6 +37,25 @@ public sealed class HelpTag
     public string TenantId { get; set; } = "";
 }
 
+/// <summary>Filtered through a property of the context marked [SluiceContextState], over a scoped tenant service.</summary>
+public sealed class HelpForm
+{
+    public int Id { get; set; }
+    public string TenantId { get; set; } = "";
+    public string Title { get; set; } = "";
+}
+
+/// <summary>
+/// The request's tenant, set once the request is authenticated, as an app's user context is: by middleware, after the
+/// context that holds it was made.
+/// </summary>
+public sealed class TenantContext
+{
+    public string? TenantId { get; private set; }
+
+    public void Set(string tenantId) => TenantId = tenantId;
+}
+
 /// <summary>The current request's tenant.</summary>
 public interface ITenantProvider
 {
@@ -116,7 +135,8 @@ public abstract class HelpdeskModel(DbContextOptions options) : DbContext(option
                     new DbContextOptionsBuilder<HelpdeskDb>()
                         .UseNpgsql(ConnectionString(database))
                         .Options,
-                    new AmbientTenant()
+                    new AmbientTenant(),
+                    new TenantContext()
                 );
                 await db.Database.EnsureCreatedAsync();
                 db.AddRange(new HelpTenant { Id = "acme" }, new HelpTenant { Id = "globex" });
@@ -146,21 +166,34 @@ public abstract class HelpdeskModel(DbContextOptions options) : DbContext(option
 /// </summary>
 public sealed class HelpdeskDb : HelpdeskModel
 {
-    public HelpdeskDb(DbContextOptions<HelpdeskDb> options, ITenantProvider tenants)
+    private readonly TenantContext _tenantContext;
+
+    public HelpdeskDb(
+        DbContextOptions<HelpdeskDb> options,
+        ITenantProvider tenants,
+        TenantContext tenantContext
+    )
         : base(options)
     {
         Tenants = tenants;
         TenantId = tenants.TenantId;
+        _tenantContext = tenantContext;
     }
 
     public ITenantProvider Tenants { get; }
 
     public DbSet<HelpNote> Notes => Set<HelpNote>();
+    public DbSet<HelpForm> Forms => Set<HelpForm>();
+
+    /// <summary>The tenant service's tenant, which only <c>read.Db</c>'s configure sets inside a compute.</summary>
+    [SluiceContextState]
+    private string? FormTenant => _tenantContext is { TenantId: { } tenant } ? tenant : null;
 
     protected override void OnModelCreating(ModelBuilder model)
     {
         base.OnModelCreating(model);
         model.Entity<HelpNote>().HasQueryFilter(note => note.TenantId == Tenants.TenantId);
+        model.Entity<HelpForm>().HasQueryFilter(form => form.TenantId == FormTenant);
     }
 }
 

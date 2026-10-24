@@ -19,6 +19,7 @@ internal static class ModelSources
     private const string CascadeAnnotation = "Sluice:Cascades";
     private const string TablePatternAnnotation = "Sluice:TablePattern";
     private const string RowVersionAnnotation = "Sluice:RowVersion";
+    private const string UniqueColumnsAnnotation = "Sluice:UniqueColumns";
 
     /// <summary>
     /// The source of <paramref name="entityType"/>'s rows, keyed by primary key; a composite key is passed as an
@@ -46,6 +47,112 @@ internal static class ModelSources
                 ),
             foreignKey
         );
+
+    /// <summary>
+    /// The source of the rows of <paramref name="property"/>'s type by that property's value, which
+    /// <c>read.Entity</c> by a unique column reads. Only for a <see cref="UniqueColumns"/> property: a save publishes
+    /// for no other.
+    /// </summary>
+    internal static Source<object> Unique(IProperty property) =>
+        property.GetOrAddRuntimeAnnotationValue(
+            SourceAnnotation,
+            static property =>
+                Build($"{property!.DeclaringType.Name}({property.Name})", [property]),
+            property
+        );
+
+    /// <summary>
+    /// The properties of <paramref name="entityType"/> and its base types that a single-column unique index (filtered
+    /// or not) or alternate key covers, other than a single-column primary key, whose rows <c>read.Entity</c> by a
+    /// unique column can read. The model's unique columns bound what a save publishes; uniqueness itself isn't needed
+    /// for correctness. Built once per type.
+    /// </summary>
+    internal static IProperty[] UniqueColumns(IEntityType entityType) =>
+        entityType.GetOrAddRuntimeAnnotationValue(
+            UniqueColumnsAnnotation,
+            static entityType => entityType!.GetProperties().Where(IsUniqueColumn).ToArray(),
+            entityType
+        );
+
+    /// <summary>The unique columns only <paramref name="entityType"/>'s derived types have.</summary>
+    internal static IEnumerable<IProperty> DerivedUniqueColumns(IEntityType entityType) =>
+        RowUniqueColumns(entityType).Except(UniqueColumns(entityType));
+
+    // Every unique column a row of the type may have: its own and its base types', and its derived types'.
+    private static IEnumerable<IProperty> RowUniqueColumns(IEntityType entityType) =>
+        entityType.GetDerivedTypesInclusive().SelectMany(UniqueColumns).Distinct();
+
+    // A single-column primary key is the type's own source, which every save publishes already.
+    private static bool IsUniqueColumn(IProperty property) =>
+        property.FindContainingPrimaryKey() is not { Properties: [_] }
+        && (
+            property.GetContainingIndexes().Any(index => index.IsUnique && index.Properties is [_])
+            || property.GetContainingKeys().Any(key => key.Properties is [_])
+        );
+
+    /// <summary>
+    /// Resolves <paramref name="selector"/> (a property, or <c>EF.Property</c> on a shadow property) to a column of
+    /// <paramref name="entityType"/> that <see cref="UniqueColumns"/> lists, or to its single-column primary key.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The selector doesn't name a property, names it through <c>EF.Property</c> with a name that isn't a constant, or
+    /// names one no single-column unique index or alternate key covers.
+    /// </exception>
+    /// <exception cref="NotSupportedException">Only a composite unique index or alternate key covers it.</exception>
+    internal static IProperty ResolveUniqueColumn(
+        IEntityType entityType,
+        LambdaExpression selector,
+        string parameterName
+    )
+    {
+        var property = SelectedName(
+            selector,
+            parameterName,
+            "f => EF.Property<string>(f, \"Slug\")"
+        )
+            is { } name
+            ? entityType.FindProperty(name)
+            : null;
+        if (property is null)
+        {
+            throw new ArgumentException(
+                $"'{selector}' doesn't name a property of {entityType.DisplayName()}. Pass the property (f => f.Slug) "
+                    + "or a shadow property (f => EF.Property<string>(f, \"Slug\")).",
+                parameterName
+            );
+        }
+
+        if (property.IsPrimaryKey() && entityType.FindPrimaryKey()!.Properties is [_])
+        {
+            return property;
+        }
+
+        if (UniqueColumns(entityType).Contains(property))
+        {
+            return property;
+        }
+
+        var column = $"{entityType.DisplayName()}.{property.Name}";
+        if (
+            property.GetContainingIndexes().Any(index => index.IsUnique)
+            || property.GetContainingKeys().Any()
+        )
+        {
+            throw new NotSupportedException(
+                $"{column} is unique only together with other columns (a composite unique index or key). Reading one "
+                    + "row by a composite unique index isn't supported; query it from read.Db<TContext>(), which "
+                    + $"depends on every {entityType.DisplayName()} row."
+            );
+        }
+
+        throw new ArgumentException(
+            $"{column} isn't covered by a single-column unique index or alternate key in the EF model, and a save "
+                + "invalidates readers by value only for those columns. Map one (HasIndex(f => f.Slug).IsUnique(); a "
+                + "filtered index counts), or query it from read.Db<TContext>(), which depends on every "
+                + $"{entityType.DisplayName()} row.",
+            parameterName
+        );
+    }
 
     /// <summary>
     /// The foreign keys pointing at <paramref name="entityType"/>, its base types or its derived types whose
@@ -140,13 +247,15 @@ internal static class ModelSources
     }
 
     /// <summary>
-    /// What an update of <paramref name="entityType"/> rows may change: the whole type, and every foreign key a row of
-    /// it may have, since an update may move rows between parents. Unchecked, like <see cref="Entity"/>.
+    /// What an update of <paramref name="entityType"/> rows may change: the whole type, every foreign key a row of it
+    /// may have, since an update may move rows between parents, and every unique column a row of it may have, since
+    /// it may change their values. Unchecked, like <see cref="Entity"/>.
     /// </summary>
     internal static IEnumerable<Dependency> UpdateDependencies(IEntityType entityType) =>
         [
             Entity(entityType).All,
             .. RowForeignKeys(entityType).Select(foreignKey => ForeignKey(foreignKey).All),
+            .. RowUniqueColumns(entityType).Select(property => Unique(property).All),
         ];
 
     /// <summary>
@@ -204,28 +313,11 @@ internal static class ModelSources
         string parameterName
     )
     {
-        var body = selector.Body is UnaryExpression { NodeType: ExpressionType.Convert } convert
-            ? convert.Operand
-            : selector.Body;
-        var name = body switch
-        {
-            MemberExpression { Expression: ParameterExpression } member => member.Member.Name,
-            MethodCallExpression
-            {
-                Method.Name: nameof(EF.Property),
-                Arguments: [ParameterExpression, var property],
-            } call when call.Method.DeclaringType == typeof(EF) => property
-                is ConstantExpression { Value: string constant }
-                ? constant
-                : throw new ArgumentException(
-                    $"'{selector}' names its property with '{property}'. The property name passed to EF.Property "
-                        + "must be a constant string (o => EF.Property<CustomerId>(o, \"CustomerId\")), so the foreign key "
-                        + "can be found from the expression without running it.",
-                    parameterName
-                ),
-            _ => null,
-        };
-
+        var name = SelectedName(
+            selector,
+            parameterName,
+            "o => EF.Property<CustomerId>(o, \"CustomerId\")"
+        );
         var foreignKey =
             name is null ? null
             : entityType.FindNavigation(name)
@@ -244,6 +336,37 @@ internal static class ModelSources
                     + "reference navigation to the principal (o => o.Customer).",
                 parameterName
             );
+    }
+
+    // The name of the member a selector reads off its parameter, directly or through EF.Property with a constant
+    // name, unwrapping the conversion to object; null for anything else.
+    private static string? SelectedName(
+        LambdaExpression selector,
+        string parameterName,
+        string example
+    )
+    {
+        var body = selector.Body is UnaryExpression { NodeType: ExpressionType.Convert } convert
+            ? convert.Operand
+            : selector.Body;
+        return body switch
+        {
+            MemberExpression { Expression: ParameterExpression } member => member.Member.Name,
+            MethodCallExpression
+            {
+                Method.Name: nameof(EF.Property),
+                Arguments: [ParameterExpression, var property],
+            } call when call.Method.DeclaringType == typeof(EF) => property
+                is ConstantExpression { Value: string constant }
+                ? constant
+                : throw new ArgumentException(
+                    $"'{selector}' names its property with '{property}'. The property name passed to EF.Property "
+                        + $"must be a constant string ({example}), so the property can be found from the expression "
+                        + "without running it.",
+                    parameterName
+                ),
+            _ => null,
+        };
     }
 
     /// <summary>Checks that <paramref name="key"/> has the CLR type of <paramref name="property"/>, ignoring nullability.</summary>
@@ -321,6 +444,9 @@ internal static class ModelSources
                 }
 
                 dependencies.Add(Entity(dependent).All);
+                dependencies.AddRange(
+                    RowUniqueColumns(dependent).Select(property => Unique(property).All)
+                );
                 if (!principal.First)
                 {
                     dependencies.Add(ForeignKey(foreignKey).All);

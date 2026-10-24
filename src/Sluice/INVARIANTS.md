@@ -116,3 +116,19 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 **Why:** FusionCache's own error for a second named cache doesn't say which call made it.
 **Owner:** `SluiceServiceCollectionExtensions.AddSluice`.
 **Proof:** `FusionCacheConfigurationTests.Registering_Sluice_twice_throws`.
+
+## SLUICE-CORE-017 A value whose compute called `read.DoNotCache()` is never stored
+
+**Rule:** once a compute calls `read.DoNotCache()` on its own `read`, the factory returns its value with memory, L2 and backplane writes skipped, as for a violation, so the caller gets the value and nothing is stored; such a compute may record no dependencies without the "recorded no dependencies" violation. A violation still wins: the call throws and stores nothing. A call after the compute returned throws; a call on another compute's `read` is that compute's violation (SLUICE-CORE-007).
+**Why:** a key from public input (a slug from a URL) would otherwise cache every miss, so any caller could fill memory; and Sluice has no remove-by-key to undo a store.
+**Accepts:** FusionCache hands a waiting caller only what the running compute stored, so callers waiting on the same key each run their own compute, one at a time, once it ends.
+**Owner:** `SluiceReads.DoNotCache` and `SluiceReads.Close`, read by `SluiceCache.ComputeAsync`.
+**Proof:** `CachingTests.An_uncached_value_goes_to_the_caller_and_the_next_call_computes_again` (no dependencies recorded), `A_compute_can_leave_its_value_uncached_from_inside_a_fused_fetch`, `A_caller_waiting_on_an_uncached_compute_gets_a_value_from_its_own_compute`, `A_violation_still_throws_and_caches_nothing_when_the_compute_left_its_value_uncached`, `Leaving_a_value_uncached_after_the_compute_returned_throws`; `ComputeGuardTests.Using_another_running_compute_s_read_throws_and_caches_nothing` (`leaves uncached`).
+
+## SLUICE-CORE-018 Tag markers are never evicted by a memory size limit
+
+**Rule:** `AddSluice` sets `TagsDefaultEntryOptions.Priority = NeverRemove` and `TagsDefaultEntryOptions.Size = 0`, after the user's configuration. FusionCache writes every tag and clear marker with these options. A query's `Size` is its value entry's size; `null` keeps `DefaultEntryOptions.Size`.
+**Why:** under a `SizeLimit`, a marker that compaction removes, or that the memory cache refuses for want of room, reads as never invalidated, so the invalidated value is served again.
+**Accepts:** markers aren't counted against the limit, so they can grow past it: one small entry per tag a node has seen, until its tag-data lifetime ends. With a limit set, an entry with no size makes the memory cache throw, so the app sets `DefaultEntryOptions.Size` or each query's `Size`.
+**Owner:** `SluiceServiceCollectionExtensions.AddSluice` (the markers); `SluiceCache.OptionsFor` (a query's size).
+**Proof:** `FusionCacheConfigurationTests.Under_a_size_limit_an_invalidated_value_never_comes_back` (compacted, and no room; the app's options ask for markers that can be evicted and take room), `A_query_s_size_is_its_entry_s_size_in_a_memory_cache_with_a_size_limit`.

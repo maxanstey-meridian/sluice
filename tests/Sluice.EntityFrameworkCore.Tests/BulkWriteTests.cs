@@ -67,6 +67,36 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task A_bulk_update_that_changes_a_unique_value_evicts_readers_of_any_value()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (before, after) = ($"bulk-{Guid.NewGuid():N}", $"bulk-{Guid.NewGuid():N}");
+        var page = new Page { Slug = before, Section = $"bulk-{Guid.NewGuid():N}" };
+        db.Pages.Add(page);
+        await db.SaveChangesAsync();
+        Task<CachedRead> BySlug(string slug) =>
+            CachedRead.Of(
+                node.Cache,
+                (read, ct) =>
+                    read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct)
+            );
+        var oldReaders = await BySlug(before);
+        var newReaders = await BySlug(after);
+        var orders = await CachedRead.OrdersOf(node.Cache, -1);
+
+        await Update(
+            db.Pages.Where(p => p.Id == page.Id),
+            set => set.SetProperty(p => p.Slug, after),
+            sync: false
+        );
+
+        (await oldReaders.WasEvicted()).Should().BeTrue();
+        (await newReaders.WasEvicted()).Should().BeTrue("which values it wrote is unknown");
+        (await orders.WasEvicted()).Should().BeFalse("no order changed");
+    }
+
+    [Fact]
     public async Task A_bulk_update_that_moves_rows_to_another_parent_evicts_Children_readers_of_both_parents()
     {
         await using var node = new SluiceNode();

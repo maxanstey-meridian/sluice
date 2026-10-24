@@ -18,6 +18,7 @@ public sealed class SluiceReads
     // disposed in reverse: one made later may use one made earlier.
     private List<(Type Type, IAsyncDisposable Resource)>? _held;
     private bool _open = true;
+    private bool _uncached;
     private Exception? _violation;
 
     // The query's name, for messages; the application's services, for what the compute holds; and the compute's
@@ -93,6 +94,37 @@ public sealed class SluiceReads
     /// </exception>
     public void From(params IEnumerable<Dependency> dependencies) =>
         Record(Dependency.TagsOf(dependencies, dependency => dependency.ReadTags));
+
+    /// <summary>
+    /// Leaves the compute's value uncached: the caller gets it, but it isn't stored, so the next call for the key
+    /// computes again. For a value not worth keeping, such as a miss on a key that comes from public input, which
+    /// would otherwise let any caller fill memory: <c>if (form is null) { read.DoNotCache(); return null; }</c>.
+    /// The compute then needn't record a dependency. A caller waiting on the same key computes its own value once the
+    /// compute ends, since nothing is stored for it to read. Safe to call from concurrent tasks inside one compute,
+    /// and from a fused fetch.
+    /// </summary>
+    /// <remarks>
+    /// A violation still wins: a compute that read what Sluice can't track throws, whether or not it called this.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// The compute has already returned, or this is another compute's read, used inside a running compute.
+    /// </exception>
+    public void DoNotCache()
+    {
+        ThrowIfAnotherCompute();
+        lock (_lock)
+        {
+            if (!_open)
+            {
+                throw new InvalidOperationException(
+                    "read.DoNotCache was called after the compute returned, so its value may already be cached. "
+                        + "Call it before returning from the compute."
+                );
+            }
+
+            _uncached = true;
+        }
+    }
 
     private void Record(List<string> tags)
     {
@@ -230,12 +262,13 @@ public sealed class SluiceReads
         }
     }
 
-    internal string[] Close()
+    // The recorded tags, and whether the compute asked not to be cached. Nothing changes either after this.
+    internal (string[] Tags, bool Uncached) Close()
     {
         lock (_lock)
         {
             _open = false;
-            return [.. _tags];
+            return ([.. _tags], _uncached);
         }
     }
 

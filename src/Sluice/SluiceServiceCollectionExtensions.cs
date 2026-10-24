@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using ZiggyCreatures.Caching.Fusion;
 
@@ -13,8 +14,8 @@ public static class SluiceServiceCollectionExtensions
     /// <param name="services">The service collection.</param>
     /// <param name="configure">
     /// FusionCache's own builder, for the default duration, L2, backplane, serializer and so on.
-    /// Sluice then enforces the settings it depends on (key prefix, remove-by-tag behaviour, tagging on),
-    /// overriding any conflicting value set here.
+    /// Sluice then enforces the settings it depends on (key prefix, remove-by-tag behaviour, tagging on, and tag
+    /// markers that a memory cache's size limit never evicts), overriding any conflicting value set here.
     /// </param>
     /// <returns><paramref name="services"/>, for chaining.</returns>
     /// <exception cref="InvalidOperationException">Sluice is already registered.</exception>
@@ -49,6 +50,12 @@ public static class SluiceServiceCollectionExtensions
             {
                 options.DisableTagging = false;
                 options.RemoveByTagBehavior = RemoveByTagBehavior.Remove;
+
+                // FusionCache writes every tag and clear marker with these. Under a memory SizeLimit, a marker that
+                // was compacted away, or refused for want of room, reads as never invalidated, so an invalidated
+                // value is served again: markers are never removed, and take no room (FusionCache's own defaults).
+                options.TagsDefaultEntryOptions.Priority = CacheItemPriority.NeverRemove;
+                options.TagsDefaultEntryOptions.Size = 0;
                 tagOptions = options.TagsDefaultEntryOptions;
             });
 

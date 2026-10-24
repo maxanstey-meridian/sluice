@@ -213,6 +213,20 @@ public sealed class Label
     public string Text { get; set; } = "";
 }
 
+/// <summary>
+/// Found by its slug, unique among the pages that have one (a filtered unique index), or by its section and number,
+/// unique only together. Has PostgreSQL's <c>xmin</c> as its row version, so a save knows the slug a row had.
+/// </summary>
+public sealed class Page
+{
+    public int Id { get; set; }
+    public string? Slug { get; set; }
+    public string Title { get; set; } = "";
+    public string Section { get; set; } = "";
+    public int Number { get; set; }
+    public uint Version { get; set; }
+}
+
 /// <summary>Known to its bins by its code, an alternate key.</summary>
 public sealed class Warehouse
 {
@@ -593,6 +607,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Parcel> Parcels => Set<Parcel>();
     public DbSet<Warehouse> Warehouses => Set<Warehouse>();
     public DbSet<Bin> Bins => Set<Bin>();
+    public DbSet<Page> Pages => Set<Page>();
     public DbSet<Dictionary<string, object>> CustomerCoupons =>
         Set<Dictionary<string, object>>("CustomerCoupons");
     public DbSet<Supplier> Suppliers => Set<Supplier>();
@@ -719,6 +734,9 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .HasForeignKey(s => s.CouponId)
             .OnDelete(DeleteBehavior.SetNull);
         model.Entity<Shipment>().Property(s => s.Version).IsRowVersion();
+        model.Entity<Page>().HasIndex(p => p.Slug).IsUnique().HasFilter("\"Slug\" is not null");
+        model.Entity<Page>().HasIndex(p => new { p.Section, p.Number }).IsUnique();
+        model.Entity<Page>().Property(p => p.Version).IsRowVersion();
         model.Entity<Shipment>().OwnsMany(s => s.Legs);
         model.Entity<Booking>().HasOne<Customer>().WithMany().HasForeignKey(b => b.CustomerId);
         model.Entity<OrderLine>().HasKey(line => new { line.OrderId, line.LineNumber });

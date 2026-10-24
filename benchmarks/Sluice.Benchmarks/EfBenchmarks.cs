@@ -11,11 +11,16 @@ public sealed class Item
 {
     public int Id { get; set; }
     public int Value { get; set; }
+    public string Code { get; set; } = "";
 }
 
+/// <summary>Items have a unique code, so a save also invalidates the item's readers by that code.</summary>
 public sealed class ItemDb(DbContextOptions<ItemDb> options) : DbContext(options)
 {
     public DbSet<Item> Items => Set<Item>();
+
+    protected override void OnModelCreating(ModelBuilder model) =>
+        model.Entity<Item>().HasIndex(item => item.Code).IsUnique();
 }
 
 /// <summary>
@@ -62,7 +67,7 @@ public class EfBenchmarks
                 .Options
         );
         await _plain.Database.EnsureCreatedAsync();
-        _plain.Items.AddRange(new Item { Id = 1 }, new Item { Id = 2 });
+        _plain.Items.AddRange(new Item { Id = 1, Code = "a" }, new Item { Id = 2, Code = "b" });
         await _plain.SaveChangesAsync();
         _plainItem = await _plain.Items.SingleAsync(item => item.Id == 1);
         _sluiceItem = await _withSluice.Items.SingleAsync(item => item.Id == 2);

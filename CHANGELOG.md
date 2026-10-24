@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.0
+
+Three gaps found while planning Casebridge's first cached reads: a tenant filter that reads a
+scoped service, a lookup by a unique column, and keys from public input.
+
+- **New: `read.Db<TContext>((db, services) => …)`.** The configure gets the compute's own DI
+  scope too, the one its context was made in, so it can set a scoped service the context reads:
+  `read.Db<AppDb>((db, services) => services.GetRequiredService<TenantProvider>().Set(tenantId))`.
+  It runs where `read.Db<TContext>(db => …)` runs (once, on the compute's first
+  `read.Db<TContext>`, before any query) and fails the same way. The `db => …` overload stays.
+- **New: `[SluiceContextState]`, for a query filter that reads a scoped tenant service.** Mark a
+  property of the context whose body reads only what the compute's configure sets
+  (`[SluiceContextState] private Guid? TenantId => _tenant.Id;`) and a filter may read it inside
+  a compute, exactly as it may read a settable field: only on a configured context, with the
+  `-- Sluice reads the context's state: …` comment. Sluice doesn't read the body; the attribute is
+  your promise, as the configure is. It must hold a plain value and not be virtual, unless
+  sealed; it may be private. Unmarked properties with a body, methods and members of objects the
+  context holds are still refused, and the refusal of an unmarked context property now says to
+  mark it.
+- **New: `read.Entity(set, column, value)`, by a unique column.** A lookup by slug or email
+  depends on the row holding that value, not on every row of the type: a save of another row
+  doesn't evict it; one that gives a row the value, changes the row holding it, or moves the
+  value off it, does, so a cached miss is evicted once a row gets the value. The column must be
+  covered by a single-column unique index (a filtered one counts) or alternate key in the EF
+  model; anything else throws `ArgumentException`, a composite one `NotSupportedException`.
+  `ExecuteUpdate`, `ExecuteDelete`, `AllDependencies()` and database cascades evict these
+  readers wherever they evict `read.Entity` by key. As with `Children` lists, a type without a
+  row version evicts every reader by its unique columns on each update or delete, and the
+  `Information` log (events 3 and 4) now says so. `set.Dependency(key)` doesn't evict them;
+  `AllDependencies()` does.
+- **New: `read.DoNotCache()`.** The compute's value goes to its caller but isn't stored, and the
+  next call computes again: `if (form is null) { read.DoNotCache(); return null; }`. Such a
+  compute needn't record a dependency. A violation still throws. Callers waiting on the same key
+  don't share the value: FusionCache hands a waiter only what was stored, so each runs its own
+  compute once the first ends.
+- **New: `Query.Size`,** on both query types: the entry's size in Sluice's memory cache, for an
+  app that gives that cache a `SizeLimit` through the FusionCache builder. FusionCache lets
+  Sluice pin its own tag and clear markers, so `AddSluice` now forces
+  `TagsDefaultEntryOptions.Priority = NeverRemove` and `Size = 0` (FusionCache's own defaults):
+  a marker compacted away, or refused when the cache is full, would let an invalidated value be
+  served again. They aren't counted against the limit.
+- **Performance:** a save now reports one more value per unique column of each changed row,
+  which is two more tags to invalidate. On the EF benchmark (in-memory SQLite, an item with one
+  unique column), saving one changed row with Sluice went from 14.9 µs and 12.2 KB to 15.8 µs and
+  15.4 KB; without Sluice it's 10.2 µs either way. Cache misses are unchanged within noise
+  (`read.Entity` 29.7 → 30.3 µs, a plain query 15.5 → 15.9 µs). A type without unique columns
+  pays nothing more.
+
 ## 0.3.0 — breaking
 
 EF Core reads inside a compute are ordinary queries now. Sluice records the entity types each

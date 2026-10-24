@@ -117,6 +117,55 @@ its duration isn't so long that an evicted entry could come back, and throws
 `InvalidOperationException` if it is. See
 [the lifetime rule](/guides/configuration#the-lifetime-rule).
 
+### Size
+
+`Size` is the entry's size in Sluice's memory cache, for an app that gives that cache a size
+limit (see [Limiting memory](/guides/configuration#limiting-memory)). It's counted in whatever
+units the limit uses: one per entry, or an estimate of its bytes. Leave it unset to use the
+cache's `DefaultEntryOptions.Size`. Once a limit is set, every entry needs a size, so set the
+default or set `Size` on every query. A negative size throws `ArgumentOutOfRangeException`.
+
+```csharp
+public static readonly Query<string, PublicForm?> FormBySlug = new("form-by-slug")
+{
+    Size = 1,
+};
+```
+
+### Leaving a value uncached
+
+A compute can hand its value to the caller without storing it: call `read.DoNotCache()`. The
+next call for the key computes again. Use it when a value isn't worth keeping, such as a miss
+on a key from public input: cached, every made-up slug in a URL would take memory.
+
+```csharp
+cache.GetOrSetAsync(
+    FormBySlug,
+    slug,
+    async Task<PublicForm?> (read, ct) =>
+    {
+        var db = read.Db<AppDb>();
+        var form = await read.Entity(db.Forms, f => f.Slug, slug)
+            .Select(f => new PublicForm(f.Id, f.Title))
+            .SingleOrDefaultAsync(ct);
+        if (form is null)
+        {
+            read.DoNotCache();
+            return null;
+        }
+
+        return form;
+    },
+    ct
+);
+```
+
+A compute that calls it needn't record a dependency, since nothing stored needs evicting. It
+can be called anywhere in the compute, a fused fetch included, but only on the compute's own
+`read`. A violation still wins: a compute that read what Sluice can't track throws whether or
+not it called `DoNotCache`. A caller waiting on the same key doesn't share the value: once the
+running compute ends with nothing stored, it runs its own, one caller at a time.
+
 ### The compute returns exactly `TValue`
 
 A compute for a `Query<CustomerId, IReadOnlyList<Invoice>>` that returns a `List<Invoice>`

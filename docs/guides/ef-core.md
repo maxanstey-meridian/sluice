@@ -142,10 +142,12 @@ names. See
 
 ### Narrowing to rows
 
-Two helpers on `read` start a query that depends on fewer rows:
+Three helpers on `read` start a query that depends on fewer rows:
 
 ```csharp
 var customer = await read.Entity(computeDb.Customers, customerId).SingleOrDefaultAsync(ct);
+
+var form = await read.Entity(computeDb.Forms, form => form.Slug, slug).SingleOrDefaultAsync(ct);
 
 var orders = await read.Children(computeDb.Orders, order => order.CustomerId, customerId)
     .OrderByDescending(order => order.PlacedAt)
@@ -157,6 +159,7 @@ var orders = await read.Children(computeDb.Orders, order => order.CustomerId, cu
 |---|---|---|
 | `computeDb.Customers.Where(…)` | the rows its `Where` matches | any customer |
 | `read.Entity(computeDb.Customers, key)` | the row with that primary key | that row |
+| `read.Entity(computeDb.Forms, f => f.Slug, value)` | the row whose unique column holds `value` | that row, or a row taking or leaving `value` |
 | `read.Children(computeDb.Orders, fk, key)` | the rows whose foreign key is `key` | any of those rows, or a row joining or leaving the set |
 
 Each returns an `IQueryable<T>` you can filter, order, page and project, on the context
@@ -178,6 +181,29 @@ var ticket = await read.Entity(computeDb.Tickets, id)
     .ThenInclude(c => c.Author)
     .SingleOrDefaultAsync(ct);
 ```
+
+### By a unique column
+
+`read.Entity(set, column, value)` reads one row by a column that isn't its key, such as a slug
+or an email, without depending on every row of the type. A save of another row doesn't evict it;
+a save that gives a row that value, changes the row holding it, or moves the value off it, does.
+So a cached "not found" for a slug is evicted once a row gets that slug.
+
+The column must be covered by a single-column unique index or alternate key in the EF model
+(`HasIndex(f => f.Slug).IsUnique()`). A filtered unique index counts, so a slug unique only among
+the rows that have one is fine. Sluice doesn't need the uniqueness to be right; it uses the
+model's unique columns to know which values a save must report. A column without one throws
+`ArgumentException`, and one unique only together with others (a composite index) throws
+`NotSupportedException`. Naming the primary key reads exactly as `read.Entity(set, key)`.
+
+Each save of a row reports one more value per unique column of its type. Without a row version
+the value the database holds when an update or delete runs may not be the one EF loaded, so,
+as with `Children` lists, such a save evicts every reader by that column; see
+[Row versions](#row-versions). `set.Dependency(key)` doesn't evict readers by a unique column;
+after a write Sluice can't see, use `set.AllDependencies()`.
+
+A key that comes from public input, such as a slug from a URL, caches every miss. Leave misses
+uncached with [`read.DoNotCache()`](/guides/sources-and-queries#leaving-a-value-uncached).
 
 ### Keys
 
@@ -280,12 +306,15 @@ is customer 1, not 2. A delete has the same gap.
 
 So for a type without a row version, Sluice doesn't trust the parent EF loaded: updating or
 deleting one of its rows evicts every `Children` list of that foreign key, under every parent.
-Editing one order evicts every customer's cached order list. Inserts stay exact, and Sluice logs
-once per type and cache (event 3, at Information) when this happens.
+Editing one order evicts every customer's cached order list. The same goes for unique columns:
+the slug a row had when it was loaded may not be the one it has, so updating or deleting a row
+evicts every `read.Entity` by that column, whatever the value. Inserts stay exact, and Sluice
+logs once per type and cache (event 3, at Information) when this happens.
 
 A row version is a concurrency token the database changes on every write. With one, EF fails the
 save (`DbUpdateConcurrencyException`) unless the row is unchanged since it was loaded, so the
-parent it loaded is the real one, and Sluice evicts exactly the old and new parents' lists. On
+parent it loaded is the real one, and Sluice evicts exactly the old and new parents' lists (and
+the old and new values' readers by unique column). On
 PostgreSQL, map the system column `xmin`:
 
 ```csharp
@@ -361,8 +390,8 @@ they touch by hand.
 ### Key folding
 
 The database may treat two different .NET values as the same key: `1m` and `1.00m`, `"abc"` and
-`"ABC "` in a case-insensitive column. So Sluice normalises (folds) key values before using
-them: `decimal`s lose trailing zeros, strings are upper-cased without trailing spaces (for
+`"ABC "` in a case-insensitive column. So Sluice normalises (folds) key values, and the values
+`read.Entity` reads a unique column by, before using them: `decimal`s lose trailing zeros, strings are upper-cased without trailing spaces (for
 `citext` and case-insensitive collations), and dates are cut to the microsecond. Folding can
 only make an eviction broader, never miss one. Accent- and culture-sensitive collations aren't
 folded.
@@ -387,8 +416,11 @@ can't always tell which parent it had before:
 An object you built of a type without a row version is updated or deleted like any row without
 one: every `Children` reader of each foreign key. So the only miss is an object you built, with
 a row version that matches the database's, whose foreign key differs from what the database
-holds: the list under its real old parent isn't evicted. Load a row before changing it, or
-invalidate `set.AllDependencies()` after the save.
+holds: the list under its real old parent isn't evicted. Unique columns follow the same rules,
+with `read.Entity` readers by that column in place of `Children` lists: the miss is a built
+object whose unique column differs from the stored value, whose readers by the stored value
+aren't evicted. Load a row before changing it, or invalidate `set.AllDependencies()` after the
+save.
 
 Don't call `Update()` or set `State = EntityState.Modified` on a row you *did* load, as generic
 repositories often do. Sluice then can't tell it from an unloaded row, so every such save evicts

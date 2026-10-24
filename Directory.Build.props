@@ -11,7 +11,7 @@
 
     <!-- One version for both packages: the EF package depends on the core at exactly this version. -->
     <PropertyGroup>
-        <Version>0.3.0</Version>
+        <Version>0.4.0</Version>
         <Authors>Max Anstey</Authors>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <PackageProjectUrl>https://maxanstey-meridian.github.io/sluice/</PackageProjectUrl>

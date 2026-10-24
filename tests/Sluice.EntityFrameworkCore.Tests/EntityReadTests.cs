@@ -264,4 +264,211 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .Should()
             .Be(1, "the context is free again");
     }
+
+    // Each test makes its own pages, with slugs and a section no other test uses.
+    private static string Fresh(string name) => $"{name}-{Guid.NewGuid():N}";
+
+    private static Task<CachedRead> PageBySlug(SluiceCache cache, string slug) =>
+        CachedRead.Of(
+            cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct)
+        );
+
+    private static async Task<Page> AddPage(ShopDb db, string? slug, string title = "Draft")
+    {
+        var page = new Page
+        {
+            Slug = slug,
+            Title = title,
+            Section = Fresh("section"),
+        };
+        db.Pages.Add(page);
+        await db.SaveChangesAsync();
+        return page;
+    }
+
+    [Fact]
+    public async Task A_unique_column_read_returns_its_row_and_is_evicted_by_a_write_to_that_row_only()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("welcome");
+        var page = await AddPage(db, slug, "Welcome");
+        var other = await AddPage(db, Fresh("other"));
+        var query = new Query<string, Page?>(Fresh("ef-reads-page"));
+
+        var read = await node.Cache.GetOrSetAsync(
+            query,
+            slug,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct)
+        );
+        read!.Title.Should().Be("Welcome");
+        var cached = await PageBySlug(node.Cache, slug);
+
+        other.Title = "Edited";
+        await db.SaveChangesAsync();
+        (await cached.WasEvicted()).Should().BeFalse("another row's write doesn't touch this slug");
+        page.Title = "Edited";
+        await db.SaveChangesAsync();
+        (await cached.WasEvicted()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_unique_column_read_that_finds_nothing_is_evicted_by_an_insert_with_that_value()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("later");
+        var cached = await PageBySlug(node.Cache, slug);
+
+        await AddPage(db, Fresh("unrelated"));
+        (await cached.WasEvicted()).Should().BeFalse();
+        await AddPage(db, slug);
+        (await cached.WasEvicted()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Changing_a_unique_value_evicts_the_readers_of_the_old_value_and_of_the_new()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (before, after) = (Fresh("before"), Fresh("after"));
+        var page = await AddPage(db, before);
+        var oldReaders = await PageBySlug(node.Cache, before);
+        var newReaders = await PageBySlug(node.Cache, after);
+
+        page.Slug = after;
+        await db.SaveChangesAsync();
+
+        (await oldReaders.WasEvicted()).Should().BeTrue("the row left that value");
+        (await newReaders.WasEvicted()).Should().BeTrue("the row took that value");
+    }
+
+    [Fact]
+    public async Task Deleting_a_row_evicts_its_readers_by_unique_column()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("gone");
+        var page = await AddPage(db, slug);
+        var cached = await PageBySlug(node.Cache, slug);
+
+        db.Pages.Remove(page);
+        await db.SaveChangesAsync();
+
+        (await cached.WasEvicted()).Should().BeTrue();
+    }
+
+    // Update() of an object the context didn't load marks every column modified with its original equal to its
+    // current value, so the value the row had is unknown, and every reader by the column is evicted.
+    [Fact]
+    public async Task A_row_saved_without_being_loaded_evicts_every_reader_by_its_unique_column()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var page = await AddPage(db, Fresh("stub"));
+        var otherSlug = Fresh("bystander");
+        await AddPage(db, otherSlug);
+        var bystander = await PageBySlug(node.Cache, otherSlug);
+        db.ChangeTracker.Clear();
+        var detached = await db.Pages.AsNoTracking().SingleAsync(p => p.Id == page.Id);
+
+        detached.Title = "Rewritten";
+        db.Pages.Update(detached);
+        await db.SaveChangesAsync();
+
+        (await bystander.WasEvicted()).Should().BeTrue();
+    }
+
+    // Without a row version, the value a row had when it was loaded may not be the one the database holds when it's
+    // saved, so a save that updates or deletes one evicts every reader by the column, and says so once.
+    [Fact]
+    public async Task Without_a_row_version_a_delete_evicts_every_reader_by_unique_column_and_logs_why()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (mine, theirs) = (Fresh("WH"), Fresh("WH"));
+        var warehouse = new Warehouse { Code = theirs };
+        db.Warehouses.AddRange(new Warehouse { Code = mine }, warehouse);
+        await db.SaveChangesAsync();
+        var cached = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().Warehouses, w => w.Code, mine).SingleAsync(ct)
+        );
+
+        db.Warehouses.Add(new Warehouse { Code = Fresh("WH") });
+        await db.SaveChangesAsync();
+        (await cached.WasEvicted()).Should().BeFalse("an insert's value is the one it writes");
+        db.Warehouses.Remove(warehouse);
+        await db.SaveChangesAsync();
+
+        (await cached.WasEvicted()).Should().BeTrue();
+        node.Logs.GetSnapshot()
+            .Where(record => record.Id.Id == 3)
+            .Select(record => record.Message)
+            .Should()
+            .ContainSingle()
+            .Which.Should()
+            .Contain("read.Entity of it by a unique column")
+            .And.Contain("Warehouse has no concurrency token");
+    }
+
+    [Fact]
+    public async Task A_unique_column_read_through_the_primary_key_is_an_entity_read()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var page = await AddPage(db, Fresh("keyed"));
+
+        Task ReadById(SluiceReads read, CancellationToken ct) =>
+            read.Entity(read.Db<ShopDb>().Pages, p => p.Id, page.Id).SingleAsync(ct);
+
+        (await CachedRead.IsEvictedBy(ReadById, db.Pages.Dependency(page.Id))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ReadById, db.Pages.Dependency(page.Id + 1)))
+            .Should()
+            .BeFalse();
+    }
+
+    [Fact]
+    public async Task A_unique_column_read_is_refused_for_a_column_without_a_single_column_unique_index_or_key()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+
+        Task<Page?> Read(Func<SluiceReads, IQueryable<Page>> query) =>
+            node
+                .Cache.GetOrSetAsync(
+                    new Query<string, Page?>(Fresh("ef-reads-refused")),
+                    "k",
+                    (read, ct) => query(read).SingleOrDefaultAsync(ct)
+                )
+                .AsTask();
+
+        await ((Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Title, "x"))))
+            .Should()
+            .ThrowAsync<ArgumentException>()
+            .WithMessage(
+                "*Page.Title isn't covered by a single-column unique index or alternate key*"
+            );
+        await ((Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Section, "x"))))
+            .Should()
+            .ThrowAsync<NotSupportedException>()
+            .WithMessage("*Page.Section is unique only together with other columns*");
+        await ((Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Slug, 7))))
+            .Should()
+            .ThrowAsync<ArgumentException>()
+            .WithMessage("*must be of type String*");
+        await ((Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Slug, null!))))
+            .Should()
+            .ThrowAsync<ArgumentNullException>();
+        await (
+            (Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Title.Length, 1)))
+        )
+            .Should()
+            .ThrowAsync<ArgumentException>()
+            .WithMessage("*doesn't name a property of Page*");
+    }
 }

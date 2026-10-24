@@ -3,6 +3,11 @@ Sluice.Query<TValue>
 Sluice.Query<TValue>.Duration.get -> System.TimeSpan?
 Sluice.Query<TValue>.Duration.init -> void
 Sluice.Query<TValue>.Query(string! name) -> void
+Sluice.Query<TValue>.Size.get -> long?
+Sluice.Query<TValue>.Size.init -> void
+Sluice.Query<TKey, TValue>.Size.get -> long?
+Sluice.Query<TKey, TValue>.Size.init -> void
+Sluice.SluiceReads.DoNotCache() -> void
 Sluice.SluiceCache.GetOrSetAsync<TValue>(Sluice.Query<TValue>! query, System.Func<Sluice.SluiceReads!, System.Threading.CancellationToken, System.Threading.Tasks.Task<TValue>!>! compute, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TValue>
 static Sluice.Infrastructure.ActiveCompute.Hold<T>(Sluice.SluiceReads! reads, System.Func<System.IServiceProvider!, T!>! create) -> T!
 static Sluice.Infrastructure.ActiveCompute.Held<T>(Sluice.SluiceReads! reads) -> T?

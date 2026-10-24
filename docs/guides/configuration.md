@@ -33,6 +33,7 @@ configuration, overriding anything that conflicts:
 | `FactorySoftTimeout`, `FactoryHardTimeout` | infinite, per call | a timed-out compute would keep running, and using what it holds, after the caller moved on |
 | `AllowTimedOutFactoryBackgroundCompletion`, `EagerRefreshThreshold` | off, per call | both store a value marked as built when its compute *finished*, so an invalidation that landed while it ran could be missed |
 | `ClearAsync` | without fail-safe | a cleared value is never served as a fallback |
+| `TagsDefaultEntryOptions.Priority`, `.Size` | `NeverRemove`, `0` | under a memory size limit, a tag marker evicted or refused for want of room would let an invalidated value be served again |
 
 So FusionCache's factory timeouts (a factory is FusionCache's word for a compute) don't apply to
 Sluice. A slow data source makes the caller wait; put the timeout on the data source instead (a
@@ -49,6 +50,32 @@ those writes evict nothing unless they
 Sluice passes its own entry options on every call, built from `DefaultEntryOptions`, so a
 FusionCache `DefaultEntryOptionsProvider` (options picked per key) doesn't apply. Use a query's
 `Duration` instead.
+
+## Limiting memory
+
+Sluice's memory cache has no size limit unless you give it one. To cap it, pass FusionCache a
+memory cache with a `SizeLimit`, and give every entry a size, either by default or per query
+([`Query.Size`](/guides/sources-and-queries#size)):
+
+```csharp
+using Microsoft.Extensions.Caching.Memory;
+
+builder.Services.AddSluice(cache =>
+    cache
+        .WithMemoryCache(new MemoryCache(new MemoryCacheOptions { SizeLimit = 10_000 }))
+        .WithDefaultEntryOptions(options => options.Size = 1)
+);
+```
+
+With a limit set, the memory cache refuses an entry with no size by throwing, so a query left
+without one fails on its first store. When the cache is full, new entries aren't stored and
+older ones are compacted away; either way a later call just computes again.
+
+Tag markers, the small entries that record when each dependency was last invalidated, are
+exempt: Sluice stores them with size 0 and `NeverRemove`, whatever you set, because a marker
+that went missing would read as "never invalidated" and an evicted value would come back. They
+aren't counted against the limit, so the cache can hold more than the limit by one small entry
+per dependency it has seen, until each expires (`TagsDefaultEntryOptions.Duration`).
 
 ## Logging
 

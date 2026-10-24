@@ -59,7 +59,8 @@ public sealed class SluiceCache
     /// has ended. Waiting on another caller's compute for the same key can't be cancelled.
     /// </param>
     /// <exception cref="InvalidOperationException">
-    /// The compute recorded no dependencies, used another compute's <c>read</c>, or this was called from inside
+    /// The compute recorded no dependencies (and didn't call <c>read.DoNotCache()</c>), used another compute's
+    /// <c>read</c>, or this was called from inside
     /// another compute, a fused <c>read.From(dependency, fetch)</c> fetch included. Nothing is cached in any case.
     /// </exception>
     /// <exception cref="OperationCanceledException">
@@ -87,7 +88,14 @@ public sealed class SluiceCache
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(compute);
         ThrowIfNested(query.Name);
-        return GetOrSetAsync(query.Name, query.EntryKey(key), query.Duration, compute, ct);
+        return GetOrSetAsync(
+            query.Name,
+            query.EntryKey(key),
+            query.Duration,
+            query.Size,
+            compute,
+            ct
+        );
     }
 
     /// <summary>
@@ -118,13 +126,14 @@ public sealed class SluiceCache
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(compute);
         ThrowIfNested(query.Name);
-        return GetOrSetAsync(query.Name, query.Name, query.Duration, compute, ct);
+        return GetOrSetAsync(query.Name, query.Name, query.Duration, query.Size, compute, ct);
     }
 
     private async ValueTask<TValue> GetOrSetAsync<TValue>(
         string name,
         string entryKey,
         TimeSpan? duration,
+        long? size,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,
         CancellationToken ct
     )
@@ -132,7 +141,7 @@ public sealed class SluiceCache
         // An already-cancelled caller gets neither a hit nor a compute.
         ct.ThrowIfCancellationRequested();
 
-        var options = OptionsFor(name, duration);
+        var options = OptionsFor(name, duration, size);
         var reads = new SluiceReads(name, _services, ct);
 
         // The caller's token goes to the compute, not to FusionCache: on a cancelled token FusionCache throws
@@ -197,15 +206,26 @@ public sealed class SluiceCache
     public ValueTask ClearAsync(CancellationToken ct = default) =>
         _cache.ClearAsync(allowFailSafe: false, token: ct);
 
-    private FusionCacheEntryOptions OptionsFor(string name, TimeSpan? duration)
+    private FusionCacheEntryOptions OptionsFor(string name, TimeSpan? duration, long? size)
     {
-        if (duration is not { } value)
+        if (duration is null && size is null)
         {
             return _entryOptions;
         }
 
-        var options = _entryOptions.Duplicate(value);
-        EntryLifetime.EnsureWithin(options, _tagOptions, $"Query '{name}'");
+        var options = duration is { } value
+            ? _entryOptions.Duplicate(value)
+            : _entryOptions.Duplicate();
+        if (size is not null)
+        {
+            options.Size = size;
+        }
+
+        if (duration is not null)
+        {
+            EntryLifetime.EnsureWithin(options, _tagOptions, $"Query '{name}'");
+        }
+
         return options;
     }
 
@@ -237,6 +257,7 @@ public sealed class SluiceCache
         TValue value = default!;
         Exception? computeFailure = null;
         string[] tags;
+        bool uncached;
         List<Exception>? releaseFailures;
 
         // A cached value is served to every caller, so it mustn't see a transaction's uncommitted rows. Connections the
@@ -259,7 +280,7 @@ public sealed class SluiceCache
                 computeFailure = failure;
             }
 
-            tags = reads.Close();
+            (tags, uncached) = reads.Close();
             releaseFailures = await reads.ReleaseAsync().ConfigureAwait(false);
         }
 
@@ -290,7 +311,8 @@ public sealed class SluiceCache
             ExceptionDispatchInfo.Throw(computeFailure);
         }
 
-        if (tags.Length == 0)
+        // A value that isn't stored needs nothing to invalidate it.
+        if (tags.Length == 0 && !uncached)
         {
             reads.Violate(
                 new InvalidOperationException(
@@ -303,15 +325,17 @@ public sealed class SluiceCache
             );
         }
 
-        if (reads.HasViolation)
+        var violated = reads.HasViolation;
+        if (violated || uncached)
         {
             // Returning (rather than throwing) keeps FusionCache's fail-safe from serving a stale
-            // value over a guard violation; these flags make sure nothing is stored.
+            // value over a guard violation; these flags make sure nothing is stored. A violation is
+            // rethrown once GetOrSetAsync returns; an uncached value goes to the caller.
             var options = ctx.Options;
             options.SkipMemoryCacheWrite = true;
             options.SkipDistributedCacheWrite = true;
             options.SkipBackplaneNotifications = true;
-            return default!;
+            return violated ? default! : value;
         }
 
         ctx.Tags = tags;

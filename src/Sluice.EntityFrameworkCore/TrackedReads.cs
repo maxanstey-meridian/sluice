@@ -222,7 +222,9 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                         + "is whatever the context was made with (its constructor's, from the first caller's request, "
                         + "or what a pooled context's last user left), not the cache key, and the cached value is "
                         + "served to every caller with this key. Set it from the cache key when the compute first "
-                        + $"asks for the context, with read.Db<{name}>(db => …). Or filter by hand: "
+                        + $"asks for the context, with read.Db<{name}>(db => …), or with "
+                        + $"read.Db<{name}>((db, services) => …) to set a scoped service the state is read from. "
+                        + "Or filter by hand: "
                         + (
                             _contextStateRemedies.TryGetValue(state, out var remedy)
                                 ? remedy
@@ -596,18 +598,26 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         // context running the query, so a compute that sets it (read.Db's configure) gets its own rows. A readonly
         // field, or an init-only or get-only auto-property, keeps what the constructor set, which the configure can't
         // change; an overridable property may read through a derived class's body. State reached through a method, a
-        // property with a body, or an object the context holds (a tenant service) is the object's, not the compute's.
+        // property with a body, or an object the context holds (a tenant service) is the object's, not the compute's,
+        // unless the property is marked [SluiceContextState]: the app's promise that its body reads only what the
+        // configure sets, which Sluice takes on trust as it takes the configure (SLUICE-EF-022).
         private static bool IsContextState(MemberExpression node) =>
             IsPlain(node.Type)
             && node.Expression switch
             {
-                ConstantExpression { Value: DbContext } => IsStored(node.Member, settable: true),
+                ConstantExpression { Value: DbContext } => IsStored(node.Member, settable: true)
+                    || IsMarked(node.Member),
                 MemberExpression { Type.IsValueType: true } inner => IsStored(
                     node.Member,
                     settable: false
                 ) && IsContextState(inner),
                 _ => false,
             };
+
+        private static bool IsMarked(MemberInfo member) =>
+            member is PropertyInfo { GetMethod: { } getter } property
+            && (!getter.IsVirtual || getter.IsFinal)
+            && property.IsDefined(typeof(SluiceContextStateAttribute), false);
 
         private static bool IsStored(MemberInfo member, bool settable) =>
             member switch
@@ -682,7 +692,22 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                     unfixed,
                     node => typeof(DbContext).IsAssignableFrom(node.Type)
                 );
-                _refusedFilters.Add(new(_filter!, _filterName, Describe(unfixed), readsContext));
+                _refusedFilters.Add(
+                    new(
+                        _filter!,
+                        _filterName,
+                        Describe(unfixed),
+                        readsContext,
+                        unfixed
+                            is MemberExpression
+                            {
+                                Expression: ConstantExpression { Value: DbContext context },
+                                Member: PropertyInfo,
+                            }
+                            ? context.GetType().Name
+                            : null
+                    )
+                );
             }
         }
 
@@ -710,12 +735,24 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                     + string.Join("; ", _refusedFilters.Select(Reads));
             var ignore = IgnoreByName(_refusedFilters);
 
-            // State the configure can set is a plain value stored on the context itself (SLUICE-EF-022).
+            // State the configure can set is a plain value stored on the context itself, or read through a property
+            // the app marked as reading only what the configure sets (SLUICE-EF-022).
+            var marked = _refusedFilters
+                .Select(refused => refused.ContextProperty)
+                .FirstOrDefault(context => context is not null);
             Untrackable(
                 _refusedFilters.Exists(refused => refused.ReadsContext)
                     ? $"{reason}. Read the context's state from a settable field or auto-property of the context "
                         + "(not readonly, virtual, init-only or get-only) holding a plain value instead, so read.Db's "
-                        + $"configure can set it from the cache key. Or filter by hand: {ignore}"
+                        + "configure can set it from the cache key."
+                        + (
+                            marked is null
+                                ? ""
+                                : " If the property's body reads only what the compute's configure sets, such as a "
+                                    + "scoped tenant service, mark it [SluiceContextState] (it mustn't be virtual) "
+                                    + $"and set that state with read.Db<{marked}>((db, services) => …)."
+                        )
+                        + $" Or filter by hand: {ignore}"
                     : $"{reason}. {char.ToUpperInvariant(ignore[0])}{ignore[1..]}"
             );
         }
@@ -1181,11 +1218,13 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         private void Untrackable(string reason) => _untrackable ??= reason;
 
         // A query filter's read of more than its rows: the filter, what it reads, and whether that's the context's state.
+        // A refused property of the context names the context's type, for the [SluiceContextState] remedy.
         private readonly record struct FilterRead(
             IEntityType Type,
             string? Name,
             string What,
-            bool ReadsContext
+            bool ReadsContext,
+            string? ContextProperty = null
         );
 
         // What's read is named by root type, the source EF writes publish, with an owned type standing for the owner

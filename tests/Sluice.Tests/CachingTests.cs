@@ -82,4 +82,153 @@ public sealed class CachingTests
         await node.Cache.InvalidateAsync(_rows.For(7));
         (await Get()).Should().Be("all#2");
     }
+
+    [Fact]
+    public async Task An_uncached_value_goes_to_the_caller_and_the_next_call_computes_again()
+    {
+        await using var node = new SluiceNode();
+        var query = new Query<string, string>("caching-uncached");
+        var runs = 0;
+
+        Task<string> Get() =>
+            node
+                .Cache.GetOrSetAsync(
+                    query,
+                    "missing",
+                    (read, _) =>
+                    {
+                        read.DoNotCache();
+                        return Task.FromResult($"miss#{++runs}");
+                    }
+                )
+                .AsTask();
+
+        (await Get()).Should().Be("miss#1", "a compute that doesn't cache needs no dependency");
+        (await Get()).Should().Be("miss#2");
+    }
+
+    [Fact]
+    public async Task A_compute_can_leave_its_value_uncached_from_inside_a_fused_fetch()
+    {
+        await using var node = new SluiceNode();
+        var query = new Query<string, string>("caching-uncached-fetch");
+        var runs = 0;
+
+        Task<string> Get() =>
+            node
+                .Cache.GetOrSetAsync(
+                    query,
+                    "k",
+                    (read, _) =>
+                        read.From(
+                            _rows.For(1),
+                            _ =>
+                            {
+                                read.DoNotCache();
+                                return Task.FromResult($"fetched#{++runs}");
+                            }
+                        )
+                )
+                .AsTask();
+
+        (await Get()).Should().Be("fetched#1");
+        (await Get()).Should().Be("fetched#2");
+    }
+
+    // FusionCache hands a waiting caller only what the running compute stored, so with nothing stored the waiter runs
+    // its own compute once the first ends.
+    [Fact]
+    public async Task A_caller_waiting_on_an_uncached_compute_gets_a_value_from_its_own_compute()
+    {
+        await using var node = new SluiceNode();
+        var query = new Query<string, string>("caching-uncached-waiters");
+        var started = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+        var runs = 0;
+
+        async Task<string> Compute(SluiceReads read, CancellationToken ct)
+        {
+            var run = Interlocked.Increment(ref runs);
+            if (run == 1)
+            {
+                started.SetResult();
+                await release.Task;
+            }
+
+            read.DoNotCache();
+            return $"run#{run}";
+        }
+
+        var first = node.Cache.GetOrSetAsync(query, "k", Compute).AsTask();
+        await started.Task;
+        var second = node.Cache.GetOrSetAsync(query, "k", Compute).AsTask();
+        await Task.Delay(50);
+        second.IsCompleted.Should().BeFalse("it waits for the running compute");
+        release.SetResult();
+
+        (await first).Should().Be("run#1");
+        (await second).Should().Be("run#2");
+    }
+
+    [Fact]
+    public async Task A_violation_still_throws_and_caches_nothing_when_the_compute_left_its_value_uncached()
+    {
+        await using var node = new SluiceNode();
+        var query = new Query<string, string>("caching-uncached-violation");
+
+        var call = () =>
+            node
+                .Cache.GetOrSetAsync(
+                    query,
+                    "k",
+                    async (read, _) =>
+                    {
+                        try
+                        {
+                            await node.Cache.GetOrSetAsync(
+                                _summary,
+                                "inner",
+                                (_, _) => Task.FromResult("")
+                            );
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            // Swallowed: the violation is still the call's.
+                        }
+
+                        read.DoNotCache();
+                        return "value";
+                    }
+                )
+                .AsTask();
+
+        await call.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage("*called from inside another compute*");
+    }
+
+    [Fact]
+    public async Task Leaving_a_value_uncached_after_the_compute_returned_throws()
+    {
+        await using var node = new SluiceNode();
+        var query = new Query<string, string>("caching-uncached-late");
+        SluiceReads? kept = null;
+
+        await node.Cache.GetOrSetAsync(
+            query,
+            "k",
+            (read, _) =>
+            {
+                kept = read;
+                read.From(_rows.For(1));
+                return Task.FromResult("value");
+            }
+        );
+
+        var late = () => kept!.DoNotCache();
+
+        late.Should()
+            .Throw<InvalidOperationException>()
+            .WithMessage("*after the compute returned*");
+    }
 }

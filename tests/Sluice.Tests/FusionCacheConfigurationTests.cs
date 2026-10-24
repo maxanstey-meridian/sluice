@@ -398,4 +398,80 @@ public sealed class FusionCacheConfigurationTests
             .Throw<InvalidOperationException>()
             .WithMessage("*AddSluice was called more than once*");
     }
+
+    [Fact]
+    public async Task A_query_s_size_is_its_entry_s_size_in_a_memory_cache_with_a_size_limit()
+    {
+        using var memory = new MemoryCache(
+            new MemoryCacheOptions { SizeLimit = 10, TrackStatistics = true }
+        );
+        await using var node = new SluiceNode(cache => cache.WithMemoryCache(memory));
+        var reader = new CountingReader(
+            node.Cache,
+            new Query<string, string>("config-sized") { Size = 3 }
+        );
+
+        await reader.GetAsync("k", _rows.For(1));
+        await reader.GetAsync("k", _rows.For(1));
+
+        reader.Runs("k").Should().Be(1, "the sized entry was stored");
+        memory
+            .GetCurrentStatistics()!
+            .CurrentEstimatedSize.Should()
+            .Be(3, "tag markers take no room");
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        await reader.GetAsync("k", _rows.For(1));
+        reader.Runs("k").Should().Be(2);
+    }
+
+    [Fact]
+    public void A_negative_query_size_throws()
+    {
+        var declare = () => new Query<string>("config-negative-size") { Size = -1 };
+
+        declare.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    // Under a size limit, a tag marker compacted away, or refused for want of room, reads as never invalidated, so
+    // the invalidated value would be served again. The values here can't be evicted, and the app asks for markers that
+    // can, or that take room: Sluice pins them whatever the app asks.
+    [Theory]
+    [InlineData("compacted")]
+    [InlineData("no room")]
+    public async Task Under_a_size_limit_an_invalidated_value_never_comes_back(string pressure)
+    {
+        using var memory = new MemoryCache(new MemoryCacheOptions { SizeLimit = 4 });
+        await using var node = new SluiceNode(cache =>
+            cache
+                .WithMemoryCache(memory)
+                .WithDefaultEntryOptions(o =>
+                {
+                    o.Size = 1;
+                    o.Priority = CacheItemPriority.NeverRemove;
+                })
+                .WithOptions(o =>
+                {
+                    o.TagsDefaultEntryOptions.Priority = CacheItemPriority.Low;
+                    o.TagsDefaultEntryOptions.Size = 1;
+                })
+        );
+        var reader = new CountingReader(node.Cache, new Query<string, string>("config-pressure"));
+        await reader.GetAsync("k", _rows.For(1));
+        if (pressure == "no room")
+        {
+            // Fills the cache, so a marker that takes room has none.
+            for (var key = 0; key < 3; key++)
+            {
+                await reader.GetAsync($"filler-{key}", new Source<int>("config-filler").For(key));
+            }
+        }
+
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        if (pressure == "compacted")
+        {
+            memory.Compact(1.0);
+        }
+
+        (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#2");
+    }
 }

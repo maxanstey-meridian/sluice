@@ -52,13 +52,14 @@ include opening the compute's own DI scope and leasing its context from the pool
 
 | | Without Sluice | With Sluice |
 |---|---:|---:|
-| Save one changed row | 11.2 µs | 15.1 µs |
-| Cache miss that reads one row | 13.2 µs (FusionCache and a plain query) | 17.0 µs (a plain query on `read.Db`) |
-| | | 31.9 µs (`read.Entity`) |
+| Save one changed row | 10.2 µs | 15.8 µs |
+| Cache miss that reads one row | 12.8 µs (FusionCache and a plain query) | 15.9 µs (a plain query on `read.Db`) |
+| | | 30.3 µs (`read.Entity`) |
 
-The save pays for capturing what changed and invalidating it. A plain query pays for reading its tag and recording
+The save pays for capturing what changed and invalidating it: the row's key, and here its one
+unique column, which adds two tags (about 0.9 µs). A plain query pays for reading its tag and recording
 the entity types it names; working out what a query reads happens once, when EF compiles it. A miss through `read.Entity`
-costs about 15 µs more than the same miss through a plain query.
+costs about 14 µs more than the same miss through a plain query.
 
 ## Not measured
 

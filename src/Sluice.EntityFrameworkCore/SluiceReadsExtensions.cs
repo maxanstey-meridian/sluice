@@ -11,12 +11,14 @@ namespace Sluice;
 /// </summary>
 /// <remarks>
 /// Every EF query on <see cref="Db{TContext}(SluiceReads)"/>'s context records each entity type it reads, so any
-/// write to one of them evicts the value. <see cref="Entity"/> and <see cref="Children"/> narrow that for their own
-/// rows: only a write to that row, or to the rows under that parent, evicts it. Inside a compute, EF commands on any
+/// write to one of them evicts the value. <see cref="Entity{T}(SluiceReads, DbSet{T}, object)"/>, its unique-column
+/// overload and <see cref="Children"/> narrow that for their own rows: only a write to that row, or to the rows under
+/// that parent, evicts it. Inside a compute, EF commands on any
 /// other context throw, unless they run in the fetch of <c>read.From(dependency, fetch)</c>, and so do writes, reads
 /// inside a transaction, and reads Sluice can't track: raw SQL, database functions, views and keyless types, query
 /// filters that read shared state (a static property, the clock) or, unless the compute configured its context with
-/// <c>read.Db(configure)</c>, the context's own, and results holding entities that load lazily or hold their context.
+/// <c>read.Db(configure)</c>, the context's own (a settable field or auto-property, or a property marked
+/// <see cref="SluiceContextStateAttribute"/>), and results holding entities that load lazily or hold their context.
 /// A violation inside a compute also makes the call that ran it throw and cache nothing, even if the compute catches
 /// it. The rules in full:
 /// <see href="https://maxanstey-meridian.github.io/sluice/guides/ef-core">EF Core</see>.
@@ -71,8 +73,9 @@ public static class SluiceReadsExtensions
     /// every such value, and from the compute's arguments, which the cache key holds: the cached value is served to
     /// every caller with that key. A value the context's constructor took from a scoped service (the current request's
     /// tenant) is the first caller's, since the compute runs on that caller's flow; overwrite it here. Filters reading
-    /// the state through a method, a property with a body or an object the context holds (a tenant service) still
-    /// throw.
+    /// the state through a method, an unmarked property with a body or an object the context holds (a tenant service)
+    /// still throw. To set a scoped service a filter reads through a property marked
+    /// <see cref="SluiceContextStateAttribute"/>, use <see cref="Db{TContext}(SluiceReads, Action{TContext, IServiceProvider})"/>.
     /// </remarks>
     /// <typeparam name="TContext">
     /// The context type, registered and configured as for <see cref="Db{TContext}(SluiceReads)"/>.
@@ -87,6 +90,41 @@ public static class SluiceReadsExtensions
     /// </exception>
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
     public static TContext Db<TContext>(this SluiceReads read, Action<TContext> configure)
+        where TContext : DbContext
+    {
+        ArgumentNullException.ThrowIfNull(read);
+        ArgumentNullException.ThrowIfNull(configure);
+        return ComputeContexts.Of(read).Get<TContext>(read, (db, _) => configure(db));
+    }
+
+    /// <summary>
+    /// The compute's own <typeparamref name="TContext"/>, set up by <paramref name="configure"/> as
+    /// <see cref="Db{TContext}(SluiceReads, Action{TContext})"/> does, with the compute's own DI scope beside it: the
+    /// scope the context was made in, so the configure can set a scoped service the context reads, such as the
+    /// tenant (<c>(db, services) =&gt; services.GetRequiredService&lt;TenantProvider&gt;().Set(tenantId)</c>).
+    /// </summary>
+    /// <remarks>
+    /// A query filter may read such a service through a property of the context marked
+    /// <see cref="SluiceContextStateAttribute"/>, whose body Sluice takes on trust to read only what this configure
+    /// sets. Unmarked properties with a body, methods, and members of objects the context holds are still refused.
+    /// </remarks>
+    /// <typeparam name="TContext">
+    /// The context type, registered and configured as for <see cref="Db{TContext}(SluiceReads)"/>.
+    /// </typeparam>
+    /// <param name="read">The compute's reads.</param>
+    /// <param name="configure">
+    /// Sets the context, and the scoped services it reads, up from the compute's arguments. Its second argument is
+    /// the compute's own scope, disposed when the compute ends.
+    /// </param>
+    /// <returns>The configured context.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// As for <see cref="Db{TContext}(SluiceReads, Action{TContext})"/>.
+    /// </exception>
+    /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
+    public static TContext Db<TContext>(
+        this SluiceReads read,
+        Action<TContext, IServiceProvider> configure
+    )
         where TContext : DbContext
     {
         ArgumentNullException.ThrowIfNull(read);
@@ -128,6 +166,72 @@ public static class SluiceReadsExtensions
 
         read.From(dependency);
         return WhereEquals(query, ModelSources.KeyProperty(set.EntityType), key);
+    }
+
+    /// <summary>
+    /// Records a dependency on the <typeparamref name="T"/> row whose <paramref name="uniqueColumn"/> is
+    /// <paramref name="value"/>, and returns a no-tracking query for it: a lookup by slug or email that a write to
+    /// another row doesn't evict. Any write that gives a row that value, changes the row holding it, or takes the
+    /// value from it, evicts the reader, so a read that finds nothing is evicted once a row gets the value. The rules
+    /// on navigations, <c>Include</c> and auto-included navigations are those of
+    /// <see cref="Entity{T}(SluiceReads, DbSet{T}, object)"/>.
+    /// </summary>
+    /// <remarks>
+    /// Without a row version (on PostgreSQL, <c>xmin</c>), a save that updates or deletes a <typeparamref name="T"/>
+    /// can't know the value the database holds, so it evicts every such reader of <typeparamref name="T"/>, as it does
+    /// <see cref="Children"/> lists.
+    /// </remarks>
+    /// <param name="read">The compute's reads.</param>
+    /// <param name="set">The set to read, on the context <see cref="Db{TContext}(SluiceReads)"/> returns.</param>
+    /// <param name="uniqueColumn">
+    /// The column (<c>f =&gt; f.Slug</c>), or a shadow one named by a constant
+    /// (<c>f =&gt; EF.Property&lt;string&gt;(f, "Slug")</c>), that a single-column unique index (filtered or not) or
+    /// alternate key covers in the EF model. The primary key reads as <see cref="Entity{T}(SluiceReads, DbSet{T}, object)"/>.
+    /// </param>
+    /// <param name="value">The value, of the column's CLR type in the EF model; not null.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="value"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="uniqueColumn"/> doesn't name a property, names it through <c>EF.Property</c> with a name that
+    /// isn't a constant, or names one no single-column unique index or alternate key covers; or
+    /// <paramref name="value"/> isn't of its CLR type.
+    /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// Only a composite unique index or key covers the column, <typeparamref name="T"/> isn't mapped to a table, or the
+    /// context's provider isn't relational.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The context isn't configured with <c>UseSluice</c>, or a compute is running and <paramref name="read"/> isn't
+    /// the one it was given or the context isn't the one <see cref="Db{TContext}(SluiceReads)"/> returned.
+    /// </exception>
+    public static IQueryable<T> Entity<T>(
+        this SluiceReads read,
+        DbSet<T> set,
+        Expression<Func<T, object?>> uniqueColumn,
+        object value
+    )
+        where T : class
+    {
+        ArgumentNullException.ThrowIfNull(read);
+        ArgumentNullException.ThrowIfNull(set);
+        ArgumentNullException.ThrowIfNull(uniqueColumn);
+        ArgumentNullException.ThrowIfNull(value);
+
+        var entityType = set.EntityType;
+        ModelSources.EnsureTable(entityType);
+        var property = ModelSources.ResolveUniqueColumn(
+            entityType,
+            uniqueColumn,
+            nameof(uniqueColumn)
+        );
+        ModelSources.EnsureKeyType(property, value, nameof(value));
+        var query = TrackedReads.Query(set);
+
+        read.From(
+            property.IsPrimaryKey()
+                ? ModelSources.Entity(entityType).For(value)
+                : ModelSources.Unique(property).For(value)
+        );
+        return WhereEquals(query, property, value);
     }
 
     /// <summary>

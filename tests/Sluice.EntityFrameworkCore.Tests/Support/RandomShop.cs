@@ -15,7 +15,8 @@ public sealed record Keys(
     int Note,
     int Vehicle,
     int Trailer,
-    int Shipment
+    int Shipment,
+    int Page
 )
 {
     public static async Task<Keys> Of(ShopDb db) =>
@@ -26,7 +27,8 @@ public sealed record Keys(
             await db.Notes.MaxAsync(row => (int?)row.Id) ?? 0,
             await db.Vehicles.MaxAsync(row => (int?)row.Id) ?? 0,
             await db.Trailers.MaxAsync(row => (int?)row.Id) ?? 0,
-            await db.Shipments.MaxAsync(row => (int?)row.Id) ?? 0
+            await db.Shipments.MaxAsync(row => (int?)row.Id) ?? 0,
+            await db.Pages.MaxAsync(row => (int?)row.Id) ?? 0
         );
 
     /// <summary>Each table's higher key, so keys a workload has used stay covered after their rows are deleted.</summary>
@@ -38,7 +40,8 @@ public sealed record Keys(
             Math.Max(Note, other.Note),
             Math.Max(Vehicle, other.Vehicle),
             Math.Max(Trailer, other.Trailer),
-            Math.Max(Shipment, other.Shipment)
+            Math.Max(Shipment, other.Shipment),
+            Math.Max(Page, other.Page)
         );
 }
 
@@ -54,6 +57,17 @@ public sealed record ShopView(
 
 public static class ShopViews
 {
+    /// <summary>
+    /// The slugs a workload's pages take, unique to the workload: no earlier workload's pages hold them, since the
+    /// highest page key before it names them.
+    /// </summary>
+    public static string[] Slugs(Keys first) =>
+        [
+            .. new[] { "home", "about", "news", "faq", "jobs", "help" }.Select(slug =>
+                $"{first.Page}-{slug}"
+            ),
+        ];
+
     /// <summary>
     /// Each kind of read of the workload's rows: every <c>Entity</c> and <c>Children</c> read of each key from
     /// <paramref name="first"/> (exclusive) to <paramref name="last"/>, deleted keys included, plain queries of each
@@ -523,6 +537,52 @@ public static class ShopViews
             );
         }
 
+        views.Add(
+            new(
+                "pages",
+                async (db, read, ct) =>
+                    Text(
+                        await db
+                            .Pages.Where(p => p.Id > first.Page)
+                            .OrderBy(p => p.Id)
+                            .Select(p => new
+                            {
+                                p.Id,
+                                p.Slug,
+                                p.Title,
+                            })
+                            .ToListAsync(ct)
+                    )
+            )
+        );
+        foreach (var slug in Slugs(first))
+        {
+            views.Add(
+                new(
+                    $"page {slug}",
+                    async (db, read, ct) =>
+                        await read.Entity(db.Pages, p => p.Slug, slug)
+                            .Select(p => $"{p.Id} {p.Title}")
+                            .SingleOrDefaultAsync(ct)
+                        ?? "none"
+                )
+            );
+        }
+
+        foreach (var id in Between(first.Page, last.Page))
+        {
+            views.Add(
+                new(
+                    $"page {id}",
+                    async (db, read, ct) =>
+                        await read.Entity(db.Pages, id)
+                            .Select(p => $"{p.Slug} {p.Title}")
+                            .SingleOrDefaultAsync(ct)
+                        ?? "none"
+                )
+            );
+        }
+
         return views;
     }
 
@@ -699,6 +759,11 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
             () => EditShipment(state, Pick(state.Shipments))
         );
         Offer(1, any(state.Shipments), () => DeleteShipment(Pick(state.Shipments)));
+        Offer(state.Pages.Length < 5 ? 3 : 0, true, AddPage);
+        Offer(3, any(state.Pages), () => EditPage(Pick(state.Pages)));
+        Offer(1, any(state.Pages), () => UpdateDetachedPage(Pick(state.Pages)));
+        Offer(1, any(state.Pages), () => DeletePage(Pick(state.Pages)));
+        Offer(bulk ? 2 : 0, any(state.Pages), () => BulkSetSlug(Pick(state.Pages)));
         Offer(bulk ? 3 : 0, any(state.Customers), () => BulkEditOrders(Pick(state.Customers)));
         Offer(bulk ? 3 : 0, state.Customers.Length > 1, () => BulkMoveOrders(state));
         Offer(bulk ? 2 : 0, any(state.Customers), () => BulkDeleteCustomer(Pick(state.Customers)));
@@ -1016,6 +1081,72 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         return $"delete shipment {id}";
     }
 
+    private Task<string> AddPage()
+    {
+        var page = new Page
+        {
+            Slug = MaybeSlug(),
+            Title = Pick(_names),
+            Section = $"{first.Page}-{Guid.NewGuid():N}",
+        };
+        db.Pages.Add(page);
+        return Task.FromResult($"add page {page.Slug ?? "without a slug"}");
+    }
+
+    // A slug another page holds makes the database refuse the save.
+    private async Task<string> EditPage(int id)
+    {
+        var page = await db.Pages.SingleAsync(p => p.Id == id);
+        if (random.Next(2) == 0)
+        {
+            page.Title = Pick(_names);
+            return $"retitle page {id}";
+        }
+
+        page.Slug = MaybeSlug();
+        return $"set page {id}'s slug to {page.Slug ?? "none"}";
+    }
+
+    // Update() on an object the context didn't load, which may also move its slug.
+    private async Task<string> UpdateDetachedPage(int id)
+    {
+        var current = await db.Pages.AsNoTracking().SingleAsync(p => p.Id == id);
+        if (Tracked<Page>(p => p.Id == id) is { } tracked)
+        {
+            db.Entry(tracked).State = EntityState.Detached;
+        }
+
+        db.Pages.Update(
+            new Page
+            {
+                Id = id,
+                Slug = random.Next(2) == 0 ? current.Slug : MaybeSlug(),
+                Title = Pick(_names),
+                Section = current.Section,
+                Number = current.Number,
+                Version = current.Version,
+            }
+        );
+        return $"update detached page {id}";
+    }
+
+    private async Task<string> DeletePage(int id)
+    {
+        db.Pages.Remove(await db.Pages.SingleAsync(p => p.Id == id));
+        return $"delete page {id}";
+    }
+
+    private async Task<string> BulkSetSlug(int id)
+    {
+        var slug = MaybeSlug();
+        await db
+            .Pages.Where(p => p.Id == id)
+            .ExecuteUpdateAsync(set => set.SetProperty(p => p.Slug, slug));
+        return $"bulk-set page {id}'s slug to {slug ?? "none"}";
+    }
+
+    private string? MaybeSlug() => random.Next(4) > 0 ? Pick(ShopViews.Slugs(first)) : null;
+
     private async Task<string> BulkEditOrders(int customer)
     {
         var item = Item();
@@ -1066,7 +1197,8 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
         int[] Vehicles,
         int[] Trucks,
         int[] Trailers,
-        int[] Shipments
+        int[] Shipments,
+        int[] Pages
     )
     {
         public static async Task<State> Of(ShopDb db, Keys first)
@@ -1104,7 +1236,8 @@ public sealed class RandomWriter(ShopDb db, Keys first, Random random)
                 await db
                     .Shipments.Where(s => s.Id > first.Shipment)
                     .Select(s => s.Id)
-                    .ToArrayAsync()
+                    .ToArrayAsync(),
+                await db.Pages.Where(p => p.Id > first.Page).Select(p => p.Id).ToArrayAsync()
             );
         }
     }

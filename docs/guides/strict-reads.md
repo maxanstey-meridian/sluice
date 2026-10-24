@@ -224,7 +224,43 @@ those). A filter that reads it through a tenant service the context holds
 (`i.TenantId == _tenants.TenantId`), a property with a body, a method, a `readonly` field, a
 virtual property, or a `{ get; }` or `{ get; init; }` property is refused even on a configured context, since the
 configure can't set it. Copy the value into a settable field or property in the constructor, and
-filter by that.
+filter by that, or mark the property, below.
+
+### A tenant read through a scoped service
+
+Most ASP.NET apps don't copy the tenant onto the context: the filter reads it through a property
+over the request's scoped tenant service, which middleware sets once the user is known, after
+the context was made.
+
+```csharp
+public sealed class AppDb(DbContextOptions<AppDb> options, TenantProvider tenant)
+    : DbContext(options)
+{
+    // The body reads only what the compute's configure sets, so Sluice may trust it.
+    [SluiceContextState]
+    private Guid? TenantId => tenant.IsSet ? tenant.Id : null;
+
+    protected override void OnModelCreating(ModelBuilder model) =>
+        model.Entity<Invoice>().HasQueryFilter("Tenant", invoice => invoice.TenantId == TenantId);
+}
+```
+
+The configure then sets the service, not the context. Its second argument is the compute's own
+DI scope, the one the context was made in, so the service it gets is the one the context holds:
+
+```csharp
+read.Db<AppDb>((db, services) => services.GetRequiredService<TenantProvider>().Set(tenantId))
+```
+
+`[SluiceContextState]` is your promise: "this property's body reads only state that `read.Db`'s
+configure sets". Sluice doesn't read the body. A marked property is treated exactly like a
+settable field: the filter runs only on a configured context, and its queries carry the
+`-- Sluice reads the context's state: …` comment. If the body reads anything else (the clock, a
+static, a value the configure didn't set), one caller's rows are cached for everyone with that
+key. The property must hold a plain value and mustn't be virtual (unless it's sealed); it may be
+private. Unmarked properties with a body, methods, and members of objects the context holds
+(`_tenants.TenantId` written straight into the filter) are still refused, and the refusal of an
+unmarked property says how to mark it.
 
 The configure can also point the context at a tenant's own database before its first query,
 for database-per-tenant:

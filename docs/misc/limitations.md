@@ -54,6 +54,14 @@ no longer than the entry's duration.
   and read checks are off there. See
   [What isn't checked](/guides/strict-reads#what-isn-t-checked).
 
+- **Callers waiting on a `read.DoNotCache()` compute don't share its value.** Each runs its own
+  compute once the first ends, one at a time, since FusionCache hands a waiter only what was
+  stored. See [Leaving a value uncached](/guides/sources-and-queries#leaving-a-value-uncached).
+- **Under a memory size limit, tag markers aren't counted.** Sluice pins them (size 0,
+  `NeverRemove`) so an invalidation is never lost to compaction, so the cache can hold more than
+  the limit by one small entry per dependency. See
+  [Limiting memory](/guides/configuration#limiting-memory).
+
 ## Multi-node
 
 - **Clocks that disagree between servers** open a window about as wide as the difference:
@@ -75,11 +83,18 @@ no longer than the entry's duration.
 - **Cascades the model doesn't know about** (triggers, a database that differs from the model)
   aren't seen at all. See [Database cascades](/guides/ef-core#database-cascades).
 - **Without a row version, updating or deleting a row evicts its `Children` lists under every
-  parent**, since the parent EF loaded may not be the one the row leaves. Map a row version
-  (`xmin` on PostgreSQL, `rowversion` on SQL Server) to keep that exact. See
+  parent, and its `read.Entity` readers by unique column for every value**, since the parent or
+  value EF loaded may not be the one the row leaves. Map a row version (`xmin` on PostgreSQL,
+  `rowversion` on SQL Server) to keep that exact. See
   [Row versions](/guides/ef-core#row-versions).
+- **Reading by a unique column needs the model to know it's unique**: a single-column unique
+  index (filtered or not) or alternate key. Composite unique indexes, and owned types' columns,
+  can't be read by value. `set.Dependency(key)` doesn't evict readers by a unique column; use
+  `AllDependencies()` after a write Sluice can't see. See
+  [By a unique column](/guides/ef-core#by-a-unique-column).
 - **A row saved from an object you built yourself**, of a type with a row version, misses its
-  real old parent when its foreign key differs from the stored one. See
+  real old parent when its foreign key differs from the stored one, and its real old value of a
+  unique column likewise. See
   [Rows saved without loading them](/guides/ef-core#rows-saved-without-loading-them).
 - **Two entity types splitting one table and sharing a column**: saving one doesn't evict the
   other's readers. See [Model shapes](/guides/ef-core#model-shapes).
@@ -117,9 +132,14 @@ no longer than the entry's duration.
 - **Query filters that read the context's state need the compute to set it**, from the query
   key, with `read.Db<AppDb>(db => db.TenantId = tenantId)`; Sluice can't check what the
   configure sets. Filters that read it where the configure can't set it (through a service the
-  context holds, a property with a body, a method, a readonly field, or a virtual, init-only or
-  get-only property) are refused. See
+  context holds, an unmarked property with a body, a method, a readonly field, or a virtual,
+  init-only or get-only property) are refused. See
   [Tenants](/guides/strict-reads#tenants-and-other-context-state).
+- **`[SluiceContextState]` is taken on trust.** A filter may read a scoped tenant service
+  through a context property marked with it, set by `read.Db<AppDb>((db, services) => …)`.
+  Sluice doesn't read the property's body: one that reads anything the configure didn't set
+  caches one caller's rows for everyone with that key. See
+  [A tenant read through a scoped service](/guides/strict-reads#a-tenant-read-through-a-scoped-service).
 - **Invalidation isn't per tenant.** A write in one tenant evicts other tenants' cached reads
   of the same entity type, unless they read through `read.Children` on a tenant foreign key.
 - **Entities that load lazily or hold their context can't be returned by a query in a

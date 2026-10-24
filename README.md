@@ -183,12 +183,16 @@ var user = await read.Entity(computeDb.Users, userId).SingleAsync(ct);
 
 // The rows under one parent.
 var orders = await read.Children(computeDb.Orders, o => o.UserId, userId).ToListAsync(ct);
+
+// One row, by a column with a unique index, such as a slug or an email.
+var page = await read.Entity(computeDb.Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct);
 ```
 
 `read.Entity` depends on one row, so renaming Bob leaves Alice's dashboard cached.
 `read.Children` depends on the rows under one parent. Both return a query you can filter and
 project. Keys are your model's own types: the playground maps `UserId` with a value converter,
-so `read.Entity(computeDb.Users, userId)` takes a `UserId`.
+so `read.Entity(computeDb.Users, userId)` takes a `UserId`. A compute can also leave its value
+uncached with `read.DoNotCache()`, for a miss on a key from public input.
 
 ### Writing
 
@@ -227,7 +231,9 @@ to those types evict it with no code of yours. A query on any context other than
 throws too: that context may hold your request's unsaved edits or uncommitted rows, which
 mustn't be cached for everyone. So does a query filter that reads state that can change, such
 as a static tenant accessor, or the context's own tenant id unless the compute set it from the
-key with `read.Db<AppDb>(db => db.TenantId = tenantId)`.
+key with `read.Db<AppDb>(db => db.TenantId = tenantId)`. A filter reading a scoped tenant
+service runs when the context property it reads is marked `[SluiceContextState]` and the compute
+sets the service with `read.Db<AppDb>((db, services) => …)`.
 
 One thing doesn't throw, and isn't tracked either: raw ADO.NET or Dapper on `read.Db`'s
 connection (`computeDb.Database.GetDbConnection()`) outside a `read.From` fetch. Sluice only

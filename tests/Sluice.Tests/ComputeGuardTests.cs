@@ -184,6 +184,7 @@ public sealed class ComputeGuardTests
     [InlineData("records")]
     [InlineData("fetches")]
     [InlineData("holds")]
+    [InlineData("leaves uncached")]
     public async Task Using_another_running_compute_s_read_throws_and_caches_nothing(string use)
     {
         await using var node = new SluiceNode();
@@ -231,6 +232,9 @@ public sealed class ComputeGuardTests
                                         _ => Task.FromResult(fetched = true)
                                     );
                                     break;
+                                case "leaves uncached":
+                                    captured!.DoNotCache();
+                                    break;
                                 default:
                                     ActiveCompute.Hold(captured!, _ => new Resource());
                                     break;
@@ -252,6 +256,9 @@ public sealed class ComputeGuardTests
         fetched.Should().BeFalse();
         aMayFinish.SetResult();
         (await a).Should().Be("a");
+        (await node.Cache.GetOrSetAsync(_outer, "a", Good))
+            .Should()
+            .Be("a", "the other compute's use changed nothing on this one");
         (await node.Cache.GetOrSetAsync(_outer, "b", Good)).Should().Be("good#1");
     }
 

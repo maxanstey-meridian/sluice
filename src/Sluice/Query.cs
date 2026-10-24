@@ -40,6 +40,19 @@ public sealed class Query<TKey, TValue>
     /// </summary>
     public TimeSpan? Duration { get; init; }
 
+    /// <summary>
+    /// The size of an entry in Sluice's memory cache, for a memory cache with a <c>SizeLimit</c>;
+    /// <see langword="null"/> uses the cache's default (<c>DefaultEntryOptions.Size</c>). In the units the limit
+    /// counts, such as one per entry, or an estimate of its bytes. With a limit set, every entry needs a size, so set
+    /// this on every query or set the default.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The size is negative.</exception>
+    public long? Size
+    {
+        get;
+        init => field = EntrySize.Checked(value);
+    }
+
     internal string Name { get; }
 
     internal string EntryKey(TKey key) => $"{Name}:{KeyText.Of(_format, key)}";
@@ -67,5 +80,24 @@ public sealed class Query<TValue>
     /// <inheritdoc cref="Query{TKey, TValue}.Duration"/>
     public TimeSpan? Duration { get; init; }
 
+    /// <inheritdoc cref="Query{TKey, TValue}.Size"/>
+    public long? Size
+    {
+        get;
+        init => field = EntrySize.Checked(value);
+    }
+
     internal string Name { get; }
+}
+
+file static class EntrySize
+{
+    internal static long? Checked(long? size) =>
+        size is < 0
+            ? throw new ArgumentOutOfRangeException(
+                nameof(size),
+                size,
+                "An entry's size can't be negative."
+            )
+            : size;
 }
