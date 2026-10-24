@@ -268,7 +268,10 @@ public async Task SetGreeting(UserId userId, string text)
 }
 ```
 
-Only Alice's dashboard read Alice's greeting, so Bob's stays cached.
+Only Alice's dashboard read Alice's greeting, so Bob's stays cached. Keep the invalidation
+inside the method that writes, as here, and have every caller go through it: then no write can
+forget it. See
+[Keep the invalidation with the write](/guides/invalidation#keep-the-invalidation-with-the-write).
 
 The same goes for anything that writes without a `UseSluice` context: another service, a cron
 job, SQL run by hand, a trigger, or `ExecuteSql`. After one of those, invalidate by hand, or the

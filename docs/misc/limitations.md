@@ -12,8 +12,10 @@ no longer than the entry's duration.
   for data written outside your app. See
   [Writes Sluice can't see](/guides/ef-core#writes-sluice-can-t-see).
 - **On the generic path, every write is yours to report**, after it commits. Before the commit,
-  or never, and the old value can stay until it expires. See
-  [After the commit, never before](/guides/invalidation#after-the-commit-never-before).
+  or never, and the old value can stay until it expires. A change made outside your code, such
+  as a flag flipped in a vendor's dashboard, needs a webhook or a poll that invalidates it. See
+  [Keep the invalidation with the write](/guides/invalidation#keep-the-invalidation-with-the-write)
+  and [After the commit, never before](/guides/invalidation#after-the-commit-never-before).
 
 ## Everywhere
 

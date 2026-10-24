@@ -117,17 +117,20 @@ usual, then tell Sluice what changed. Only your code knows when its write has co
 Sluice doesn't wrap writes here. EF Core tells Sluice when a save commits, so EF writes need
 nothing; see [EF Core](/guides/ef-core#writing).
 
-Once a write has committed, invalidate what it changed:
+Once a write has committed, invalidate what it changed, in the same method:
 
 ```csharp
-await connection.ExecuteAsync(
-    "update invoices set paid = true where id = @invoiceId",
-    new { invoiceId = invoiceId.Value }
-);
-await cache.InvalidateAsync([
-    Billing.Invoice.For(invoiceId),
-    Billing.CustomerInvoices.For(customerId),
-]);
+public async Task MarkPaid(InvoiceId invoiceId, CustomerId customerId)
+{
+    await connection.ExecuteAsync(
+        "update invoices set paid = true where id = @invoiceId",
+        new { invoiceId = invoiceId.Value }
+    );
+    await cache.InvalidateAsync([
+        Billing.Invoice.For(invoiceId),
+        Billing.CustomerInvoices.For(customerId),
+    ]);
+}
 ```
 
 | Call | Evicts |
@@ -139,6 +142,34 @@ await cache.InvalidateAsync([
 | `ClearAsync()` | everything Sluice cached |
 
 Values that read none of it stay cached.
+
+### Keep the invalidation with the write
+
+Give each kind of write one method that writes and then invalidates, as `MarkPaid` does, and
+have every caller go through it. The invalidation then can't be forgotten: no caller writes
+without it, and no caller has to know which dependencies a write touches. A feature flag kept
+in a flag service works the same way:
+
+```csharp
+public static class Flags
+{
+    public static readonly Source<string> Flag = new("flag");
+}
+
+public async Task SetDarkMode(bool enabled)
+{
+    await flagService.SetAsync("dark-mode", enabled);
+    await cache.InvalidateAsync(Flags.Flag.For("dark-mode"));
+}
+```
+
+A compute that reads the flag records `Flags.Flag.For("dark-mode")` with `read.From`, so
+`SetDarkMode` evicts exactly the values that read it.
+
+A write your code doesn't make can't go through that method: a flag flipped in a vendor's
+dashboard, a row another service changes. Have whatever learns of it call `InvalidateAsync`: a
+webhook from the vendor, or a job that polls for changes. Without one, the old value stays
+cached until it expires, so keep durations short for that data.
 
 ### After the commit, never before
 

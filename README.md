@@ -147,6 +147,8 @@ public async Task SetGreeting(UserId userId, string text)
 Only Alice's dashboard read Alice's greeting, so only hers is thrown away. Bob's stays cached.
 Invalidate after the write commits, never before. Otherwise another request could rebuild the
 dashboard from the old data in between and cache it again.
+Keep the invalidation inside the method that writes, as here, and have every caller go through
+it: then no write can forget it.
 
 ## With EF Core
 
