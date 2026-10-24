@@ -211,7 +211,7 @@ deleted, and of the lists those rows were in or moved between. `ExecuteUpdate` a
 `ExecuteDelete` work too: Sluice can't tell which rows they changed, so once they commit, every
 cached read of the types in the table they wrote is evicted. Name the rows with `.ForKey(id)` or
 `.ForKeys(ids)` just before the call, and only those rows' readers are evicted, plus the type's
-`Children` lists and readers by any unique column the statement names; see
+`Children` lists and, for an update, readers by any unique column the statement names; see
 [Bulk writes by key](https://maxanstey-meridian.github.io/sluice/guides/ef-core#bulk-writes-by-key).
 One more case is broad: when a delete makes the database delete rows EF never loaded, or set
 their foreign key to null (`ON DELETE CASCADE` or `SET NULL`), Sluice clears every cached read

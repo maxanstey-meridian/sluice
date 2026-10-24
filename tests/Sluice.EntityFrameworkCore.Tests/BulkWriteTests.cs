@@ -620,6 +620,13 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
         (await cyRead.WasEvicted()).Should().BeFalse("Cy wasn't one of the keys");
         (await db.NameOf(cy)).Should().Be("Ada", "the statement touched only those keys");
 
+        await Update(
+            db.Customers.ForKeys(Enumerable.Repeat(ada, 101)),
+            set => set.SetProperty(c => c.Name, "Renamed"),
+            sync
+        );
+        (await cyRead.WasEvicted()).Should().BeFalse("a key given twice counts once");
+
         int[] many = [ada, .. Enumerable.Range(1, 100).Select(i => -i)];
         await Update(
             db.Customers.ForKeys(many),
@@ -841,6 +848,43 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
 
         db.Customers.Where(c => c.Id == ada)
             .ExecuteUpdate(set => set.SetProperty(c => c.Name, "Ada Lovelace"));
+
+        (await bobRead.WasEvicted())
+            .Should()
+            .BeTrue("a plain bulk write evicts every read of its type");
+    }
+
+    // Npgsql hands a connection's disposed command out again while the connection stays open, so a pin the keyed
+    // statement left on it, having changed no rows, must not narrow the next statement that reuses it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_keys_do_not_reach_the_next_statement_on_a_reused_command(bool sync)
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, bob) = await db.AddCustomers();
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        await db.Database.OpenConnectionAsync();
+
+        (
+            await Update(
+                db.Customers.Where(c => c.Name == "Nobody").ForKey(ada),
+                set => set.SetProperty(c => c.Name, "Ada Lovelace"),
+                sync
+            )
+        )
+            .Should()
+            .Be(0);
+        (
+            await Update(
+                db.Customers.Where(c => c.Id == ada),
+                set => set.SetProperty(c => c.Name, "Ada Lovelace"),
+                sync
+            )
+        )
+            .Should()
+            .Be(1);
 
         (await bobRead.WasEvicted())
             .Should()

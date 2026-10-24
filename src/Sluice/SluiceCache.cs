@@ -57,7 +57,8 @@ public sealed class SluiceCache
     /// <param name="query">The query whose entry to read.</param>
     /// <param name="key">The query key.</param>
     /// <param name="compute">
-    /// Computes the value on a miss, recording what it reads through <c>read.From</c>. It runs outside any ambient
+    /// Computes the value on a miss, or on every call while the caller's own transaction has uncommitted writes (see
+    /// <see cref="SluiceFlow"/>), recording what it reads through <c>read.From</c>. It runs outside any ambient
     /// transaction, so it reads what's committed.
     /// </param>
     /// <param name="ct">
@@ -111,7 +112,8 @@ public sealed class SluiceCache
     /// </summary>
     /// <param name="query">The query whose entry to read.</param>
     /// <param name="compute">
-    /// Computes the value on a miss, recording what it reads through <c>read.From</c>. It runs outside any ambient
+    /// Computes the value on a miss, or on every call while the caller's own transaction has uncommitted writes (see
+    /// <see cref="SluiceFlow"/>), recording what it reads through <c>read.From</c>. It runs outside any ambient
     /// transaction, so it reads what's committed.
     /// </param>
     /// <param name="ct">
@@ -214,10 +216,10 @@ public sealed class SluiceCache
         {
             reads.Violate(
                 new InvalidOperationException(
-                    $"Query '{reads.Query}' read {string.Join(", ", overlapping)}, which the caller's own "
+                    $"Query '{reads.Query}' depends on {string.Join(", ", overlapping)}, which the caller's own "
                         + "transaction has written and not yet committed. The compute reads only what's committed, so "
-                        + "the caller would get the data without its own writes. Read those rows on the transaction's "
-                        + "own context, or after it commits."
+                        + "the caller would get the data without its own writes. Read that data inside the "
+                        + "transaction, not through the cache, or after it commits."
                 )
             );
         }

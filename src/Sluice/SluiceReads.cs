@@ -20,6 +20,10 @@ public sealed class SluiceReads
 
     // What runs once the compute returns, before its value is stored: made on the first step, kept in order.
     private List<Func<CancellationToken, Task>>? _beforeStore;
+
+    // Set once the steps have run: a step added after that, before the compute closes (by a task it didn't await),
+    // would never run, so it throws rather than leave out what it would record.
+    private bool _stepsRun;
     private bool _open = true;
     private bool _uncached;
     private Exception? _violation;
@@ -176,7 +180,7 @@ public sealed class SluiceReads
         ThrowIfAnotherCompute();
         lock (_lock)
         {
-            if (!_open)
+            if (!_open || _stepsRun)
             {
                 throw new InvalidOperationException(
                     "The compute has already returned, so nothing more can run before its value is stored "
@@ -206,6 +210,7 @@ public sealed class SluiceReads
                     || (_uncached && !checkedAgainstWrites)
                 )
                 {
+                    _stepsRun = true;
                     return;
                 }
 

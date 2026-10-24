@@ -68,8 +68,8 @@ matched by EF's transaction id, since a provider may reuse the `DbTransaction` o
 transaction. For an ambient transaction it keeps its own list, read with the caller's
 `Transaction.Current` before the compute suppresses it; for an enlisted transaction that isn't
 the current one (`EnlistTransaction` without a scope), it adds a probe for that list the first
-time a flow with a box writes in it. `GetOrSetAsync` asks the probes; with no box and no ambient
-transaction that's one `AsyncLocal` lookup. If anything is pending, the call skips FusionCache
+time a flow with a box writes in it. `GetOrSetAsync` asks the probes; with no box that's one `AsyncLocal` lookup, plus a read of
+`Transaction.Current` once the EF package has registered its ambient lookup. If anything is pending, the call skips FusionCache
 entirely, so it never joins another caller's stampede lock: it runs the compute through the same
 `read`, guards and held resources, stores nothing, and intersects the tags the compute read with
 the tags the pending writes will invalidate. Any overlap throws; none returns the fresh value.
@@ -155,13 +155,14 @@ every read of the entity types stored in them is invalidated, reads by unique co
 
 A keyed one (`ForKey`, `ForKeys`) adds the key `Where` to the query itself, then sets an
 `AsyncLocal` pin, the entity type and its keys, around EF's call, and restores it afterwards,
-even when the call throws. The first bulk command on that flow takes the pin, so a later one
-never sees it. When it pins one of the types the command names, with no more than 100 keys, that
+even when the call throws. The first bulk command EF initialises on that flow during the call
+takes the pin and holds it until it ends, so no other command sees it, whatever order
+interceptors run in, and a command object the provider hands out again starts without it. When it pins one of the types the command names, with no more than 100 keys, that
 type publishes per key instead: each key's
 dependency (which reaches whole-type readers too), every foreign key whole, and, for an update,
 each unique column whose quoted name appears in the SQL; for a delete, each `CASCADE` or
 `SET NULL` foreign key pointing at the type under each key, and what it cascades into. An update
-whose SQL names the key's column more than once, beyond Sluice's own condition, may set the key,
+whose SQL names the key's column again, besides Sluice's own condition, may set the key,
 so it publishes whole. Every other type the SQL names publishes whole.
 
 A failed, cancelled or conflicting save publishes the same way: never drop, because

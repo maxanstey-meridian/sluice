@@ -37,7 +37,9 @@ public static class KeyedRowsExtensions
     /// <typeparamref name="T"/>, as a plain bulk write does; with none, it runs nothing and returns 0.
     /// </summary>
     /// <param name="rows">An EF query of <typeparamref name="T"/>, on a context configured with <c>UseSluice</c>.</param>
-    /// <param name="keys">The primary keys, each of its CLR type in the EF model; read once, here.</param>
+    /// <param name="keys">
+    /// The primary keys, each of its CLR type in the EF model; read once, here, and a key given twice counts once.
+    /// </param>
     /// <exception cref="ArgumentException">
     /// <paramref name="rows"/> isn't an EF query of an entity type, or a key is null or isn't of the primary key's CLR
     /// type.
@@ -55,10 +57,11 @@ public static class KeyedRowsExtensions
         object[] values =
         [
             .. keys.Select(key =>
-                key is null
-                    ? throw new ArgumentException("A key in the list is null.", nameof(keys))
-                    : (object)key
-            ),
+                    key is null
+                        ? throw new ArgumentException("A key in the list is null.", nameof(keys))
+                        : (object)key
+                )
+                .Distinct(),
         ];
         return KeyedRows<T>.Of(rows, values, nameof(keys));
     }

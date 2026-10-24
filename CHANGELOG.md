@@ -8,16 +8,16 @@ data older than the request's own write.
 
 - **Breaking: a cached read of your own uncommitted writes throws.** Inside a transaction that
   has saved writes it hasn't committed, a cached read that depends on them throws
-  `InvalidOperationException`, in every environment, naming the query and saying to read those
-  rows on the transaction's own context, or after it commits. It used to return the value from
-  before the write: a hit from the cache, or a miss computed from what's committed. While such
-  writes are pending, every cached read on the flow computes fresh, stores nothing and skips
-  FusionCache entirely, so a cached value can't slip past the check and other callers never wait
-  on it; a read that doesn't depend on the writes gets the fresh value. A `TransactionScope` is
-  checked by itself. An EF transaction is checked only on a flow that called
+  `InvalidOperationException`, in every environment, naming the query and saying to read that
+  data inside the transaction, not through the cache, or after it commits. It used to return the
+  value from before the write: a hit from the cache, or a miss computed from what's committed.
+  While such writes are pending, every cached read on the flow computes fresh, stores nothing and
+  skips FusionCache entirely, so a cached value can't slip past the check and other callers never
+  wait on it; a read that doesn't depend on the writes gets the fresh value. A `TransactionScope`
+  is checked by itself. An EF transaction is checked only on a flow that called
   `SluiceFlow.Begin()` before it began, below, and a transaction joined with
-  `Database.EnlistTransaction` (no scope) only on one that called it before its first save. Saves without a transaction of yours have
-  committed by the time they return, and never count.
+  `Database.EnlistTransaction` (no scope) only on one that called it before saving in it. Saves
+  without a transaction of yours have committed by the time they return, and never count.
 - **New: `SluiceFlow.Begin()`.** `using var _ = SluiceFlow.Begin();` once per entry point (HTTP
   middleware, the message pipeline) lets Sluice see the EF transactions the flow opens, however
   deep. A nested call does nothing. Without it, EF transactions aren't checked, which costs
@@ -26,15 +26,17 @@ data older than the request's own write.
 - **New: `.ForKey(id)` and `.ForKeys(ids)` for `ExecuteUpdate` and `ExecuteDelete`.**
   `db.Set<FormEntity>().Where(…).ForKey(id).ExecuteUpdateAsync(…)` adds the key condition to the
   statement itself, alongside your `Where`, so a conditional write stays conditional, and evicts
-  only that row's readers once it commits, instead of every read of the type. An update still
-  evicts every `Children` list of the type's foreign keys, and every reader by a unique column
-  whose name appears in the statement; a delete still evicts what it cascades into. Other types
-  the statement names are evicted whole, as before, and so is the keyed type past 100 keys, or
-  when an update's statement names the key column again (it may set the key). They return a `KeyedRows<T>`, which only executes, so
-  call them last. A composite key or a type not mapped to a table throws
-  `NotSupportedException`, and a key of the wrong type, or a query that isn't an EF set of an
-  entity type, `ArgumentException`, before anything runs. Sluice doesn't recognise a key
-  condition in your own `Where`: move `f.Id == id` into `ForKey`.
+  only that row's readers once it commits, instead of every read of the type. A keyed write
+  still evicts every `Children` list of the type's foreign keys; an update also evicts every
+  reader by a unique column whose name appears in the statement, and a delete what it cascades
+  into. Other types the statement names are evicted whole, as before, and so is the keyed type
+  past 100 keys, or when an update's statement names the key column again (it may set the key).
+  They return a `KeyedRows<T>`, which only executes, so call them last. A composite key or a
+  type not mapped to a table throws `NotSupportedException`, and a key of the wrong type, a null
+  key, or a query that isn't an EF set of an entity type, `ArgumentException`, before anything
+  runs. Sluice doesn't recognise a key condition in your own `Where`: move `f.Id == id` into
+  `ForKey`, rather than keep it in both, which, for an update, names the key column twice and
+  evicts whole.
 - **Changed: a read by a unique column records the row it found.** `read.Entity(set, column,
   value)` runs one more query once the compute returns, an indexed lookup of the keys of the rows
   holding the value, ignoring query filters, and records each by its key (the whole type past
@@ -44,6 +46,10 @@ data older than the request's own write.
 - **Changed: `set.Dependency(key)` evicts readers by a unique column that found that row,** and
   so does a keyed bulk write. A cached "not found" by a unique column still needs
   `AllDependencies()` after a write Sluice can't see.
+- **Upgrading:** entries cached for a read by a unique column before 0.5.0 don't carry the key of
+  the row they found, so a keyed write or `set.Dependency(key)` doesn't evict them. With a
+  distributed cache, clear it when you deploy 0.5.0, and don't run 0.4.0 and 0.5.0 nodes side by
+  side; an in-memory cache starts empty anyway.
 - **Docs:** how to keep a `[SluiceContextState]` setter safe: one helper on `read` as its only
   caller, held by an architecture test. Limitations gains the refusal of unique columns and
   foreign keys whose value converter stores null as a value, and the rule that converters on

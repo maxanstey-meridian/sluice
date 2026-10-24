@@ -126,7 +126,7 @@ public sealed class RaceTests
                 .Awaiting(call => call)
                 .Should()
                 .ThrowAsync<InvalidOperationException>()
-                .WithMessage("Query 'race-view' read race-rows:1, *");
+                .WithMessage("Query 'race-view' depends on race-rows:1, *");
             (await Without(Quick)).Should().Be("quick#1");
         }
         else
@@ -139,7 +139,7 @@ public sealed class RaceTests
                 .Awaiting(call => call)
                 .Should()
                 .ThrowAsync<InvalidOperationException>()
-                .WithMessage("Query 'race-view' read race-rows:1, *");
+                .WithMessage("Query 'race-view' depends on race-rows:1, *");
             mayFinish.SetResult();
 
             (await without).Should().Be("held");

@@ -134,7 +134,7 @@ callback to `AddSluice`; see [Configuration](/guides/configuration).
 cached value's computation takes an `AppDb` of its own from a DI scope it opens for itself.
 
 `UseSluice` does two things. Each time `SaveChanges` commits, it evicts what the save changed;
-an `ExecuteUpdate` or `ExecuteDelete` evicts every read of the types it wrote, or only its rows'
+an `ExecuteUpdate` or `ExecuteDelete` evicts every read of the types it wrote, or mostly only its rows'
 readers when you name them with [`ForKey`](/guides/ef-core#bulk-writes-by-key). And while a
 cached value is being built, it records the entity types each query reads, and makes queries it
 can't track throw (see [What a compute can't read](/guides/strict-reads)). It needs `AddSluice`

@@ -447,6 +447,39 @@ public sealed class ComputeScopeTests
         runs.Should().Be(2, "the step's read was recorded with the value");
     }
 
+    // Steps run inside the compute's ambient-suppressing scope, so a step's query reads what's committed too.
+    [Fact]
+    public async Task A_step_runs_outside_the_caller_s_ambient_transaction()
+    {
+        await using var node = new SluiceNode();
+        var ran = false;
+        Transaction? seen = null;
+        using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+
+        await node.Cache.GetOrSetAsync(
+            _query,
+            "step-suppressed",
+            (read, _) =>
+            {
+                read.From(_rows.For(1));
+                ActiveCompute.BeforeStore(
+                    read,
+                    _ =>
+                    {
+                        ran = true;
+                        seen = Transaction.Current;
+                        return Task.CompletedTask;
+                    }
+                );
+                return Task.FromResult(true);
+            }
+        );
+
+        ran.Should().BeTrue();
+        seen.Should().BeNull();
+        Transaction.Current.Should().NotBeNull("the caller has its transaction back");
+    }
+
     [Fact]
     public async Task A_step_added_by_a_step_runs_too()
     {

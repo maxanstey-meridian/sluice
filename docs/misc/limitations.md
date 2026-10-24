@@ -112,16 +112,18 @@ no longer than the entry's duration.
 - **Broad eviction, by design**: a plain query is evicted by any write to any type it reads, a
   `Children` list by a change to any row in it, and every read of a type by an `ExecuteUpdate`
   or `ExecuteDelete` on its table, unless it names its rows with `ForKey` or `ForKeys`. A keyed
-  one still evicts every `Children` list of the type's foreign keys, and every reader by a
-  unique column the statement names; past 100 keys it evicts the whole type. See
+  one still evicts every `Children` list of the type's foreign keys, and an update every reader
+  by a unique column the statement names; past 100 keys, or when an update's SQL names the key
+  column again (a `Where` through a navigation joins a table whose key is also `Id`), it evicts
+  the whole type. See
   [What a query records](/guides/ef-core#what-a-query-records),
   [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes) and
   [Bulk writes by key](/guides/ef-core#bulk-writes-by-key).
 - **Commits Sluice doesn't see**: a raw `DbTransaction` committed outside EF, and some
   `TransactionScope` setups. See [Transactions](/guides/transactions#ef-core).
 - **A cached read of your own uncommitted writes is caught only where Sluice sees the
-  transaction**: a `TransactionScope`, or an EF transaction begun, or an enlisted one written to,
-  inside `SluiceFlow.Begin()`.
+  transaction**: a `TransactionScope` by itself, and an EF transaction begun, or an enlisted one
+  written in, inside `SluiceFlow.Begin()`.
   Elsewhere the read returns the committed value. While such writes are pending, every cached
   read on the flow goes to the database. See
   [Reading your own uncommitted writes](/guides/strict-reads#reading-your-own-uncommitted-writes).

@@ -160,9 +160,10 @@ status, works from that.
 
 So that read throws `InvalidOperationException`, the same in every environment. The message
 names the query, says your own transaction has uncommitted writes this read depends on, and
-says to read those rows on the transaction's own context, or after it commits:
+says to read that data inside the transaction, not through the cache, or after it commits:
 
 ```csharp
+using var _ = SluiceFlow.Begin(); // once per request, normally in middleware: see below
 await using var transaction = await db.Database.BeginTransactionAsync(ct);
 var form = await db.Forms.SingleAsync(f => f.Id == formId, ct);
 form.Status = FormStatus.Approved;
@@ -200,10 +201,12 @@ transaction counts as a save does.
   `TransactionScopeAsyncFlowOption.Enabled`, as
   [async code needs anyway](/guides/transactions#transactionscope-with-async-code).
 - **An EF transaction** (`BeginTransaction`, or one a context joins with `UseTransaction`): only
-  on a flow that called `SluiceFlow.Begin()` before the transaction began.
+  on a flow that called `SluiceFlow.Begin()` before the transaction began, or before the context
+  joined it.
 - **A transaction joined with `Database.EnlistTransaction`**, with no `TransactionScope` around
-  it: only on a flow that called `SluiceFlow.Begin()` before its first save in the transaction.
-  If several such flows write in one enlisted transaction, only the first is checked.
+  it: only on a flow that called `SluiceFlow.Begin()` before it saved in the transaction. If
+  several flows that called it write in one enlisted transaction, only the first to write is
+  checked.
 
 EF tells Sluice when a transaction begins, but from inside EF's own async method, and anything
 an async method sets on the flow (an `AsyncLocal`) is undone when it returns. So Sluice can only
@@ -233,8 +236,10 @@ covered. Dispose it on the flow that began it.
   open.
 - **An EF transaction begun before `SluiceFlow.Begin()` ran**, such as one opened earlier in the
   pipeline than the middleware.
-- **An enlisted transaction on a flow without `SluiceFlow.Begin()`**, or one first written to
-  before it ran.
+- **An enlisted transaction on a flow without `SluiceFlow.Begin()`**, or one the flow saved in
+  only before calling it.
+- **Writes undone by a rollback to a savepoint** still count as pending until the transaction
+  ends, so a cached read of those rows still throws, though what's committed would be right.
 - **Edits you haven't saved.** They're only in your context's change tracker, not in the
   database or the transaction, so no compute could read them and there's nothing to check. Save
   first, or use the tracked entity.
@@ -473,9 +478,10 @@ its own. The helper takes a `read`, which only a compute has, so a request can't
 organisation must still come from the key, as every configure's values must.
 
 Then have an architecture test hold the rule. It fails when anything else calls the setter, and
-when nothing calls the helper. The second check proves the scan sees calls at all: one that
-found no calls, because it missed lambdas or async methods (which compile into nested types),
-would pass the first check with nothing checked.
+when nothing calls the helper. The second check proves the scan reaches where computes run:
+inside async lambdas, which compile into nested types. A scan that skipped them would miss a
+compute calling the setter directly, and pass the first check; it would also find no caller of
+the helper, which the second check fails on.
 
 ```csharp
 public sealed class TenantScopeTests

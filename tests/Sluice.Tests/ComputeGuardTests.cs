@@ -350,9 +350,9 @@ public sealed class ComputeGuardTests
         () => written;
 
     private const string Uncommitted =
-        "Query 'guard-outer' read *, which the caller's own transaction has written and not yet committed. The "
-        + "compute reads only what's committed, so the caller would get the data without its own writes. Read those "
-        + "rows on the transaction's own context, or after it commits.";
+        "Query 'guard-outer' depends on *, which the caller's own transaction has written and not yet committed. The "
+        + "compute reads only what's committed, so the caller would get the data without its own writes. Read that "
+        + "data inside the transaction, not through the cache, or after it commits.";
 
     [Fact]
     public async Task Without_a_flow_box_a_probe_is_not_kept()
@@ -553,6 +553,7 @@ public sealed class ComputeGuardTests
     {
         await using var node = new SluiceNode();
         var asked = new List<Transaction>();
+        FlowWrites.OnAmbient(node.Cache, _ => throw new InvalidOperationException("replaced"));
         FlowWrites.OnAmbient(
             node.Cache,
             transaction =>
@@ -565,17 +566,31 @@ public sealed class ComputeGuardTests
         using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
         {
             var caller = Transaction.Current;
-            var call = () => node.Cache.GetOrSetAsync(_outer, "k", Good).AsTask();
+            Transaction? inside = caller;
+            var call = () =>
+                node
+                    .Cache.GetOrSetAsync(
+                        _outer,
+                        "k",
+                        (read, _) =>
+                        {
+                            inside = Transaction.Current;
+                            read.From(_rows.For(1));
+                            return Task.FromResult("fresh");
+                        }
+                    )
+                    .AsTask();
 
             await call.Should()
                 .ThrowAsync<InvalidOperationException>()
                 .WithMessage(Uncommitted.Replace("*", "guard-rows:1"));
             asked.Should().ContainSingle().Which.Should().BeSameAs(caller);
+            inside.Should().BeNull("the fresh compute runs outside the caller's transaction too");
             Transaction.Current.Should().BeSameAs(caller);
         }
 
-        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
-        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
+        (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
         asked.Should().ContainSingle("without an ambient transaction there's nothing to ask about");
     }
 

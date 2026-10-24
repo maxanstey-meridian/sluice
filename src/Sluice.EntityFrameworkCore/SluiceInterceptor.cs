@@ -172,12 +172,14 @@ internal sealed partial class SluiceInterceptor
     // A bulk write is one statement. Whether it failed or was cancelled before or after the database ran it, publishing
     // is safe; EF reports a cancellation through CommandCanceled, not CommandFailed. One that ran reports how many rows
     // it changed (ExecuteUpdate and ExecuteDelete return it): none changed nothing, and cascaded to nothing, since the
-    // database cascades from each row it deletes, so it publishes nothing, and leaves nothing for a transaction.
+    // database cascades from each row it deletes, so it publishes nothing, and leaves nothing for a transaction. Its pin
+    // is still taken off the command, which the provider may hand out again.
     public int NonQueryExecuted(DbCommand command, CommandExecutedEventData eventData, int result)
     {
+        var write = BulkWrite(command, eventData);
         if (result != 0)
         {
-            Complete(BulkWrite(command, eventData));
+            Complete(write);
         }
 
         return result;
@@ -190,9 +192,10 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
+        var write = BulkWrite(command, eventData);
         if (result != 0)
         {
-            await CompleteAsync(BulkWrite(command, eventData)).ConfigureAwait(false);
+            await CompleteAsync(write).ConfigureAwait(false);
         }
 
         return result;
@@ -349,15 +352,25 @@ internal sealed partial class SluiceInterceptor
     // runs, initialised before any interceptor's NonQueryExecuting could start another, and before any command ends, so
     // the pin goes to it whatever order interceptors run in and whatever its row count. A later command on the flow
     // (another bulk write an interceptor runs, a retry by the execution strategy) finds the pin taken, and publishes
-    // whole.
+    // whole. A provider may hand out a command object again (Npgsql does, per open connection), so a bulk command with
+    // no pin to take clears any an earlier statement left on it.
     public DbCommand CommandInitialized(CommandEndEventData eventData, DbCommand result)
     {
         if (
-            eventData.CommandSource is CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete
-            && KeyPin.Take() is { } pin
+            eventData.CommandSource
+            is not (CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete)
         )
         {
+            return result;
+        }
+
+        if (KeyPin.Take() is { } pin)
+        {
             _pins.AddOrUpdate(result, pin);
+        }
+        else
+        {
+            _pins.Remove(result);
         }
 
         return result;

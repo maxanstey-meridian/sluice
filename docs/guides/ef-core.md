@@ -214,7 +214,9 @@ filters are ignored so that a row they hide, such as a soft-deleted one, is reco
 and a write that brings it back evicts the reader. A filtered unique index lets rows outside its filter
 share a value: each is recorded, and past 100 rows the reader depends on every row of the type
 instead. Naming the primary key runs no lookup, and nor does a type with a composite primary
-key, which no write by key reaches.
+key, which no write by key reaches. Inside a fused fetch (`read.From(dependency, fetch)`), whose
+context may be gone once the compute returns, the read depends on every row of the type instead
+of looking up.
 
 That's one more round trip per compute, on the column's index; a cache hit runs neither query.
 If the lookup fails, the compute fails: nothing is cached and the caller gets the exception. A
@@ -505,7 +507,8 @@ await db.Set<Order>().ForKeys(ids).ExecuteUpdateAsync(s => s.SetProperty(o => o.
 ```
 
 Move the key condition (`f.Id == id`) out of your `Where` and into `ForKey`; the rest of the
-`Where` stays, so a conditional write is still conditional. Sluice doesn't recognise a key
+`Where` stays, so a conditional write is still conditional. Keep it in your `Where` as well and
+the statement names the key's column twice, so an update evicts as a plain one does (see below). Sluice doesn't recognise a key
 condition you write yourself: a bulk write without `ForKey` evicts every read of its type,
 whatever its `Where` says. `ForKey` and `ForKeys` return a `KeyedRows<T>`, not a query: it has
 `ExecuteUpdate`, `ExecuteUpdateAsync`, `ExecuteDelete` and `ExecuteDeleteAsync`, taking EF's own
@@ -539,9 +542,10 @@ Once a keyed statement commits, Sluice evicts:
   every read of the type, so a mass update doesn't send thousands of invalidations.
 - **An update that may set the key.** EF lets `ExecuteUpdate` set the primary key, which would
   move a row to a key whose readers cached "not found". So when the statement names the key's
-  column more than the once Sluice's own condition does, the update evicts as a plain bulk
-  update does. That includes a statement that only mentions another table's column of the same
-  name, in a join or a subquery: more than it needs to, never less.
+  column again, besides Sluice's own condition, the update evicts as a plain bulk update does.
+  That includes a statement that only mentions another table's column of the same name, such as
+  a `Where` through a navigation, which joins a table whose key is also `Id`: more than it needs
+  to, never less.
 - **One statement.** The keys apply to the statement EF runs for the call. Any other bulk
   statement on the same flow while it runs, such as one an interceptor of yours issues, or a
   retry by the execution strategy, evicts whole.

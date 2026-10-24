@@ -10,6 +10,7 @@ namespace Sluice.EntityFrameworkCore.Tests;
 public sealed class EntityReadTests(PostgresFixture postgres)
 {
     private static readonly Source<string> _greetings = new("ef-reads-greetings");
+    private static readonly Source<int> _fetched = new("ef-reads-fetched");
     private static readonly Query<int, Customer?> _customer = new("ef-reads-customer");
     private static readonly Query<int, User> _user = new("ef-reads-user");
     private static readonly Query<int, Invoice> _invoice = new("ef-reads-invoice");
@@ -449,6 +450,29 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .Should()
             .BeFalse("a read that found no row recorded no key");
         (await CachedRead.IsEvictedBy(ReadMissing, db.Pages.AllDependencies())).Should().BeTrue();
+    }
+
+    // A fused fetch may read on a context of its own, gone once the compute returns, so there the read depends on the
+    // whole type rather than looking up the rows it found.
+    [Fact]
+    public async Task A_unique_column_read_in_a_fused_fetch_on_its_own_context_depends_on_the_whole_type()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("fetched");
+        var other = await AddPage(db, Fresh("other"));
+        await AddPage(db, slug);
+        Task ReadIt(SluiceReads read, CancellationToken ct) =>
+            read.From(
+                _fetched.All,
+                async fetchCt =>
+                {
+                    await using var own = postgres.CreateDb(node);
+                    return await read.Entity(own.Pages, p => p.Slug, slug).SingleAsync(fetchCt);
+                }
+            );
+
+        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(other.Id))).Should().BeTrue();
     }
 
     // The lookup ignores query filters, so a row they hide is recorded too: a write that brings it back reaches the

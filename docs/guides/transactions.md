@@ -104,18 +104,18 @@ Inside a compute, two EF cases still throw `InvalidOperationException`:
 
 Compute the value outside the transaction, or after it commits.
 
+What isn't checked: a connection that was already open, or a `DbTransaction`, captured from
+outside the compute and used through raw ADO.NET or Dapper. Suppressing the scope doesn't take
+an open connection out of its transaction, so the compute would read that transaction's
+uncommitted rows. Open a fresh connection inside the compute instead. Nothing checks for
+replicas either: point computes at the primary.
+
 Because a compute runs outside your transaction, it can't see what your transaction has saved
 but not committed. A cached read that depends on such writes throws rather than return data
 older than your own write: see
 [Reading your own uncommitted writes](/guides/strict-reads#reading-your-own-uncommitted-writes).
 Sluice sees a `TransactionScope` by itself, and an EF transaction on a flow that called
 `SluiceFlow.Begin()` first.
-
-What isn't checked: a connection that was already open, or a `DbTransaction`, captured from
-outside the compute and used through raw ADO.NET or Dapper. Suppressing the scope doesn't take
-an open connection out of its transaction, so the compute would read that transaction's
-uncommitted rows. Open a fresh connection inside the compute instead. Nothing checks for
-replicas either: point computes at the primary.
 
 ## What's not covered
 

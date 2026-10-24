@@ -52,7 +52,7 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
                 .Awaiting(read => read.WasEvicted())
                 .Should()
                 .ThrowAsync<InvalidOperationException>()
-                .WithMessage($"Query 'ef-cached-read' read *Customer:{ada}*{Uncommitted}");
+                .WithMessage($"Query 'ef-cached-read' depends on *Customer:{ada}*{Uncommitted}");
             (await bobRead.WasEvicted()).Should().BeTrue("it computed fresh, past the cache");
             (await adaRead.WasEvictedForAnotherCaller())
                 .Should()

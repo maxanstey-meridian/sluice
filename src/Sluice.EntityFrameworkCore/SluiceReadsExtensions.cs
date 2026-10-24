@@ -182,7 +182,9 @@ public static class SluiceReadsExtensions
     /// <c>set.Dependency(key)</c>, and a keyed bulk write (<c>ForKey</c>) that doesn't touch the column. That's one
     /// more indexed query per compute; if it fails, the compute fails. Past 100 such rows (a filtered unique index lets
     /// rows outside its filter share a value), the reader depends on every <typeparamref name="T"/> row instead. The
-    /// primary key, and a type with a composite primary key, run no lookup.
+    /// primary key, and a type with a composite primary key, run no lookup. Inside a fused fetch
+    /// (<c>read.From(dependency, fetch)</c>), whose context may be gone by then, the reader depends on every
+    /// <typeparamref name="T"/> row instead of looking up.
     /// </para>
     /// </remarks>
     /// <param name="read">The compute's reads.</param>
@@ -240,13 +242,22 @@ public static class SluiceReadsExtensions
         {
             read.From(ModelSources.Unique(property).For(value));
 
-            // A composite key isn't recorded: nothing invalidates one row of such a type by key alone.
+            // A composite key isn't recorded: nothing invalidates one row of such a type by key alone. A fused fetch
+            // may query a context of its own and dispose it before the compute returns, when the lookup would run, so
+            // there the whole type stands in for the rows it would find.
             if (entityType.FindPrimaryKey()!.Properties is [var key])
             {
-                ActiveCompute.BeforeStore(
-                    read,
-                    ct => RecordFoundKeysAsync(read, set, property, key, value, ct)
-                );
+                if (ActiveCompute.InFetch(read))
+                {
+                    read.From(ModelSources.Entity(entityType).All);
+                }
+                else
+                {
+                    ActiveCompute.BeforeStore(
+                        read,
+                        ct => RecordFoundKeysAsync(read, set, property, key, value, ct)
+                    );
+                }
             }
         }
 
