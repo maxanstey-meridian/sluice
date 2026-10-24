@@ -198,8 +198,9 @@ public static class SluiceReadsExtensions
     /// <paramref name="value"/> isn't of its CLR type, or its value converter stores it as null.
     /// </exception>
     /// <exception cref="NotSupportedException">
-    /// Only a composite unique index or key covers the column, <typeparamref name="T"/> isn't mapped to a table, or the
-    /// context's provider isn't relational.
+    /// Only a composite unique index or key covers the column, its value converter stores null as a value
+    /// (<c>convertsNulls</c>), <typeparamref name="T"/> isn't mapped to a table, or the context's provider isn't
+    /// relational.
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// The context isn't configured with <c>UseSluice</c>, or a compute is running and <paramref name="read"/> isn't

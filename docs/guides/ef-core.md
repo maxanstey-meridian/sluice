@@ -196,7 +196,9 @@ model's unique columns to know which values a save must report. A column without
 `ArgumentException`, and one unique only together with others (a composite index) throws
 `NotSupportedException`. Naming the primary key reads exactly as `read.Entity(set, key)`. The
 value can't be null, nor one the column's value converter stores as null: no read by value
-finds a null, so both throw (`ArgumentNullException`, `ArgumentException`).
+finds a null, so both throw (`ArgumentNullException`, `ArgumentException`). A column whose
+converter stores null as a value (EF's internal `convertsNulls`) throws `NotSupportedException`:
+a row whose value is null would hold a value a reader finds, but no save would report it.
 
 Each save of a row reports one more value per unique column of its type. Without a row version
 the value the database holds when an update or delete runs may not be the one EF loaded, so,

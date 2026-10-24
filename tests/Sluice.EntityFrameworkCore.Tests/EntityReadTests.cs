@@ -564,6 +564,28 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .BeFalse();
     }
 
+    // A warehouse with no region stores an empty one, which a read by "" would find, but no save reports a null.
+    [Fact]
+    public async Task A_unique_column_whose_converter_stores_null_as_a_value_is_refused()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        db.Warehouses.Add(new Warehouse { Code = Fresh("WH") });
+        await db.SaveChangesAsync();
+
+        var read = () =>
+            CachedRead.Of(
+                node.Cache,
+                (read, ct) =>
+                    read.Entity(read.Db<ShopDb>().Warehouses, w => w.Region, "")
+                        .SingleOrDefaultAsync(ct)
+            );
+
+        await read.Should()
+            .ThrowAsync<NotSupportedException>()
+            .WithMessage("Warehouse.Region's value converter stores null as a value*");
+    }
+
     [Fact]
     public async Task A_unique_column_read_is_refused_for_a_column_without_a_single_column_unique_index_or_key()
     {

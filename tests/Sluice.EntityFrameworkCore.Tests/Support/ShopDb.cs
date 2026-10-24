@@ -3,6 +3,7 @@ using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Sluice.EntityFrameworkCore.Tests.Support;
 
@@ -235,6 +236,9 @@ public sealed class Warehouse
 {
     public int Id { get; set; }
     public string Code { get; set; } = "";
+
+    /// <summary>Unique among warehouses that have one; its converter stores no region as an empty one.</summary>
+    public string? Region { get; set; }
 }
 
 public sealed class Bin
@@ -800,6 +804,20 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .HasForeignKey(bin => bin.WarehouseCode)
             .HasPrincipalKey(warehouse => warehouse.Code);
         model.Entity<Bin>().HasIndex(bin => bin.Label).IsUnique();
+        model.Entity<Warehouse>().HasIndex(w => w.Region).IsUnique().HasFilter("\"Region\" <> ''");
+        // EF keeps a converter that converts nulls internal (EF1001), so only an app reaching into it hits this case.
+#pragma warning disable EF1001
+        model
+            .Entity<Warehouse>()
+            .Property(w => w.Region)
+            .HasConversion(
+                new ValueConverter<string?, string>(
+                    region => region ?? "",
+                    region => region == "" ? null : region,
+                    convertsNulls: true
+                )
+            );
+#pragma warning restore EF1001
         model
             .Entity<Bin>()
             .HasOne<Warehouse>()

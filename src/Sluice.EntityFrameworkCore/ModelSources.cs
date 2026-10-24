@@ -82,13 +82,21 @@ internal static class ModelSources
     private static IEnumerable<IProperty> RowUniqueColumns(IEntityType entityType) =>
         entityType.GetDerivedTypesInclusive().SelectMany(UniqueColumns).Distinct();
 
-    // A single-column primary key is the type's own source, which every save publishes already.
+    // A single-column primary key is the type's own source, which every save publishes already. A column whose
+    // converter stores null as a value is left out: a row whose value is null holds that value in the database, which
+    // a reader by it finds, but no save would publish it.
     private static bool IsUniqueColumn(IProperty property) =>
+        IsSingleColumnUnique(property) && !ConvertsNulls(property);
+
+    private static bool IsSingleColumnUnique(IProperty property) =>
         property.FindContainingPrimaryKey() is not { Properties: [_] }
         && (
             property.GetContainingIndexes().Any(index => index.IsUnique && index.Properties is [_])
             || property.GetContainingKeys().Any(key => key.Properties is [_])
         );
+
+    private static bool ConvertsNulls(IProperty property) =>
+        property.GetTypeMapping().Converter is { ConvertsNulls: true };
 
     /// <summary>
     /// Resolves <paramref name="selector"/> (a property, or <c>EF.Property</c> on a shadow property) to a column of
@@ -98,7 +106,9 @@ internal static class ModelSources
     /// The selector doesn't name a property, names it through <c>EF.Property</c> with a name that isn't a constant, or
     /// names one no single-column unique index or alternate key covers.
     /// </exception>
-    /// <exception cref="NotSupportedException">Only a composite unique index or alternate key covers it.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Only a composite unique index or alternate key covers it, or its value converter stores null as a value.
+    /// </exception>
     internal static IProperty ResolveUniqueColumn(
         IEntityType entityType,
         LambdaExpression selector,
@@ -133,6 +143,16 @@ internal static class ModelSources
         }
 
         var column = $"{entityType.DisplayName()}.{property.Name}";
+        if (IsSingleColumnUnique(property))
+        {
+            throw new NotSupportedException(
+                $"{column}'s value converter stores null as a value, so a row whose {property.Name} is null holds a "
+                    + "value a read by that value finds, and a save can't tell readers of it. Reading one row by such a "
+                    + $"column isn't supported; query it from read.Db<TContext>(), which depends on every "
+                    + $"{entityType.DisplayName()} row."
+            );
+        }
+
         if (
             property.GetContainingIndexes().Any(index => index.IsUnique)
             || property.GetContainingKeys().Any()
