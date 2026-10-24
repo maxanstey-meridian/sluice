@@ -183,6 +183,11 @@ public sealed class Circle : Shape
     public int Radius { get; set; }
 }
 
+public sealed class Square : Shape
+{
+    public int Side { get; set; }
+}
+
 /// <summary>
 /// Owns an address (which owns a contact in turn), stored in the parcel's own row but tracked as entries of their own,
 /// stops, stored in a table of their own, and a label, stored as a JSON column.
@@ -610,6 +615,36 @@ public sealed class Perch
     public Song? Song { get; set; }
 }
 
+/// <summary>
+/// Shares its table with its door (table splitting): both map the label, only a locker its zone, and only a door its
+/// colour. A door's owner and code are a foreign key and a unique column, which a locker maps as plain columns. Its
+/// door goes with it, deleted by EF when it's loaded and with the row when it isn't. A smart locker is stored in the
+/// same table (table-per-hierarchy).
+/// </summary>
+public class Locker
+{
+    public int Id { get; set; }
+    public string Label { get; set; } = "";
+    public string Zone { get; set; } = "";
+    public int? OwnerId { get; set; }
+    public string? Code { get; set; }
+    public LockerDoor? Door { get; set; }
+}
+
+public sealed class SmartLocker : Locker
+{
+    public string Firmware { get; set; } = "";
+}
+
+public sealed class LockerDoor
+{
+    public int Id { get; set; }
+    public string Label { get; set; } = "";
+    public string Colour { get; set; } = "";
+    public int? OwnerId { get; set; }
+    public string? Code { get; set; }
+}
+
 /// <summary>A tenant scope the context holds as a whole, so a configure sets it with a new one.</summary>
 public readonly record struct TenantScope(int Tenant);
 
@@ -674,6 +709,8 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
     public DbSet<Voucher> Vouchers => Set<Voucher>();
     public DbSet<Kennel> Kennels => Set<Kennel>();
     public DbSet<Pet> Pets => Set<Pet>();
+    public DbSet<Locker> Lockers => Set<Locker>();
+    public DbSet<LockerDoor> LockerDoors => Set<LockerDoor>();
 
     /// <summary>The tenant the query filters of <see cref="Account"/> and <see cref="Issue"/> read.</summary>
     public int TenantId { get; set; }
@@ -775,10 +812,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Form>().HasIndex(f => f.Slug).IsUnique().HasFilter("\"IsLive\"");
         model.Entity<Form>().Property(f => f.Version).IsRowVersion();
         model.Entity<Form>().HasQueryFilter("SoftDelete", form => !form.IsDeleted);
-        model
-            .Entity<Page>()
-            .Property(p => p.Slug)
-            .HasConversion(slug => slug == "" ? null : slug, slug => slug);
+        model.Entity<Page>().Property(p => p.Slug).HasConversion(new EmptyAsNull());
         model.Entity<Shipment>().OwnsMany(s => s.Legs);
         model.Entity<Booking>().HasOne<Customer>().WithMany().HasForeignKey(b => b.CustomerId);
         model.Entity<OrderLine>().HasKey(line => new { line.OrderId, line.LineNumber });
@@ -792,13 +826,13 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model
             .Entity<User>()
             .Property(user => user.Id)
-            .HasConversion(id => id.Value, value => new UserId(value))
+            .HasConversion(new UserIdConverter())
             .ValueGeneratedNever();
         model.Entity<Invoice>().HasKey(invoice => invoice.No);
         model
             .Entity<Invoice>()
             .Property(invoice => invoice.No)
-            .HasConversion(no => no.Value, value => new InvoiceNo(value))
+            .HasConversion(new InvoiceNoConverter())
             .ValueGeneratedNever();
         model.Entity<Price>().HasKey(price => price.Amount);
         model.Entity<Price>().Property(price => price.Amount).HasColumnType("numeric(10,2)");
@@ -808,7 +842,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model
             .Entity<Product>()
             .Property(product => product.Sku)
-            .HasConversion(sku => sku.Value, value => new Sku(value))
+            .HasConversion(new SkuConverter())
             .HasColumnType("citext");
 
         model.Entity<Vehicle>().UseTptMappingStrategy();
@@ -817,6 +851,7 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<Truck>().HasIndex(t => t.Vin).IsUnique();
         model.Entity<Trailer>().HasOne<Truck>().WithMany().HasForeignKey(t => t.TruckId);
         model.Entity<Shape>().UseTpcMappingStrategy();
+        model.Entity<Square>();
         model.Entity<Parcel>().HasOne<Customer>().WithMany().HasForeignKey(p => p.CustomerId);
         model.Entity<Parcel>().OwnsOne(p => p.Address, address => address.OwnsOne(a => a.Contact));
         model.Entity<Parcel>().OwnsMany(p => p.Stops);
@@ -830,45 +865,21 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
             .HasPrincipalKey(warehouse => warehouse.Code);
         model.Entity<Bin>().HasIndex(bin => bin.Label).IsUnique();
         model.Entity<Warehouse>().HasIndex(w => w.Region).IsUnique().HasFilter("\"Region\" <> ''");
-        // EF keeps a converter that converts nulls internal (EF1001), so only an app reaching into it hits this case.
-#pragma warning disable EF1001
-        model
-            .Entity<Warehouse>()
-            .Property(w => w.Region)
-            .HasConversion(
-                new ValueConverter<string?, string>(
-                    region => region ?? "",
-                    region => region == "" ? null : region,
-                    convertsNulls: true
-                )
-            );
+        model.Entity<Warehouse>().Property(w => w.Region).HasConversion(new NullAsEmpty());
         model
             .Entity<Crate>()
             .HasOne<Warehouse>()
             .WithMany()
             .HasForeignKey(crate => crate.ReturnCode)
             .HasPrincipalKey(warehouse => warehouse.Code);
-        model
-            .Entity<Crate>()
-            .Property(crate => crate.ReturnCode)
-            .HasConversion(
-                new ValueConverter<string?, string>(
-                    code => code ?? "",
-                    code => code == "" ? null : code,
-                    convertsNulls: true
-                )
-            );
-#pragma warning restore EF1001
+        model.Entity<Crate>().Property(crate => crate.ReturnCode).HasConversion(new NullAsEmpty());
         model
             .Entity<Bin>()
             .HasOne<Warehouse>()
             .WithMany()
             .HasForeignKey(bin => bin.OverflowCode)
             .HasPrincipalKey(warehouse => warehouse.Code);
-        model
-            .Entity<Bin>()
-            .Property(bin => bin.OverflowCode)
-            .HasConversion(code => code == "" ? null : code, code => code);
+        model.Entity<Bin>().Property(bin => bin.OverflowCode).HasConversion(new EmptyAsNull());
         model
             .Entity<Customer>()
             .HasMany(c => c.Coupons)
@@ -985,6 +996,34 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
                 }
             );
 
+        model.Entity<Locker>().ToTable("Lockers");
+        model.Entity<SmartLocker>();
+        model.Entity<LockerDoor>().ToTable("Lockers");
+        model
+            .Entity<Locker>()
+            .HasOne(locker => locker.Door)
+            .WithOne()
+            .HasForeignKey<LockerDoor>(door => door.Id)
+            .OnDelete(DeleteBehavior.ClientCascade);
+        model
+            .Entity<LockerDoor>()
+            .HasOne<Customer>()
+            .WithMany()
+            .HasForeignKey(door => door.OwnerId);
+        model.Entity<LockerDoor>().HasIndex(door => door.Code).IsUnique();
+        foreach (
+            var shared in new[]
+            {
+                nameof(Locker.Label),
+                nameof(Locker.OwnerId),
+                nameof(Locker.Code),
+            }
+        )
+        {
+            model.Entity<Locker>().Property(shared).HasColumnName(shared);
+            model.Entity<LockerDoor>().Property(shared).HasColumnName(shared);
+        }
+
         model.Entity<Supplier>().ToTable("Suppliers").ToView("supplier_names");
         model.Entity<CustomerTotal>().HasNoKey().ToView("customer_totals");
         model.Entity<Unstored>().ToTable((string?)null);
@@ -997,3 +1036,34 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<LiveBanner>().ToView("live_banners");
     }
 }
+
+[SluiceRoundTrips]
+public sealed class UserIdConverter()
+    : ValueConverter<UserId, int>(id => id.Value, value => new UserId(value));
+
+[SluiceRoundTrips]
+public sealed class InvoiceNoConverter()
+    : ValueConverter<InvoiceNo, int>(no => no.Value, value => new InvoiceNo(value));
+
+[SluiceRoundTrips]
+public sealed class SkuConverter()
+    : ValueConverter<Sku, string>(sku => sku.Value, value => new Sku(value));
+
+/// <summary>Stores an empty value as null; the app never stores an empty one.</summary>
+[SluiceRoundTrips]
+public sealed class EmptyAsNull()
+    : ValueConverter<string?, string?>(value => value == "" ? null : value, value => value);
+
+/// <summary>
+/// Stores null as an empty value, which no row holds otherwise. EF keeps a converter that converts nulls internal
+/// (EF1001), so only an app reaching into it hits this case.
+/// </summary>
+[SluiceRoundTrips]
+#pragma warning disable EF1001
+public sealed class NullAsEmpty()
+    : ValueConverter<string?, string>(
+        value => value ?? "",
+        value => value == "" ? null : value,
+        convertsNulls: true
+    );
+#pragma warning restore EF1001

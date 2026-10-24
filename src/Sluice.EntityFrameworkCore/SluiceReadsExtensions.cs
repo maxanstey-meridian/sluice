@@ -37,14 +37,16 @@ public static class SluiceReadsExtensions
     /// <see cref="Db{TContext}(SluiceReads, Action{TContext})"/> instead.
     /// </remarks>
     /// <typeparam name="TContext">
-    /// The context type, registered as a scoped service (as <c>AddDbContext</c>, <c>AddDbContextFactory</c> and the
-    /// pools all do) and configured with <c>UseSluice</c>.
+    /// The context type, registered as a scoped or transient service (as <c>AddDbContext</c>, <c>AddDbContextFactory</c>
+    /// and the pools all do) and configured with <c>UseSluice</c>. A pooled context is built from the pool's options,
+    /// never leased, so nothing the compute sets reaches a request's lease.
     /// </typeparam>
     /// <param name="read">The compute's reads.</param>
     /// <returns>The same context for every call in one compute.</returns>
     /// <exception cref="InvalidOperationException">
-    /// No <typeparamref name="TContext"/> is registered or it can't be made in the scope, the context isn't configured
-    /// with <c>UseSluice</c>, the compute has already returned, or <paramref name="read"/> is another compute's.
+    /// No <typeparamref name="TContext"/> is registered or it can't be made in the scope, every scope gets the same
+    /// instance (a singleton), the context isn't configured with <c>UseSluice</c> or adds a query expression
+    /// interceptor after it, the compute has already returned, or <paramref name="read"/> is another compute's.
     /// </exception>
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
     public static TContext Db<TContext>(this SluiceReads read)
@@ -65,8 +67,8 @@ public static class SluiceReadsExtensions
     /// (<c>HasQueryFilter(t =&gt; t.TenantId == TenantId)</c>) run on a configured context, where
     /// <see cref="Db{TContext}(SluiceReads)"/>'s throw. Sluice takes on trust that <paramref name="configure"/> sets
     /// every such value, and from the compute's arguments, which the cache key holds: the cached value is served to
-    /// every caller with that key. A value the context's constructor took from a scoped service (the current request's
-    /// tenant) is the first caller's, since the compute runs on that caller's flow; overwrite it here. Filters reading
+    /// every caller with that key. The context, and the scoped services its constructor takes, are made without the
+    /// caller's async state, so a value its constructor took from the current request is no caller's. Filters reading
     /// the state through a method, an unmarked property with a body or an object the context holds (a tenant service)
     /// still throw. To set a scoped service a filter reads through a property marked
     /// <see cref="SluiceContextStateAttribute"/>, use <see cref="Db{TContext}(SluiceReads, Action{TContext, IServiceProvider})"/>.
@@ -97,12 +99,13 @@ public static class SluiceReadsExtensions
     /// the configure can set a scoped service the context reads, such as the tenant
     /// (<c>(db, services) =&gt; services.GetRequiredService&lt;TenantProvider&gt;().Set(tenantId)</c>). On a context
     /// <c>AddDbContext</c> or a scoped factory makes, that's the scope the context was made in, so the service is the one
-    /// it holds; a context leased straight from <c>AddDbContextPool</c> keeps whatever an earlier lease gave it.
+    /// it holds, pooled contexts included. Services it asks for are made without the caller's async state.
     /// </summary>
     /// <remarks>
     /// A query filter may read such a service through a property of the context marked
     /// <see cref="SluiceContextStateAttribute"/>, whose body Sluice takes on trust to read only what this configure
-    /// sets. Unmarked properties with a body, methods, and members of objects the context holds are still refused.
+    /// sets, except that a body reading the caller's async state is refused. Unmarked properties with a body, methods,
+    /// and members of objects the context holds are still refused.
     /// </remarks>
     /// <typeparam name="TContext">
     /// The context type, registered and configured as for <see cref="Db{TContext}(SluiceReads)"/>.

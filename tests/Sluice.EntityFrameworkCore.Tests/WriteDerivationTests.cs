@@ -1,6 +1,7 @@
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.Extensions.DependencyInjection;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
@@ -1275,6 +1276,413 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         (await adaRead.WasEvicted()).Should().BeTrue("the edit was detected and saved");
     }
 
+    // With cascade timing OnSaveChanges, EF sets the dependent's key to null while it saves, after every SavingChanges
+    // interceptor, and leaves orphans alone.
+    [Fact]
+    public async Task With_cascades_on_save_and_orphan_deletion_off_deleting_a_principal_evicts_readers_of_a_dependent_EF_sets_to_null()
+    {
+        var ada = await AddCustomer("Ada");
+        var rex = new Dog { Name = "Rex", OwnerId = ada.Id };
+        _db.Dogs.Add(rex);
+        await _db.SaveChangesAsync();
+        var rexRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().Animals, rex.Id).SingleAsync(ct)
+        );
+        _db.ChangeTracker.CascadeDeleteTiming = CascadeTiming.OnSaveChanges;
+        _db.ChangeTracker.DeleteOrphansTiming = CascadeTiming.Never;
+
+        _db.Customers.Remove(ada);
+        await _db.SaveChangesAsync();
+
+        (await _reader.Dogs.Where(d => d.Id == rex.Id).Select(d => d.OwnerId).SingleAsync())
+            .Should()
+            .BeNull("EF set the dog's owner to null as it saved");
+        (await rexRead.WasEvicted()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task With_orphan_deletion_on_save_and_cascades_off_an_orphan_EF_deletes_evicts_what_its_delete_cascades_into()
+    {
+        var ada = await AddCustomer("Ada");
+        var tea = await AddOrder(ada, "Tea");
+        _reader.OrderLines.Add(new OrderLine { OrderId = tea.Id, LineNumber = 1 });
+        await _reader.SaveChangesAsync();
+        var teaLines = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().OrderLines, l => l.OrderId, tea.Id).ToListAsync(ct)
+        );
+        _db.ChangeTracker.CascadeDeleteTiming = CascadeTiming.Never;
+        _db.ChangeTracker.DeleteOrphansTiming = CascadeTiming.OnSaveChanges;
+
+        tea.Customer = null;
+        await _db.SaveChangesAsync();
+
+        (await _reader.Orders.AnyAsync(o => o.Id == tea.Id))
+            .Should()
+            .BeFalse("EF deleted the orphan as it saved");
+        (await teaLines.WasEvicted()).Should().BeTrue("the database deleted its lines with it");
+    }
+
+    // Added after Sluice, so it runs after Sluice's SavingChanges, as a soft-delete or audit interceptor added later
+    // would.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Changes_an_interceptor_after_Sluice_makes_while_saving_are_invalidated(
+        bool sync
+    )
+    {
+        var ada = await AddCustomer("Ada");
+        var bob = await AddCustomer("Bob");
+        var form = new Form { Slug = $"late-{Guid.NewGuid():N}" };
+        _db.Forms.Add(form);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        var next = await _reader.NextCustomerId();
+        var bobRead = await ReadCustomer(bob.Id);
+        var nextRead = await ReadCustomer(next);
+        var forms = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Db<ShopDb>().Forms.ToListAsync(ct)
+        );
+        var late = new ChangeWhileSaving(context =>
+        {
+            var db = (ShopDb)context;
+            db.Customers.Local.Single(c => c.Id == bob.Id).Name = "Bob Babbage";
+            db.Customers.Add(new Customer { Name = "Cy" });
+            foreach (
+                var deleted in db
+                    .ChangeTracker.Entries<Form>()
+                    .Where(e => e.State is EntityState.Deleted)
+            )
+            {
+                deleted.State = EntityState.Modified;
+                deleted.Entity.IsDeleted = true;
+            }
+        });
+        await using var db = _postgres.CreateDb(_node, after: [late]);
+        await db.Customers.Where(c => c.Id == bob.Id).LoadAsync();
+        db.Forms.Remove(await db.Forms.SingleAsync(f => f.Id == form.Id));
+
+        _ = sync ? db.SaveChanges() : await db.SaveChangesAsync();
+
+        (await _reader.NameOf(bob.Id)).Should().Be("Bob Babbage");
+        (await _reader.Forms.IgnoreQueryFilters().SingleAsync(f => f.Id == form.Id))
+            .IsDeleted.Should()
+            .BeTrue("the interceptor turned the delete into a soft delete");
+        (await bobRead.WasEvicted()).Should().BeTrue("the interceptor renamed Bob");
+        (await nextRead.WasEvicted()).Should().BeTrue("the interceptor added a customer");
+        (await forms.WasEvicted()).Should().BeTrue("the form was soft-deleted");
+    }
+
+    [Fact]
+    public async Task A_save_with_nothing_to_write_evicts_nothing()
+    {
+        var ada = await AddCustomer("Ada");
+        var adaRead = await ReadCustomer(ada.Id);
+        var undo = new ChangeWhileSaving(context =>
+        {
+            foreach (var entry in context.ChangeTracker.Entries().ToList())
+            {
+                entry.State = EntityState.Detached;
+            }
+        });
+        await using var db = _postgres.CreateDb(_node, after: [undo]);
+
+        (await db.Customers.SingleAsync(c => c.Id == ada.Id)).Name = "Ada Lovelace";
+        (await db.SaveChangesAsync()).Should().Be(0);
+
+        (await _reader.NameOf(ada.Id)).Should().Be("Ada");
+        (await adaRead.WasEvicted()).Should().BeFalse("EF wrote nothing");
+    }
+
+    private static readonly Query<int, int> _saveInCompute = new("ef-save-in-compute");
+
+    // Sluice's reads interceptor refuses the save's first command, before the write interceptor captures it.
+    [Fact]
+    public async Task A_save_refused_inside_a_compute_evicts_nothing()
+    {
+        var ada = await AddCustomer("Ada");
+        var adaRead = await ReadCustomer(ada.Id);
+
+        var save = () =>
+            _node
+                .Cache.GetOrSetAsync(
+                    _saveInCompute,
+                    ada.Id,
+                    async (read, ct) =>
+                    {
+                        var db = read.Db<ShopDb>();
+                        db
+                            .Customers.Attach(new Customer { Id = ada.Id, Name = "Ada" })
+                            .Entity.Name = "Inside";
+                        return await db.SaveChangesAsync(ct);
+                    }
+                )
+                .AsTask();
+
+        await save.Should().ThrowAsync<InvalidOperationException>();
+        (await _reader.NameOf(ada.Id)).Should().Be("Ada");
+        (await adaRead.WasEvicted()).Should().BeFalse("the refused save wrote nothing");
+    }
+
+    // Table splitting: a locker and its door are one row of one table, and a smart locker is a locker in it too.
+    private async Task<Locker> AddLocker(Customer owner, bool smart = false)
+    {
+        var code = $"door-{Guid.NewGuid():N}";
+        var locker = smart ? new SmartLocker { Firmware = "1.0" } : new Locker();
+        locker.Label = "L1";
+        locker.Zone = "A";
+        locker.OwnerId = owner.Id;
+        locker.Code = code;
+        locker.Door = new()
+        {
+            Label = "L1",
+            Colour = "red",
+            OwnerId = owner.Id,
+            Code = code,
+        };
+        _db.Lockers.Add(locker);
+        await _db.SaveChangesAsync();
+        return locker;
+    }
+
+    private async Task<DoorReads> ReadDoor(int id, int ownerId, string code) =>
+        new(
+            await CachedRead.Of(
+                _node.Cache,
+                (read, ct) =>
+                    read.Entity(read.Db<ShopDb>().LockerDoors, id).SingleOrDefaultAsync(ct)
+            ),
+            await DoorsOf(ownerId),
+            await DoorBy(code)
+        );
+
+    private Task<CachedRead> DoorsOf(int ownerId) =>
+        CachedRead.Of(
+            _node.Cache,
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().LockerDoors, d => d.OwnerId, ownerId)
+                    .ToListAsync(ct)
+        );
+
+    private Task<CachedRead> DoorBy(string code) =>
+        CachedRead.Of(
+            _node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().LockerDoors, d => d.Code, code)
+                    .SingleOrDefaultAsync(ct)
+        );
+
+    private sealed record DoorReads(CachedRead Row, CachedRead OwnersDoors, CachedRead ByCode);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Saving_one_of_two_types_splitting_a_table_evicts_the_other_s_readers_of_that_row_when_they_share_a_column(
+        bool smart
+    )
+    {
+        var ada = await AddCustomer("Ada");
+        var locker = await AddLocker(ada, smart);
+        var other = await AddLocker(ada);
+        var lockerRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().Lockers, locker.Id).SingleAsync(ct)
+        );
+        var doorRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().LockerDoors, locker.Id).SingleAsync(ct)
+        );
+        var otherLockerRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().Lockers, other.Id).SingleAsync(ct)
+        );
+        var otherDoorRead = await CachedRead.Of(
+            _node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopDb>().LockerDoors, other.Id).SingleAsync(ct)
+        );
+
+        locker.Label = "L2";
+        await _db.SaveChangesAsync();
+        (await doorRead.WasEvicted()).Should().BeTrue("the locker's save changed the door's label");
+        (await otherDoorRead.WasEvicted()).Should().BeFalse("it's another row");
+
+        locker.Door!.Label = "L3";
+        await _db.SaveChangesAsync();
+        (await _reader.Lockers.Where(l => l.Id == locker.Id).Select(l => l.Label).SingleAsync())
+            .Should()
+            .Be("L3");
+        (await lockerRead.WasEvicted())
+            .Should()
+            .BeTrue("the door's save changed the locker's label");
+        (await otherLockerRead.WasEvicted()).Should().BeFalse("it's another row");
+    }
+
+    // One row, one source: the door's readers of the row, and by a code it holds, are evicted by any write to the row.
+    [Fact]
+    public async Task Saving_a_column_only_one_split_type_maps_evicts_no_foreign_key_or_unique_column_reader_of_the_other()
+    {
+        var ada = await AddCustomer("Ada");
+        var locker = await AddLocker(ada);
+        var door = await ReadDoor(locker.Id, ada.Id, locker.Code!);
+        var byUnusedCode = await DoorBy($"door-{Guid.NewGuid():N}");
+
+        locker.Zone = "B";
+        await _db.SaveChangesAsync();
+
+        (await door.Row.WasEvicted()).Should().BeTrue("the row changed, and both types read it");
+        (await door.ByCode.WasEvicted()).Should().BeTrue("it found the row, which changed");
+        (await door.OwnersDoors.WasEvicted()).Should().BeFalse("the door's owner didn't change");
+        (await byUnusedCode.WasEvicted()).Should().BeFalse("no door's code changed");
+    }
+
+    [Fact]
+    public async Task Deleting_a_split_row_evicts_readers_of_every_type_sharing_it()
+    {
+        var ada = await AddCustomer("Ada");
+        var locker = await AddLocker(ada);
+        _db.ChangeTracker.Clear();
+        var door = await ReadDoor(locker.Id, ada.Id, locker.Code!);
+
+        // Loaded without its door, so EF deletes the row as the locker's, and nothing of the door's.
+        _db.Lockers.Remove(await _db.Lockers.SingleAsync(l => l.Id == locker.Id));
+        await _db.SaveChangesAsync();
+
+        (await _reader.LockerDoors.AnyAsync(d => d.Id == locker.Id)).Should().BeFalse();
+        (await door.Row.WasEvicted()).Should().BeTrue();
+        (await door.OwnersDoors.WasEvicted()).Should().BeTrue("the door left its owner's list");
+        (await door.ByCode.WasEvicted()).Should().BeTrue("the door's code went with it");
+        (
+            await CachedRead.IsEvictedBy(
+                (read, ct) =>
+                    read.Children(read.Db<ShopDb>().LockerDoors, d => d.OwnerId, ada.Id)
+                        .ToListAsync(ct),
+                _db.Lockers.AllDependencies()
+            )
+        )
+            .Should()
+            .BeTrue("a locker's AllDependencies covers its door, whose rows a delete deletes too");
+    }
+
+    // A locker maps the door's owner and code as plain columns, so its save changes the door's foreign key and unique
+    // column, whose values before are unknown: the door isn't loaded.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_foreign_key_or_unique_column_in_a_shared_column_evicts_every_reader_of_it_when_the_other_type_saves(
+        bool smart
+    )
+    {
+        var ada = await AddCustomer("Ada");
+        var bob = await AddCustomer("Bob");
+        var locker = await AddLocker(ada, smart);
+        var code = locker.Code!;
+        var newCode = $"door-{Guid.NewGuid():N}";
+        _db.ChangeTracker.Clear();
+        var door = await ReadDoor(locker.Id, ada.Id, code);
+        var bobsDoors = await DoorsOf(bob.Id);
+        var byNewCode = await DoorBy(newCode);
+        var loaded = await _db.Lockers.SingleAsync(l => l.Id == locker.Id);
+
+        loaded.OwnerId = bob.Id;
+        loaded.Code = newCode;
+        await _db.SaveChangesAsync();
+
+        (
+            await _reader
+                .LockerDoors.Where(d => d.Id == locker.Id)
+                .Select(d => d.OwnerId)
+                .SingleAsync()
+        )
+            .Should()
+            .Be(bob.Id);
+        (await door.OwnersDoors.WasEvicted()).Should().BeTrue("the door left Ada");
+        (await bobsDoors.WasEvicted()).Should().BeTrue("the door joined Bob");
+        (await door.ByCode.WasEvicted()).Should().BeTrue("the door left its code");
+        (await byNewCode.WasEvicted()).Should().BeTrue("the door took the new code");
+    }
+
+    // Sources are named after tables, so another context's class over the same tables, keyed by the same columns,
+    // reads the same sources: neither context's writes go unseen by the other's readers.
+    [Fact]
+    public async Task Two_classes_mapped_to_one_table_in_two_contexts_evict_each_other()
+    {
+        await using var node = new SluiceNode(services: services =>
+            services.AddDbContextFactory<ShopView>(
+                (provider, options) =>
+                    options.UseNpgsql(_postgres.ConnectionString).UseSluice(provider)
+            )
+        );
+        await using var shop = _postgres.CreateDb(node);
+        await using var view = new ShopView(
+            new DbContextOptionsBuilder<ShopView>()
+                .UseNpgsql(_postgres.ConnectionString)
+                .UseSluice(node.Services)
+                .Options
+        );
+        var (ada, bob) = await shop.AddCustomers();
+        var newSlug = $"view-{Guid.NewGuid():N}";
+        var viewAda = await CachedRead.Of(
+            node.Cache,
+            (read, ct) => read.Entity(read.Db<ShopView>().Customers, ada).SingleAsync(ct)
+        );
+        var viewCustomers = await CachedRead.Of(
+            node.Cache,
+            (read, ct) => read.Db<ShopView>().Customers.ToListAsync(ct)
+        );
+        var viewAdaOrders = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Children(read.Db<ShopView>().Orders, o => o.CustomerId, ada).ToListAsync(ct)
+        );
+        var viewByNewSlug = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopView>().Pages, p => p.Slug, newSlug)
+                    .SingleOrDefaultAsync(ct)
+        );
+        var shopBob = await CachedRead.Customer(node.Cache, bob);
+        var shopBobOrders = await CachedRead.OrdersOf(node.Cache, bob);
+
+        await shop.Rename(ada, "Ada Lovelace");
+        (await viewAda.WasEvicted()).Should().BeTrue("by key");
+        (await viewCustomers.WasEvicted()).Should().BeTrue("by the whole table");
+        shop.Orders.Add(new Order { CustomerId = ada, Item = "Tea" });
+        shop.Pages.Add(new Page { Slug = newSlug, Section = $"view-{Guid.NewGuid():N}" });
+        await shop.SaveChangesAsync();
+        (await viewAdaOrders.WasEvicted()).Should().BeTrue("by the foreign key's column");
+        (await viewByNewSlug.WasEvicted()).Should().BeTrue("by the unique column");
+
+        (await view.Customers.SingleAsync(c => c.Id == bob)).Name = "Bob Babbage";
+        view.Orders.Add(new OrderView { CustomerId = bob, Item = "Cake" });
+        await view.SaveChangesAsync();
+        (await shopBob.WasEvicted()).Should().BeTrue("the other way, by key");
+        (await shopBobOrders.WasEvicted()).Should().BeTrue("the other way, by the foreign key");
+    }
+
+    // An abstract TPC root has no table, so its source is named for its concrete types' tables.
+    private static readonly Source<int> _shapes = new("Circles+Square");
+
+    [Fact]
+    public async Task A_TPC_hierarchy_with_an_abstract_root_is_named_for_its_concrete_types_tables()
+    {
+        var circle = new Circle { Radius = 1 };
+        _db.Circles.Add(circle);
+        await _db.SaveChangesAsync();
+
+        (
+            await CachedRead.IsEvictedBy(
+                (read, ct) => read.Entity(read.Db<ShopDb>().Shapes, circle.Id).SingleAsync(ct),
+                _shapes.For(circle.Id)
+            )
+        )
+            .Should()
+            .BeTrue();
+    }
+
     // A token in one table doesn't guard the columns of another: a table-per-type row is split across two.
     [Fact]
     public void Only_a_row_stored_in_one_table_with_a_token_the_database_changes_on_every_write_has_a_row_version()
@@ -1292,6 +1700,46 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         HasRowVersion(_db, typeof(Shipment)).Should().BeTrue();
         HasRowVersion(_db, typeof(Booking)).Should().BeFalse("only the app changes its token");
         HasRowVersion(_db, typeof(Order)).Should().BeFalse("it has no token");
+    }
+
+    // Another context's classes over ShopDb's tables, as a read model would map them.
+    private sealed class CustomerView
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = "";
+    }
+
+    private sealed class OrderView
+    {
+        public int Id { get; set; }
+        public int CustomerId { get; set; }
+        public string Item { get; set; } = "";
+    }
+
+    private sealed class PageView
+    {
+        public int Id { get; set; }
+        public string? Slug { get; set; }
+    }
+
+    private sealed class ShopView(DbContextOptions<ShopView> options) : DbContext(options)
+    {
+        public DbSet<CustomerView> Customers => Set<CustomerView>();
+        public DbSet<OrderView> Orders => Set<OrderView>();
+        public DbSet<PageView> Pages => Set<PageView>();
+
+        protected override void OnModelCreating(ModelBuilder model)
+        {
+            model.Entity<CustomerView>().ToTable("Customers");
+            model.Entity<OrderView>().ToTable("Orders");
+            model
+                .Entity<OrderView>()
+                .HasOne<CustomerView>()
+                .WithMany()
+                .HasForeignKey(order => order.CustomerId);
+            model.Entity<PageView>().ToTable("Pages");
+            model.Entity<PageView>().HasIndex(page => page.Slug).IsUnique();
+        }
     }
 
     private class Vessel

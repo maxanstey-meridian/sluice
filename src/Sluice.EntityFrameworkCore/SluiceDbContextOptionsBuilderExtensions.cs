@@ -13,19 +13,21 @@ public static class SluiceDbContextOptionsBuilderExtensions
     /// </summary>
     /// <param name="builder">The context's options.</param>
     /// <param name="services">
-    /// The application's services, holding <see cref="SluiceCache"/> (<c>AddSluice</c>) and logging: a failure to
+    /// The application's services, holding <see cref="SluiceCache"/> (<c>AddSluice</c> and
+    /// <c>AddSluiceEntityFrameworkCore</c>) and logging: a failure to
     /// invalidate after a commit is logged rather than thrown.
     /// </param>
     /// <returns><paramref name="builder"/>, for chaining.</returns>
     /// <remarks>
-    /// Call it after any interceptor that changes entities in <c>SavingChanges</c>, since Sluice records what a save
-    /// writes in its own. Relational providers only; a context using <c>UseInternalServiceProvider</c> can't use it.
+    /// Sluice records what a save writes when EF initialises its first command, after every <c>SavingChanges</c>
+    /// interceptor, so the order of save interceptors doesn't matter. Relational providers only; a context using
+    /// <c>UseInternalServiceProvider</c> can't use it.
     /// What a save invalidates, and when: <see href="https://maxanstey-meridian.github.io/sluice/guides/ef-core">EF
     /// Core</see> and <see href="https://maxanstey-meridian.github.io/sluice/guides/transactions">Transactions</see>.
     /// </remarks>
     /// <exception cref="InvalidOperationException">
-    /// <paramref name="services"/> has no <see cref="SluiceCache"/> or no logging, or resolving the cache fails its
-    /// lifetime check.
+    /// <paramref name="services"/> has no <see cref="SluiceCache"/> (<c>AddSluice</c>), wasn't given
+    /// <c>AddSluiceEntityFrameworkCore</c>, or has no logging, or resolving the cache fails its checks.
     /// </exception>
     public static DbContextOptionsBuilder UseSluice(
         this DbContextOptionsBuilder builder,
@@ -43,7 +45,9 @@ public static class SluiceDbContextOptionsBuilderExtensions
             return builder;
         }
 
-        return builder.AddInterceptors(SluiceInterceptor.For(services), TrackedReads.Instance);
+        // The reads interceptor first: a command it refuses inside a compute (a save, say) throws before the write
+        // interceptor captures it, so a write that never ran publishes nothing.
+        return builder.AddInterceptors(TrackedReads.Instance, SluiceInterceptor.For(services));
     }
 
     /// <inheritdoc cref="UseSluice(DbContextOptionsBuilder, IServiceProvider)"/>

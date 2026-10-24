@@ -6,7 +6,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 var connectionString = $"Data Source={Path.Combine(AppContext.BaseDirectory, "playground.db")}";
 
-builder.Services.AddSluice();
+builder.Services.AddSluice().AddSluiceEntityFrameworkCore();
 
 // The factory also registers AppDb itself, scoped: DashboardActions' writes use it, and each compute takes its own
 // from a scope of its own.

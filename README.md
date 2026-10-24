@@ -153,12 +153,14 @@ it: then no write can forget it.
 ## With EF Core
 
 ```csharp
+builder.Services.AddSluiceEntityFrameworkCore(); // beside AddSluice
 builder.Services.AddDbContextFactory<AppDb>(
     (services, options) => options.UseSqlite(connectionString).UseSluice(services)
 );
 ```
 
-`UseSluice` connects the context to Sluice. Register it however you like (`AddDbContext`,
+`AddSluiceEntityFrameworkCore` registers the EF package, and `UseSluice` connects the context
+to Sluice; `UseSluice` throws without the first. Register the context however you like (`AddDbContext`,
 `AddDbContextFactory` or a pool): each compute takes an `AppDb` of its own from a DI scope it
 opens for itself.
 
@@ -168,10 +170,10 @@ Inside a compute, `read.Db<AppDb>()` gives you that context. Query it as you wou
 filters, projections, `Include`, navigations, joins, subqueries, many-to-many, `Find`, compiled
 queries. Sluice records every entity type each query reads, and a write to any of them evicts
 the value. The compute's context is fresh, tracks nothing by default, and isn't in your request's
-transaction, so it reads what's committed and nothing else. An entity type is a class in your
-EF model, not a table: a second class mapped to the same table, such as a read model in
-another context, isn't linked to it, so a write through one doesn't evict reads through the
-other. See [Limitations](https://maxanstey-meridian.github.io/sluice/misc/limitations#ef-core).
+transaction, so it reads what's committed and nothing else. Dependencies are named after the
+tables a type is stored in, so a second class mapped to the same table, such as a read model in
+another context, is linked to the first: a write through either evicts reads through the other.
+See [What a query records](https://maxanstey-meridian.github.io/sluice/guides/ef-core#what-a-query-records).
 
 A plain query depends on every row of each type it reads: renaming any user evicts every
 dashboard that read users. Sluice logs each cached query that does this the first time it runs,
@@ -191,8 +193,24 @@ var page = await read.Entity(computeDb.Pages, p => p.Slug, slug).SingleOrDefault
 `read.Entity` depends on one row, so renaming Bob leaves Alice's dashboard cached.
 `read.Children` depends on the rows under one parent. Both return a query you can filter and
 project. Keys are your model's own types: the playground maps `UserId` with a value converter,
-so `read.Entity(computeDb.Users, userId)` takes a `UserId`. A compute can also leave its value
-uncached with `read.DoNotCache()`, for a miss on a key from public input.
+so `read.Entity(computeDb.Users, userId)` takes a `UserId`. A converter on a key, foreign key or
+unique column must give back exactly the value it loaded, so Sluice asks you to say so on its
+class, and refuses the model otherwise:
+
+```csharp
+user.Property(u => u.Id).HasConversion(new UserIdConverter());
+
+[SluiceRoundTrips]
+public sealed class UserIdConverter()
+    : ValueConverter<UserId, string>(id => id.Value, value => new UserId(value));
+```
+
+EF's own lossless converters (enum to number, widening numeric casts, `DateTime` to ticks, `Guid`
+to bytes) need no mark; see
+[Key folding](https://maxanstey-meridian.github.io/sluice/guides/ef-core#key-folding).
+
+A compute can also leave its value uncached with `read.DoNotCache()`, for a miss on a key from
+public input.
 
 ### Writing
 

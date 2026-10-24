@@ -4,7 +4,9 @@
 
 Two gaps found in the Casebridge pilot: a conditional `ExecuteUpdate` of one form evicted every
 cached read of forms in every council, and a cached read inside a request's own transaction returned
-data older than the request's own write.
+data older than the request's own write. Then every limit the docs listed that Sluice could
+close: what's left in [Limitations](https://maxanstey-meridian.github.io/sluice/misc/limitations)
+is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
 
 - **Breaking: a cached read of your own uncommitted writes throws.** Inside a transaction that
   has saved writes it hasn't committed, a cached read that depends on them throws
@@ -14,10 +16,10 @@ data older than the request's own write.
   While such writes are pending, every cached read on the flow computes fresh, stores nothing and
   skips FusionCache entirely, so a cached value can't slip past the check and other callers never
   wait on it; a read that doesn't depend on the writes gets the fresh value. A `TransactionScope`
-  is checked by itself. An EF transaction is checked only on a flow that called
-  `SluiceFlow.Begin()` before it began, below, and a transaction joined with
-  `Database.EnlistTransaction` (no scope) only on one that called it before saving in it. Saves
-  without a transaction of yours have committed by the time they return, and never count.
+  is checked by itself. An EF transaction, and one joined with `Database.EnlistTransaction` (no
+  scope), is checked on a flow that called `SluiceFlow.Begin()`, below: from when it begins or
+  is joined, or, for one the flow was already in, from its first write in it after the call. Saves without a
+  transaction of yours have committed by the time they return, and never count.
 - **New: `SluiceFlow.Begin()`.** `using var _ = SluiceFlow.Begin();` once per entry point (HTTP
   middleware, the message pipeline) lets Sluice see the EF transactions the flow opens, however
   deep. A nested call does nothing. Without it, EF transactions aren't checked, which costs
@@ -37,7 +39,7 @@ data older than the request's own write.
   runs. Sluice doesn't recognise a key condition in your own `Where`: move `f.Id == id` into
   `ForKey`, rather than keep it in both, which, for an update, names the key column twice and
   evicts whole.
-- **Changed: a read by a unique column records the row it found.** `read.Entity(set, column,
+- **Breaking: a read by a unique column runs one more query, and records the row it found.** `read.Entity(set, column,
   value)` runs one more query once the compute returns, an indexed lookup of the keys of the rows
   holding the value, ignoring query filters, and records each by its key (the whole type past
   100 rows). That's one more round trip per cache miss; hits are unchanged. If the lookup fails,
@@ -46,14 +48,127 @@ data older than the request's own write.
 - **Changed: `set.Dependency(key)` evicts readers by a unique column that found that row,** and
   so does a keyed bulk write. A cached "not found" by a unique column still needs
   `AllDependencies()` after a write Sluice can't see.
+- **Breaking: an app using the EF Core package calls `services.AddSluiceEntityFrameworkCore()`;
+  `UseSluice` throws without it.** Call it where you call `AddSluice`; a second call does nothing. It starts Sluice's watch for
+  contexts without `UseSluice` inside a compute (below) when the app registers its services, so
+  the check covers the very first compute, not only those after the first `UseSluice` context
+  was configured.
+- **Breaking: EF dependencies are named after tables, not classes.** An entity type's
+  dependencies are named after its root's table (`Customers`, or `sales.Customers` with a
+  schema), a foreign key's after its columns (`Orders[CustomerId]`), and a unique column's after
+  its column (`Pages(Slug)`); error messages show these names. So a second class mapped to the
+  same table, such as a read model in another context, now evicts and is evicted by the first,
+  and moving or renaming a class changes nothing. Two types splitting one table share its
+  dependencies, so they evict each other's readers of a row. Classes link only when their key
+  columns and schema spelling match. Every EF dependency name changes, so see Upgrading.
+- **Breaking: converters on keys, foreign keys and unique columns need `[SluiceRoundTrips]`.**
+  A save invalidates by the value it would write back for what EF loaded, so a converter that
+  loads one stored value and writes back another (`"01"` loaded as 1 and written as `"1"`) left
+  the readers of the stored value stale. Sluice now refuses the model, the first time it uses
+  it, with `InvalidOperationException` naming each such property, unless the converter's class
+  is marked `[SluiceRoundTrips]` (your promise that it round-trips) or is one of EF's lossless
+  built-ins: `EnumToNumberConverter`, a widening `CastingConverter`, `DateTimeToTicksConverter`
+  and `GuidToBytesConverter`. Every typed-id converter needs the mark, and one written as
+  `HasConversion(id => id.Value, value => new UserId(value))` moves into a class deriving from
+  `ValueConverter<TModel, TProvider>` first. Enum-to-string and the other string-parsing
+  built-ins need it too, since they accept more than one spelling of a value.
+- **Breaking: a context without `UseSluice` throws inside a compute.** Its commands used to go
+  unseen, so a compute that read through one cached a value nothing evicted. Sluice now watches
+  EF's diagnostic events for every context, and inside a compute such a command throws before
+  it runs: a write anywhere, a read outside a fused fetch. Add `UseSluice` to its options and
+  query it through `read.Db`, or read it in a fused fetch.
+- **Breaking: a compute's context and its services are made without the caller's request.**
+  They were made on the first caller's async flow, so a tenant provider over
+  `IHttpContextAccessor` read that caller's tenant. Now the context, its constructor's scoped
+  services and those the configure resolves are made without the caller's async state, so a
+  scoped service whose constructor requires the HTTP request fails inside a compute. A property
+  marked `[SluiceContextState]` is now checked too: each query reads it on the compute's flow
+  and again without the caller's async state, and two different values (or a throw without
+  the request) throw `InvalidOperationException`, rather than cache one caller's rows for
+  everyone. Set that state in the configure, from the key.
+- **Breaking: a query expression interceptor after `UseSluice` is refused.** One added later in
+  the options, or in `OnConfiguring`, rewrote queries after Sluice had worked out what they
+  read. `read.Db` and the read helpers now throw `InvalidOperationException` naming it; add it
+  before `UseSluice`.
+- **Breaking: a cached value holding a lazy loader or a context is refused.** A lazily loading
+  entity wrapped in your own type (a DTO holding it) slipped past the check on a query's result
+  type. Once a model with such entities has been seen, every value is checked before it's
+  stored, and one holding a lazy loader or a `DbContext` throws, naming the query and where in
+  the value it is. Nothing is cached.
+- **Breaking: a context registered as a singleton is refused.** `read.Db` checks, once per
+  context type, that two DI scopes get different instances, and throws before the compute's
+  first query if not, since every compute and request would share it.
+- **Breaking: redeclaring a query or source with another `format` throws.** One key got
+  different text in each, which split or mixed a query's entries, and made a write through one
+  source miss the other's readers. Source names are now checked as query names are: another key
+  type or another format throws `ArgumentException`. Formats are compared by the method they
+  compile to, so two lambdas written separately differ even with the same text; declare once
+  and share the declaration.
+- **Breaking: a FusionCache tag prefix or clear tag that collides with Sluice's is refused.**
+  Resolving `SluiceCache` throws `InvalidOperationException` when `InternalStrings`'
+  `TagCacheKeyPrefix` doesn't start with `__fc`, which let a query's entry be taken for a tag's
+  marker and never invalidated, or when `ClearRemoveTag` or `ClearExpireTag` has a `:` with a
+  name before it, which a dependency's tag could equal. `SetToSafeStrings()` with its defaults
+  is fine.
+- **Breaking: `SluiceCache` is `IAsyncDisposable` and `IDisposable`.** Every invalidation and
+  clear is now published again 5 s later (below), and disposing the cache, which the service
+  provider does at shutdown, publishes whatever is still waiting at once and waits for it. A
+  provider disposed synchronously calls `Dispose()`, which blocks until those writes finish.
+- **Fixed: a FusionCache 2.9 race could lose an invalidation on one server.** A tag check
+  running at the same moment could overwrite it, and that server served the old values until
+  they expired (FusionCache#659). Sluice now publishes every invalidation and clear again 5 s
+  later, timed by the `TimeProvider` registered in DI, which restores it unless a Redis lookup
+  on that server takes longer. A value cached in those 5 s is computed once more.
+- **Changed: interceptor order no longer matters for saves.** Sluice reads what a save writes
+  when EF initialises its first command, after every `SavingChanges` interceptor (soft delete,
+  auditing), EF's change detection and its cascades, instead of in its own `SavingChanges`.
+  Changes an interceptor after `UseSluice` made used to be missed. The tracker is read once per
+  save, and Sluice never detects changes itself. A save that reports rows written but ran no
+  command Sluice saw logs an `Error` (event 6). `UseSluice` adds its reads interceptor first,
+  so a save refused inside a compute invalidates nothing.
+- **Fixed: client cascades with mismatched cascade timings.** With `CascadeDeleteTiming` and
+  `DeleteOrphansTiming` set differently, a row EF deleted or set to null through
+  `ClientCascade` or `ClientSetNull` during the save wasn't captured: its readers by key and by
+  unique column, and for a delete what it cascades into, kept the old values. It is now.
+- **Fixed: a `TransactionScope` without `TransactionScopeAsyncFlowOption.Enabled`.** An async
+  save that couldn't see its scope where it completed invalidated before the commit, and a read
+  in between cached the old value for good. Sluice notes the scope when the connection opens or
+  the save's first command runs, and invalidates at once and again when the scope completes,
+  logging a `Warning` (event 5) once. Bulk writes too. Keep using `Enabled`: EF fails a
+  multi-batch save without it.
+- **Fixed: a `DbTransaction` committed or rolled back outside EF.** Its writes were never
+  invalidated, and stayed pending, so the flow's reads of them threw. Sluice now sees that it
+  ended the next time it looks (the flow's next cached read, the context's next save, the
+  connection beginning another transaction or closing) and invalidates then. A transaction
+  disposed without commit or rollback looks the same, so it now invalidates what it wrote, which
+  only evicts more than needed.
+- **Fixed: writes rolled back to a savepoint stayed pending.** A save that failed inside your
+  transaction (EF rolls it back to its own savepoint), a concurrency conflict there, or a
+  rollback to a savepoint of yours left those writes pending, so reads of rows the database had
+  already restored threw. They now stop counting as pending, and are still invalidated when the
+  transaction ends. Savepoints made outside EF (ADO.NET's `Save`) aren't seen; don't mix them
+  with EF's in one transaction.
+- **Fixed: the uncommitted-read check missed transactions begun before `SluiceFlow.Begin()`,**
+  and checked an enlisted transaction only on the first flow to write in it. Every flow that
+  called `Begin()` is now checked from its first write in the transaction. A transaction written in only
+  before `Begin()` still isn't: call it before opening the transaction.
+- **Changed: a compute's context never comes from a pool.** A lease went back with what the
+  compute's configure set (a tenant, a connection string) into a request's next lease, and kept
+  the services an earlier lease gave it. Sluice now builds a pooled registration's context from
+  its options, with its constructor's services from the compute's scope, which costs one context
+  construction per compute.
 - **Upgrading:** entries cached for a read by a unique column before 0.5.0 don't carry the key of
   the row they found, so a keyed write or `set.Dependency(key)` doesn't evict them. With a
   distributed cache, clear it when you deploy 0.5.0, and don't run 0.4.0 and 0.5.0 nodes side by
-  side; an in-memory cache starts empty anyway.
+  side; an in-memory cache starts empty anyway. Every EF dependency is renamed too (now after
+  tables), so an entry an old node cached is never evicted by a new node's write, nor the
+  reverse: with a rolling deploy, call `ClearAsync` once the rollout has finished.
 - **Docs:** how to keep a `[SluiceContextState]` setter safe: one helper on `read` as its only
   caller, held by an architecture test. Limitations gains the refusal of unique columns and
-  foreign keys whose value converter stores null as a value, and the rule that converters on
-  keys, foreign keys and unique columns must round-trip.
+  foreign keys whose value converter stores null as a value, and loses every limit this release
+  closed. A crash between a commit and its invalidation is now described as the deliberate
+  trade-off it is: the entry's duration bounds it, and an app that needs more calls
+  `InvalidateAsync` from its own outbox's handler. Transactions gains "Committing outside EF".
 
 ## 0.4.0
 

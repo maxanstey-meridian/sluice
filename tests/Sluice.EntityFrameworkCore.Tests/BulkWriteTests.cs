@@ -2,6 +2,7 @@ using System.Transactions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using Sluice.EntityFrameworkCore.Tests.Support;
 using ZiggyCreatures.Caching.Fusion;
 using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
@@ -388,6 +389,103 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
 
         (await adaRead.WasEvicted()).Should().BeTrue();
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+    }
+
+    // The statement names the table, so every type stored in it publishes, whatever columns it writes. EF refuses
+    // ExecuteDelete on a type sharing its table.
+    [Fact]
+    public async Task A_bulk_write_to_a_split_table_evicts_every_type_sharing_it()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var ada = new Customer { Name = "Ada" };
+        db.Customers.Add(ada);
+        await db.SaveChangesAsync();
+        var code = $"door-{Guid.NewGuid():N}";
+        var locker = new Locker
+        {
+            Label = "L1",
+            OwnerId = ada.Id,
+            Code = code,
+            Door = new()
+            {
+                Label = "L1",
+                Colour = "red",
+                OwnerId = ada.Id,
+                Code = code,
+            },
+        };
+        db.Lockers.Add(locker);
+        await db.SaveChangesAsync();
+        var door = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().LockerDoors, locker.Id).SingleOrDefaultAsync(ct)
+        );
+        var adasDoors = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Children(read.Db<ShopDb>().LockerDoors, d => d.OwnerId, ada.Id).ToListAsync(ct)
+        );
+        var byCode = await CachedRead.Of(
+            node.Cache,
+            (read, ct) =>
+                read.Entity(read.Db<ShopDb>().LockerDoors, d => d.Code, code)
+                    .SingleOrDefaultAsync(ct)
+        );
+
+        await db
+            .Lockers.Where(l => l.Id == locker.Id)
+            .ExecuteUpdateAsync(set => set.SetProperty(l => l.Zone, "B"));
+
+        (await door.WasEvicted()).Should().BeTrue();
+        (await adasDoors.WasEvicted()).Should().BeTrue();
+        (await byCode.WasEvicted()).Should().BeTrue();
+    }
+
+    // Npgsql enlists the connection where it's opened, on the scope's thread, and the statement completes on another,
+    // which can't see the scope (AmbientTransactionTests has the saves).
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_bulk_write_in_a_TransactionScope_without_async_flow_is_evicted_again_once_the_scope_completes(
+        bool complete
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb(enlist: false);
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        await using var connection = new NpgsqlConnection(
+            $"{postgres.ConnectionString};Application Name=sluice-{Guid.NewGuid():N}"
+        );
+        await using var db = postgres.CreateDb(node, connection: connection);
+        var evictedInScope = false;
+        Task completed = Task.CompletedTask;
+
+        await AmbientTransactionTests.OnAThreadOfItsOwn(() =>
+        {
+            using var scope = new TransactionScope();
+            db.Customers.Where(c => c.Id == ada)
+                .ExecuteUpdateAsync(set => set.SetProperty(c => c.Name, "Ada Lovelace"))
+                .GetAwaiter()
+                .GetResult();
+            completed = Completion.Of(Transaction.Current!);
+            evictedInScope = adaRead.WasEvictedForAnotherCaller().GetAwaiter().GetResult();
+            if (complete)
+            {
+                scope.Complete();
+            }
+        });
+
+        await completed;
+        evictedInScope
+            .Should()
+            .BeTrue("Sluice can't tell the write is in the scope, so it publishes at once");
+        (await reader.NameOf(ada)).Should().Be(complete ? "Ada Lovelace" : "Ada");
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the scope's completion published the write again");
     }
 
     [Theory]

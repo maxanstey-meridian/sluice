@@ -161,6 +161,96 @@ public sealed class FusionCacheConfigurationTests
         await using var node = resolve.Should().NotThrow().Subject;
     }
 
+    // FusionCache keeps a tag's data at "<prefix><tag>" among the entries and skips the tag check of any key under the
+    // prefix: under "t:", query "t" key "x" is tag "x"'s marker. Query names can't start with "__fc", so a prefix that
+    // does keeps every entry key out of it.
+    [Theory]
+    [InlineData("set directly")]
+    [InlineData("SetToSafeStrings with another special character")]
+    [InlineData("blank")]
+    public void Resolving_SluiceCache_fails_when_the_tag_key_prefix_is_outside_the_reserved_prefix(
+        string setup
+    )
+    {
+        var (configure, prefix) = setup switch
+        {
+            "set directly" => (
+                (Action<FusionCacheOptions>)(o => o.InternalStrings.TagCacheKeyPrefix = "t:"),
+                "t:"
+            ),
+            "blank" => (o => o.InternalStrings.TagCacheKeyPrefix = "", ""),
+            _ => (o => o.InternalStrings.SetToSafeStrings(specialChar: '-'), "--fc-t-"),
+        };
+
+        var resolve = () => new SluiceNode(cache => cache.WithOptions(configure));
+
+        resolve
+            .Should()
+            .Throw<InvalidOperationException>()
+            .WithMessage(
+                $"The Sluice cache's InternalStrings.TagCacheKeyPrefix is '{prefix}', which doesn't start with '__fc'*"
+                    + "SetToSafeStrings with '_' as its special character."
+            );
+    }
+
+    [Fact]
+    public async Task Resolving_SluiceCache_succeeds_with_SetToSafeStrings_defaults()
+    {
+        var resolve = () =>
+            new SluiceNode(cache =>
+                cache.WithOptions(o =>
+                {
+                    o.InternalStrings.SetToSafeStrings();
+
+                    // A ':' with nothing before it can't follow a source name.
+                    o.InternalStrings.ClearRemoveTag = ":rem";
+                })
+            );
+
+        await using var node = resolve.Should().NotThrow().Subject;
+        var reader = new CountingReader(node.Cache, _view);
+        await reader.GetAsync("k", _rows.For(1));
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        await node.Cache.ClearAsync();
+        await reader.GetAsync("k", _rows.For(1));
+        reader.Runs("k").Should().Be(2);
+    }
+
+    // Invalidating source "a" key "b" publishes the tag "a:b", which FusionCache would take for a clear on every node.
+    [Theory]
+    [InlineData("ClearRemoveTag", "a:b", "a")]
+    [InlineData("ClearExpireTag", "a:", "a")]
+    [InlineData("ClearRemoveTag", "a:b:*", "a:b")]
+    public void Resolving_SluiceCache_fails_when_a_clear_tag_could_be_a_dependency_tag(
+        string option,
+        string tag,
+        string source
+    )
+    {
+        var resolve = () =>
+            new SluiceNode(cache =>
+                cache.WithOptions(o =>
+                {
+                    if (option == "ClearRemoveTag")
+                    {
+                        o.InternalStrings.ClearRemoveTag = tag;
+                    }
+                    else
+                    {
+                        o.InternalStrings.ClearExpireTag = tag;
+                    }
+                })
+            );
+
+        resolve
+            .Should()
+            .Throw<InvalidOperationException>()
+            .WithMessage(
+                $"The Sluice cache's InternalStrings.{option} is '{tag}', which is also a tag Sluice uses for source "
+                    + $"'{source}', so invalidating that source would clear the cache on every node.*"
+            );
+    }
+
     [Fact]
     public async Task A_query_whose_duration_outlives_the_tag_data_fails_on_first_use()
     {

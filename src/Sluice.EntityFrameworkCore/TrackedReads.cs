@@ -46,6 +46,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     private const string HelperSuffix = " (helper)";
     private const string Separator = "; ";
     private const string DependenciesAnnotation = "Sluice:TagDependencies";
+    private const string MarkedReadsAnnotation = "Sluice:MarkedReads";
 
     // The ignore-by-name remedy for each context-state tag's filters, built by the analysis that wrote the tag, which
     // runs before the query's commands do. A tag this process didn't write (copied by hand) has none.
@@ -68,19 +69,52 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     internal static bool IsOn(IDbContextOptions options) =>
         options.FindExtension<CoreOptionsExtension>()?.Interceptors?.Contains(Instance) == true;
 
+    /// <summary>Whether EF gives the entity type's instances a lazy loader or the context that loads them.</summary>
+    internal static bool HoldsServices(IEntityType entityType) =>
+        Analysis.Holds(entityType) is not null;
+
     /// <summary>
-    /// Refuses a context the checks don't run on: one without <c>UseSluice</c>, or with a provider that isn't
-    /// relational, which runs no commands for <see cref="CommandInitialized"/> to see.
+    /// Refuses a context the checks don't run on: one without <c>UseSluice</c>, one with a query expression interceptor
+    /// that EF runs after the analysis, or one with a provider that isn't relational, which runs no commands for
+    /// <see cref="CommandInitialized"/> to see.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The context wasn't configured with <c>UseSluice</c>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The context wasn't configured with <c>UseSluice</c>, or its options add a query expression interceptor after it.
+    /// </exception>
     /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
     internal static void EnsureOn(DbContext context)
     {
-        if (!IsOn(context.GetService<IDbContextOptions>()))
+        // The options EF built the context with, OnConfiguring's included. EF runs a query expression interceptor
+        // from the context's internal services first, then the options' in their order, OnConfiguring's last.
+        var interceptors =
+            context
+                .GetService<IDbContextOptions>()
+                .FindExtension<CoreOptionsExtension>()
+                ?.Interceptors?.ToList()
+            ?? [];
+        var sluice = interceptors.IndexOf(Instance);
+        if (sluice < 0)
         {
             throw new InvalidOperationException(
                 "Sluice's EF reads need UseSluice on the context: it records what a compute's queries read, and "
                     + "without it they'd record nothing. Add .UseSluice(services) where the context is configured."
+            );
+        }
+
+        var after = interceptors
+            .Skip(sluice + 1)
+            .OfType<IQueryExpressionInterceptor>()
+            .Select(interceptor => interceptor.GetType().Name)
+            .Distinct()
+            .ToList();
+        if (after.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"{context.GetType().Name}'s options add the query expression interceptor "
+                    + $"{string.Join(", ", after)} after UseSluice (later in the options, or in OnConfiguring, which "
+                    + "EF runs after the registration's options), so EF runs it after Sluice has worked out what each "
+                    + "query reads, and a table it adds wouldn't be recorded. Add it before .UseSluice(services), in "
+                    + "the same options."
             );
         }
 
@@ -132,6 +166,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             return queryExpression;
         }
 
+        CachedValues.Watch(context.Model);
         IReadOnlyList<string> tags;
         try
         {
@@ -177,10 +212,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     {
         if (IsWrite(eventData.CommandSource))
         {
-            return new(
-                $"An EF write ran inside a compute ({Statement(command)}). Writes can't run inside a compute, "
-                    + "which is a read: run them before or after GetOrSetAsync."
-            );
+            return WriteInCompute(command);
         }
 
         var context = eventData.Context;
@@ -213,26 +245,34 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             }
 
             // The state is the context's, so it's right for this compute only if the compute set it, from its
-            // arguments: read.Db's configure. Sluice can't check what the configure set, so that is on trust.
-            if (tags.ContextState is { } state && configured == ComputeContext.Unconfigured)
+            // arguments: read.Db's configure. Sluice can't check what the configure set, so that is on trust, but a
+            // marked property's body that reads the caller's async state instead gives it away.
+            if (tags.ContextState is { } state)
             {
-                var name = context.GetType().Name;
-                return new(
-                    $"Sluice can't track an EF query inside a compute ({Statement(command)}): {state}. That state "
-                        + "is whatever the context was made with (its constructor's, from the first caller's request, "
-                        + "or what a pooled context's last user left), not the cache key, and the cached value is "
-                        + "served to every caller with this key. Set it from the cache key when the compute first "
-                        + $"asks for the context, with read.Db<{name}>(db => …), or with "
-                        + $"read.Db<{name}>((db, services) => …) to set a scoped service the state is read from. "
-                        + "Or filter by hand: "
-                        + (
-                            _contextStateRemedies.TryGetValue(state, out var remedy)
-                                ? remedy
-                                : "ignore those filters by name, filter by that value yourself, and put it in the "
-                                    + "cache key"
-                        )
-                        + "."
-                );
+                if (configured == ComputeContext.Unconfigured)
+                {
+                    var name = context.GetType().Name;
+                    return new(
+                        $"Sluice can't track an EF query inside a compute ({Statement(command)}): {state}. That "
+                            + "state is whatever the context was made with (what its constructor set), not the cache "
+                            + "key, and the cached value is served to every caller with this key. Set it from the "
+                            + "cache key when the compute first asks for the context, with "
+                            + $"read.Db<{name}>(db => …), or with read.Db<{name}>((db, services) => …) to set a "
+                            + "scoped service the state is read from. Or filter by hand: "
+                            + (
+                                _contextStateRemedies.TryGetValue(state, out var remedy)
+                                    ? remedy
+                                    : "ignore those filters by name, filter by that value yourself, and put it in "
+                                        + "the cache key"
+                            )
+                            + "."
+                    );
+                }
+
+                if (CallerState(context, state, command) is { } callerState)
+                {
+                    return callerState;
+                }
             }
 
             reads.From(dependencies);
@@ -265,6 +305,12 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         return null;
     }
 
+    internal static InvalidOperationException WriteInCompute(DbCommand command) =>
+        new(
+            $"An EF write ran inside a compute ({Statement(command)}). Writes can't run inside a compute, which is "
+                + "a read: run them before or after GetOrSetAsync."
+        );
+
     // So that reading whole types is a choice, not a surprise: a busy type evicts such a query on every write.
     [LoggerMessage(
         EventId = 2,
@@ -280,6 +326,62 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 + "transaction, and the cached value is served to every caller. Query the context read.Db<TContext>() "
                 + "returns, or run the query in the fetch of read.From(dependency, fetch) with a Source you declare."
         );
+
+    // A [SluiceContextState] property's body reading the caller's async state (IHttpContextAccessor, an AsyncLocal)
+    // reads the caller, not what the configure set: EF reads it on the compute's flow, the first caller's. Each marked
+    // read of the tag's filters is read here on that flow and again without its async state, as the context and the
+    // configure's services were made; a body reading only what they hold gives one value both ways. The getters are
+    // the analysis's, which ran before this query's commands; a tag this process didn't write has none.
+    private static InvalidOperationException? CallerState(
+        DbContext context,
+        string state,
+        DbCommand command
+    )
+    {
+        if (
+            context.Model.FindRuntimeAnnotationValue(MarkedReadsAnnotation)
+                is not ConcurrentDictionary<string, MarkedRead[]> tags
+            || !tags.TryGetValue(state, out var reads)
+        )
+        {
+            return null;
+        }
+
+        foreach (var read in reads)
+        {
+            var onFlow = read.Get(context);
+            string? differs = null;
+            try
+            {
+                if (!Equals(onFlow, CleanFlow.Run(read.Get, context)))
+                {
+                    differs =
+                        "gives a different value with the caller's async state (IHttpContextAccessor, an "
+                        + "AsyncLocal) than without it";
+                }
+            }
+            catch (Exception failure)
+            {
+                differs =
+                    $"throws without the caller's async state ({failure.GetType().Name}: "
+                    + $"{failure.Message.ReplaceLineEndings(" ")})";
+            }
+
+            if (differs is not null)
+            {
+                var name = context.GetType().Name;
+                return new(
+                    $"Sluice can't track an EF query inside a compute ({Statement(command)}): {read.Filter} reads "
+                        + $"[SluiceContextState] {read.Property}, which {differs}, so it reads the caller rather than "
+                        + "what read.Db's configure set, and the cached value is served to every caller with this "
+                        + $"key. Set that state in the configure, from the cache key: read.Db<{name}>(db => …), or "
+                        + "(db, services) => … for a scoped service."
+                );
+            }
+        }
+
+        return null;
+    }
 
     // The whole-type dependencies a reads tag names, built once per model and tag. Null when a name isn't in the
     // model, which only a tag copied by hand can do. The analysis has already refused types not mapped to a table, and
@@ -320,7 +422,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     }
 
     // EF 10 reports ExecuteDelete's command as ExecuteUpdate; ExecuteDelete is listed for when it reports its own.
-    private static bool IsWrite(CommandSource source) =>
+    internal static bool IsWrite(CommandSource source) =>
         source
             is CommandSource.SaveChanges
                 or CommandSource.ExecuteSqlRaw
@@ -381,13 +483,16 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
 
     // The command's first statement line, so the message says which command it was. A LINQ query's captured values go
     // to the database as parameters and don't show, but constants inlined in a query and the text of raw SQL do.
-    private static string Statement(DbCommand command) =>
+    internal static string Statement(DbCommand command) =>
         FirstStatement(command) switch
         {
             null => "an empty command",
             { Length: > 120 } statement => $"{statement[..120]}…",
             var statement => statement,
         };
+
+    /// <summary>A query filter's read of the context's state through a marked property, and how to read it again.</summary>
+    private sealed record MarkedRead(string Filter, string Property, Func<DbContext, object?> Get);
 
     /// <summary>Puts the analysis's tags on the query's first root, where EF collects them like any <c>TagWith</c>.</summary>
     private sealed class Tagging(IReadOnlyList<string> tags) : ExpressionVisitor
@@ -474,6 +579,9 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         // What the query filters read of the context's own state, which the compute must set (read.Db's configure).
         private List<FilterRead>? _contextState;
 
+        // Those of them read through a [SluiceContextState] property, whose body is read on two flows (CallerState).
+        private List<(FilterRead Read, MemberExpression State)>? _marked;
+
         /// <summary>
         /// The tags for the query: what it reads and the context's state its filters read, or why what it reads can't
         /// be known.
@@ -509,9 +617,12 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 {
                     foreach (var state in ContextState.In(node))
                     {
-                        (_contextState ??= []).Add(
-                            new(_filter, _filterName, Describe(state), true)
-                        );
+                        var read = new FilterRead(_filter, _filterName, Describe(state), true);
+                        (_contextState ??= []).Add(read);
+                        if (ThroughMarked(state))
+                        {
+                            (_marked ??= []).Add((read, state));
+                        }
                     }
                 }
 
@@ -600,7 +711,8 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         // change; an overridable property may read through a derived class's body. State reached through a method, a
         // property with a body, or an object the context holds (a tenant service) is the object's, not the compute's,
         // unless the property is marked [SluiceContextState]: the app's promise that its body reads only what the
-        // configure sets, which Sluice takes on trust as it takes the configure (SLUICE-EF-022).
+        // configure sets, which Sluice takes on trust as it takes the configure, and checks only for the caller's
+        // async state (CallerState, SLUICE-EF-022).
         private static bool IsContextState(MemberExpression node) =>
             IsPlain(node.Type)
             && node.Expression switch
@@ -621,6 +733,31 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
             && HasBody(property)
             && (!property.GetMethod!.IsVirtual || property.GetMethod.IsFinal)
             && property.IsDefined(typeof(SluiceContextStateAttribute), false);
+
+        // Whether a read of the context's state starts at a marked property, as in ctx.Marked or ctx.Marked.Field.
+        private static bool ThroughMarked(MemberExpression state)
+        {
+            var first = state;
+            while (first.Expression is MemberExpression inner)
+            {
+                first = inner;
+            }
+
+            return IsMarked(first.Member);
+        }
+
+        // The read as a getter on any context of the model's type: the filter's context is a constant in the tree,
+        // which EF swaps for the running one, as this does.
+        private static Func<DbContext, object?> Getter(MemberExpression state)
+        {
+            var context = Expression.Parameter(typeof(DbContext), "context");
+            return Expression
+                .Lambda<Func<DbContext, object?>>(
+                    Expression.Convert(new OnContext(context).Visit(state), typeof(object)),
+                    context
+                )
+                .Compile();
+        }
 
         private static bool HasBody(PropertyInfo property) =>
             property.GetMethod is { } getter
@@ -836,6 +973,13 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                 NewExpression => $"a new {node.Type.Name}",
                 _ => $"a {node.Type.Name}",
             };
+
+        /// <summary>A read of the context's state, on the context a getter is given rather than the filter's.</summary>
+        private sealed class OnContext(ParameterExpression context) : ExpressionVisitor
+        {
+            protected override Expression VisitConstant(ConstantExpression node) =>
+                node.Value is DbContext ? Expression.Convert(context, node.Type) : node;
+        }
 
         /// <summary>Each outermost read of the context's own state in an expression.</summary>
         private sealed class ContextState : ExpressionVisitor
@@ -1131,8 +1275,8 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         // follow which of the entities a query reaches its result holds (through Include or an auto-included
         // navigation), so a result that can hold any reached entity is refused when any reached entity is. The result
         // is checked by type: the element of a sequence, a single result, and what those hold through generic
-        // arguments (anonymous types and tuples included) and arrays. An entity inside a class of your own isn't
-        // seen; an object-typed value is taken for one.
+        // arguments (anonymous types and tuples included) and arrays. An entity inside a class of your own is found
+        // in the value itself, before it's stored (CachedValues); an object-typed value is taken for one here.
         private void CheckResult(Type result)
         {
             var types = _reached
@@ -1195,7 +1339,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
         // What EF injects into the type that a cached instance mustn't keep: a lazy loader (into a service property,
         // which is how lazy-loading proxies get theirs, or a constructor, as the loader or as its delegate, which has
         // no property) or the context itself.
-        private static string? Holds(IEntityType entityType)
+        internal static string? Holds(IEntityType entityType)
         {
             var services = entityType
                 .GetServiceProperties()
@@ -1280,6 +1424,32 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
                         state,
                         IgnoreByName([.. _contextState.DistinctBy(read => (read.Type, read.Name))])
                     );
+                    if (_marked is not null)
+                    {
+                        model
+                            .GetOrAddRuntimeAnnotationValue(
+                                MarkedReadsAnnotation,
+                                static _ => new ConcurrentDictionary<string, MarkedRead[]>(
+                                    StringComparer.Ordinal
+                                ),
+                                (object?)null
+                            )
+                            .GetOrAdd(
+                                state,
+                                static (_, marked) =>
+                                    [
+                                        .. marked
+                                            .DistinctBy(read => (read.Read, read.State.ToString()))
+                                            .Select(read => new MarkedRead(
+                                                Filter(read.Read),
+                                                read.Read.What,
+                                                Getter(read.State)
+                                            )),
+                                    ],
+                                _marked
+                            );
+                    }
+
                     tags.Add(ContextStateTag + state);
                 }
 

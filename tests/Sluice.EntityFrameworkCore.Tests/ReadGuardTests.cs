@@ -126,6 +126,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb();
+
+        // Configuring a context with UseSluice starts Sluice's watch on every EF context.
+        await using var tracked = postgres.CreateDb(node);
         var made = new MadeContexts(
             new DbContextOptionsBuilder<ShopDb>().UseNpgsql(postgres.ConnectionString).Options
         );
@@ -155,7 +158,9 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
         await plain
             .Should()
             .ThrowAsync<InvalidOperationException>()
-            .WithMessage("*recorded no dependencies*read.Db<TContext>()*UseSluice*");
+            .WithMessage(
+                "*ran inside a compute on a ShopDb, which isn't configured with UseSluice*"
+            );
     }
 
     [Fact]
@@ -180,13 +185,16 @@ public sealed class ReadGuardTests(PostgresFixture postgres)
             .WithMessage("*none is registered*AddDbContext<ShopDb>*");
     }
 
-    [Fact]
-    public async Task Read_Db_takes_a_context_registered_with_AddDbContext()
+    [Theory]
+    [InlineData(ServiceLifetime.Scoped)]
+    [InlineData(ServiceLifetime.Transient)]
+    public async Task Read_Db_takes_a_context_registered_with_AddDbContext(ServiceLifetime lifetime)
     {
         await using var node = new SluiceNode(services: services =>
             services.AddDbContext<ShopDb>(
                 (provider, options) =>
-                    options.UseNpgsql(postgres.ConnectionString).UseSluice(provider)
+                    options.UseNpgsql(postgres.ConnectionString).UseSluice(provider),
+                lifetime
             )
         );
         await using var db = postgres.CreateDb(node);

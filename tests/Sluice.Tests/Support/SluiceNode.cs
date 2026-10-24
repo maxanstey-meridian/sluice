@@ -7,15 +7,21 @@ using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
 namespace Sluice.Tests.Support;
 
 /// <summary>One application instance: a service provider with <c>AddSluice</c>, as an app would build it.</summary>
-public sealed class SluiceNode : IAsyncDisposable
+public sealed class SluiceNode : IAsyncDisposable, IDisposable
 {
     private readonly ServiceProvider _provider;
 
-    public SluiceNode(Action<IFusionCacheBuilder>? configure = null)
+    /// <param name="configure">The app's FusionCache configuration, passed to <c>AddSluice</c>.</param>
+    /// <param name="services">The app's other registrations, such as a <see cref="TimeProvider"/>.</param>
+    public SluiceNode(
+        Action<IFusionCacheBuilder>? configure = null,
+        Action<IServiceCollection>? services = null
+    )
     {
-        var services = new ServiceCollection();
-        services.AddSluice(configure);
-        _provider = services.BuildServiceProvider();
+        var collection = new ServiceCollection();
+        collection.AddSluice(configure);
+        services?.Invoke(collection);
+        _provider = collection.BuildServiceProvider();
         try
         {
             Cache = _provider.GetRequiredService<SluiceCache>();
@@ -37,25 +43,32 @@ public sealed class SluiceNode : IAsyncDisposable
     public static SluiceNode Clustered(
         IDistributedCache l2,
         string bus,
-        Action<IFusionCacheBuilder>? configure = null
+        Action<IFusionCacheBuilder>? configure = null,
+        Action<IServiceCollection>? services = null
     ) =>
-        new(cache =>
-        {
-            // FusionCache then awaits each backplane publish (tag data already does by default), and
-            // MemoryBackplane runs every peer's handler inline, so a peer has processed a notification
-            // by the time the call that sent it returns.
-            cache
-                .WithOptions(options => options.WaitForInitialBackplaneSubscribe = true)
-                .WithDefaultEntryOptions(options =>
-                    options.AllowBackgroundBackplaneOperations = false
-                )
-                .WithSerializer(new FusionCacheSystemTextJsonSerializer())
-                .WithDistributedCache(l2)
-                .WithBackplane(
-                    new MemoryBackplane(new MemoryBackplaneOptions { ConnectionId = bus })
-                );
-            configure?.Invoke(cache);
-        });
+        new(
+            cache =>
+            {
+                // FusionCache then awaits each backplane publish (tag data already does by default), and
+                // MemoryBackplane runs every peer's handler inline, so a peer has processed a notification
+                // by the time the call that sent it returns.
+                cache
+                    .WithOptions(options => options.WaitForInitialBackplaneSubscribe = true)
+                    .WithDefaultEntryOptions(options =>
+                        options.AllowBackgroundBackplaneOperations = false
+                    )
+                    .WithSerializer(new FusionCacheSystemTextJsonSerializer())
+                    .WithDistributedCache(l2)
+                    .WithBackplane(
+                        new MemoryBackplane(new MemoryBackplaneOptions { ConnectionId = bus })
+                    );
+                configure?.Invoke(cache);
+            },
+            services
+        );
 
     public ValueTask DisposeAsync() => _provider.DisposeAsync();
+
+    /// <summary>Disposes the provider synchronously, as an app that disposes it with <c>using</c> does.</summary>
+    public void Dispose() => _provider.Dispose();
 }

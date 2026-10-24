@@ -57,9 +57,12 @@ hand-built strings for a reader and a writer to spell differently.
 
 ### Names
 
-A source's name can't be blank. Duplicates aren't checked: invalidating one of two sources with
-the same name also evicts the other's readers. That clears more than it needs to, but never
-serves a wrong value. Declare each source once and use that one declaration everywhere.
+A source's name can't be blank. Declaring the same name again with another key type, or
+another `format`, throws `ArgumentException`: the two would give one key different text, so a
+write through one would miss the other's readers, which would keep serving the old value. Two
+declarations with the same key type and format are allowed, and share evictions. Declare each
+source once and use that one declaration everywhere. As for queries, see below for how formats
+are compared.
 
 ## Queries
 
@@ -72,11 +75,20 @@ A query has a name, a key type and a value type (or just a name and a value type
   what a query caches and drop its old entries, rename it.
 
 Query names can't be blank, contain `:` or start with `__fc` (FusionCache keeps its own data
-there). Declaring the same name twice with different key or value types, or once with a key and
-once without, throws `ArgumentException`, because the two would share cache entries: with
-Redis, one could read the other's value as the wrong type, with no error. Declaring the same
-name with the same types again is allowed. Sluice can't catch a clash between processes, or
-between same-typed copies with a different `format`.
+there, and Sluice refuses a FusionCache tag prefix outside it: see
+[What Sluice sets](/guides/configuration#what-sluice-sets)). Declaring the same name twice with
+different key or value types, or once with a key and once without, throws `ArgumentException`,
+because the two would share cache entries: with Redis, one could read the other's value as the
+wrong type, with no error. So does declaring it again with another `format`, since one key would
+get two texts, splitting its entries or sharing one between two keys. Declaring the same name
+with the same types and format again is allowed.
+
+Formats are compared by the method they compile to. One lambda is one format, whatever it
+captures, so declaring through a shared helper works; two lambdas written separately are two
+formats even when their text is the same, so declare the query once and use that declaration
+everywhere. A format compiled from an expression at run time isn't compared. Sluice can't catch
+a clash between processes, nor one lambda that formats differently depending on what it
+captured.
 
 ### Queries with no key
 

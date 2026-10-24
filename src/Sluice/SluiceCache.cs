@@ -10,25 +10,47 @@ namespace Sluice;
 /// The Sluice entry point: cached values that record what they read, and invalidation by dependency.
 /// Registered by <see cref="SluiceServiceCollectionExtensions.AddSluice"/>.
 /// </summary>
-public sealed class SluiceCache
+/// <remarks>
+/// The service provider disposes it, which publishes at once every invalidation still waiting to be published again
+/// (see <see cref="InvalidateAsync(IEnumerable{Dependency})"/>).
+/// </remarks>
+public sealed class SluiceCache : IAsyncDisposable, IDisposable
 {
     internal const string CacheName = "sluice";
+
+    // How long after an invalidation or clear it's published again. FusionCache 2.9 writes a tag's marker without the
+    // lock its tag check holds, and the check writes what it read unconditionally, so an invalidation landing inside a
+    // check on the same node is overwritten (FusionCache#659). The losing check leaves its marker in memory, so a
+    // second publish sticks unless another check's distributed-cache read outlasts the delay: 5 s is StackExchange.Redis's
+    // default timeout, so such a read has failed by then.
+    internal static readonly TimeSpan RepublishDelay = TimeSpan.FromSeconds(5);
 
     private readonly IFusionCache _cache;
     private readonly IServiceProvider _services;
     private readonly FusionCacheEntryOptions _entryOptions;
     private readonly FusionCacheEntryOptions _tagOptions;
+    private readonly TimeProvider _time;
     private volatile Func<Transaction, IReadOnlyCollection<Dependency>>? _ambientWrites;
+    private readonly Lock _storeChecksLock = new();
+    private volatile Func<object, Exception?>[] _storeChecks = [];
+
+    // Cancelled on dispose, which ends every re-publish's wait at once. Each re-publish waiting or running, completed
+    // when it has, so dispose can wait for them before FusionCache is disposed after it.
+    private readonly CancellationTokenSource _disposing = new();
+    private readonly HashSet<Task> _republishing = [];
 
     internal SluiceCache(
         IFusionCache cache,
         IServiceProvider services,
-        FusionCacheEntryOptions tagOptions
+        FusionCacheEntryOptions tagOptions,
+        FusionCacheInternalStrings internalStrings,
+        TimeProvider time
     )
     {
         _cache = cache;
         _services = services;
         _tagOptions = tagOptions;
+        _time = time;
 
         // Per-call pins: every one of these would let a compute outlive its caller or stamp its entry at
         // completion, which reopens the invalidation race.
@@ -43,12 +65,27 @@ public sealed class SluiceCache
             _tagOptions,
             "The Sluice cache's DefaultEntryOptions"
         );
+        QueryNames.EnsureTagPrefix(internalStrings.TagCacheKeyPrefix);
+        Dependency.EnsureNotATag(internalStrings.ClearRemoveTag, "ClearRemoveTag");
+        Dependency.EnsureNotATag(internalStrings.ClearExpireTag, "ClearExpireTag");
     }
 
     // How a package reads an ambient transaction's pending writes. Until one registers, a call doesn't read
     // Transaction.Current for nothing.
     internal void OnAmbient(Func<Transaction, IReadOnlyCollection<Dependency>> pending) =>
         _ambientWrites = pending;
+
+    // Copied on write, so a compute reads the checks without a lock. Packages add theirs once, at registration.
+    internal void AddStoreCheck(Func<object, Exception?> check)
+    {
+        lock (_storeChecksLock)
+        {
+            if (!_storeChecks.Contains(check))
+            {
+                _storeChecks = [.. _storeChecks, check];
+            }
+        }
+    }
 
     /// <summary>
     /// Returns the cached value for <paramref name="key"/>, or runs <paramref name="compute"/> and caches
@@ -164,10 +201,11 @@ public sealed class SluiceCache
         // The caller's token goes to the compute, not to FusionCache: on a cancelled token FusionCache throws
         // without awaiting its factory, so the caller would resume while the compute still uses its resources.
         // Cancelling ends the compute first, and the caller resumes after it.
+        var storeChecks = _storeChecks;
         var value = await _cache
             .GetOrSetAsync<TValue>(
                 entryKey,
-                (ctx, _) => FactoryAsync(reads, compute, ctx, ct),
+                (ctx, _) => FactoryAsync(reads, compute, storeChecks, ctx, ct),
                 options: options
             )
             .ConfigureAwait(false);
@@ -203,7 +241,13 @@ public sealed class SluiceCache
         CancellationToken ct
     )
     {
-        var (value, tags, _) = await ComputeAsync(reads, compute, checkedAgainstWrites: true, ct)
+        var (value, tags, _) = await ComputeAsync(
+                reads,
+                compute,
+                checkedAgainstWrites: true,
+                storeChecks: [],
+                ct
+            )
             .ConfigureAwait(false);
 
         var read = tags.ToHashSet(StringComparer.Ordinal);
@@ -230,12 +274,7 @@ public sealed class SluiceCache
 
     /// <summary>Evicts every cached value that read <paramref name="dependency"/>. Call it after your write commits.</summary>
     /// <param name="dependency">What was written.</param>
-    /// <remarks>
-    /// Takes no cancellation token: a request aborted after its write committed must still invalidate. A distributed
-    /// cache write that fails doesn't make this throw: FusionCache writes the tag again once the cache is back
-    /// (auto-recovery). A slow one makes this wait, since FusionCache puts no timeout on writes, so bound it with the
-    /// Redis client's own timeout and FusionCache's circuit breakers.
-    /// </remarks>
+    /// <inheritdoc cref="InvalidateAsync(IEnumerable{Dependency})" path="/remarks"/>
     public ValueTask InvalidateAsync(Dependency dependency)
     {
         ArgumentNullException.ThrowIfNull(dependency);
@@ -248,32 +287,130 @@ public sealed class SluiceCache
     /// Takes no cancellation token: a request aborted after its write committed must still invalidate. A distributed
     /// cache write that fails doesn't make this throw: FusionCache writes the tag again once the cache is back
     /// (auto-recovery). A slow one makes this wait, since FusionCache puts no timeout on writes, so bound it with the
-    /// Redis client's own timeout and FusionCache's circuit breakers.
+    /// Redis client's own timeout and FusionCache's circuit breakers. Once it returns, the invalidation is published
+    /// again 5 s later in the background, since FusionCache 2.9 can lose one that lands while the same server checks
+    /// those dependencies; a value cached in between is evicted again, and disposing the cache publishes it at once.
     /// </remarks>
     public async ValueTask InvalidateAsync(IEnumerable<Dependency> dependencies)
     {
         var tags = Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags);
+        if (tags.Count == 0)
+        {
+            return;
+        }
 
-        // FusionCache's multi-tag overload removes one tag at a time, so run them side by side.
-        await Task.WhenAll(
-                tags.Select(tag =>
-                    _cache.RemoveByTagAsync(tag, token: CancellationToken.None).AsTask()
-                )
-            )
-            .ConfigureAwait(false);
+        await RemoveByTagsAsync(tags).ConfigureAwait(false);
+        PublishAgainLater(() => RemoveByTagsAsync(tags));
     }
 
     /// <summary>The synchronous twin of <see cref="InvalidateAsync(IEnumerable{Dependency})"/>.</summary>
     /// <param name="dependencies">What was written.</param>
-    public void Invalidate(params IEnumerable<Dependency> dependencies) =>
-        _cache.RemoveByTag(
-            Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags)
-        );
+    /// <inheritdoc cref="InvalidateAsync(IEnumerable{Dependency})" path="/remarks"/>
+    public void Invalidate(params IEnumerable<Dependency> dependencies)
+    {
+        var tags = Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags);
+        if (tags.Count == 0)
+        {
+            return;
+        }
+
+        _cache.RemoveByTag(tags);
+        PublishAgainLater(() => RemoveByTagsAsync(tags));
+    }
 
     /// <summary>Evicts everything Sluice cached.</summary>
     /// <param name="ct">Cancels the clear.</param>
-    public ValueTask ClearAsync(CancellationToken ct = default) =>
-        _cache.ClearAsync(allowFailSafe: false, token: ct);
+    /// <remarks>
+    /// Once it returns, the clear is published again 5 s later in the background, as an invalidation is (see
+    /// <see cref="InvalidateAsync(IEnumerable{Dependency})"/>), so a value cached in between is evicted too.
+    /// </remarks>
+    public async ValueTask ClearAsync(CancellationToken ct = default)
+    {
+        await _cache.ClearAsync(allowFailSafe: false, token: ct).ConfigureAwait(false);
+        PublishAgainLater(() => _cache.ClearAsync(allowFailSafe: false).AsTask());
+    }
+
+    /// <summary>
+    /// Publishes at once every invalidation and clear still waiting to be published again, and waits for them. Never
+    /// throws: FusionCache logs a failed distributed cache or backplane write.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        await _disposing.CancelAsync().ConfigureAwait(false);
+        Task[] republishing;
+        lock (_republishing)
+        {
+            republishing = [.. _republishing];
+        }
+
+        await Task.WhenAll(republishing).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The synchronous twin of <see cref="DisposeAsync"/>, for a service provider disposed synchronously, which
+    /// refuses a service that can only be disposed asynchronously.
+    /// </summary>
+    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+    // FusionCache's multi-tag overload removes one tag at a time, so run them side by side.
+    private Task RemoveByTagsAsync(List<string> tags) =>
+        Task.WhenAll(
+            tags.Select(tag => _cache.RemoveByTagAsync(tag, token: CancellationToken.None).AsTask())
+        );
+
+    // Publishes again after the delay, or at once when the cache is disposed (or already is). Nothing awaits it but
+    // dispose, so a failure ends here: FusionCache has logged it.
+    private void PublishAgainLater(Func<Task> publish)
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_republishing)
+        {
+            _republishing.Add(done.Task);
+        }
+
+        // It outlives the call, so it mustn't hold the caller's async state (its request, transaction or trace) for
+        // the delay. Started on this thread, so its timer exists when the call returns.
+        if (ExecutionContext.IsFlowSuppressed())
+        {
+            _ = PublishAgainAsync(publish, done);
+            return;
+        }
+
+        using (ExecutionContext.SuppressFlow())
+        {
+            _ = PublishAgainAsync(publish, done);
+        }
+    }
+
+    private async Task PublishAgainAsync(Func<Task> publish, TaskCompletionSource done)
+    {
+        try
+        {
+            try
+            {
+                await Task.Delay(RepublishDelay, _time, _disposing.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Disposing: publish now.
+            }
+
+            await publish().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // FusionCache was disposed first, at shutdown.
+        }
+        finally
+        {
+            lock (_republishing)
+            {
+                _republishing.Remove(done.Task);
+            }
+
+            done.SetResult();
+        }
+    }
 
     private FusionCacheEntryOptions OptionsFor(string name, TimeSpan? duration, long? size)
     {
@@ -314,6 +451,7 @@ public sealed class SluiceCache
     private static async Task<TValue> FactoryAsync<TValue>(
         SluiceReads reads,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,
+        Func<object, Exception?>[] storeChecks,
         FusionCacheFactoryExecutionContext<TValue> ctx,
         CancellationToken ct
     )
@@ -322,6 +460,7 @@ public sealed class SluiceCache
                 reads,
                 compute,
                 checkedAgainstWrites: false,
+                storeChecks,
                 ct
             )
             .ConfigureAwait(false);
@@ -347,11 +486,13 @@ public sealed class SluiceCache
     // transaction, then the steps it added to run before the store, then closes it and disposes what it held. Returns
     // the value, the tags it recorded and whether it asked not to be cached; a guard violation is left on reads, for
     // the caller to check. The compute's own exception is rethrown. When its tags are checked against the flow's
-    // uncommitted writes, the steps run even if it asked not to be cached: what they record is checked too.
+    // uncommitted writes, the steps run even if it asked not to be cached: what they record is checked too. The store
+    // checks run last, on a value that will be stored.
     private static async Task<(TValue Value, string[] Tags, bool Uncached)> ComputeAsync<TValue>(
         SluiceReads reads,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,
         bool checkedAgainstWrites,
+        Func<object, Exception?>[] storeChecks,
         CancellationToken ct
     )
     {
@@ -378,6 +519,20 @@ public sealed class SluiceCache
             {
                 value = await compute(reads, ct).ConfigureAwait(false);
                 await reads.RunBeforeStoreAsync(checkedAgainstWrites).ConfigureAwait(false);
+
+                // On the compute's flow, before what it holds is disposed. A value that won't be stored isn't
+                // served to anyone else, so it isn't checked.
+                if (storeChecks.Length > 0 && value is not null && reads.WillStore)
+                {
+                    foreach (var check in storeChecks)
+                    {
+                        if (check(value) is { } refusal)
+                        {
+                            reads.Violate(refusal);
+                            break;
+                        }
+                    }
+                }
             }
             catch (Exception failure)
             {

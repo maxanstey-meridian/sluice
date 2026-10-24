@@ -30,6 +30,24 @@ public sealed class Dependency
     internal string[] InvalidationTags =>
         _key is null ? [$"{_source}:"] : [$"{_source}:{_key}", $"{_source}:*"];
 
+    /// <summary>
+    /// Refuses a FusionCache clear tag that could equal one of these tags: any with ':' after a non-blank start, as
+    /// <c>a:b</c> is source <c>a</c> key <c>b</c>'s. Invalidating that dependency would clear the cache on every node.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The clear tag could be a dependency's tag.</exception>
+    internal static void EnsureNotATag(string clearTag, string option)
+    {
+        var colon = clearTag.LastIndexOf(':');
+        if (colon > 0 && !string.IsNullOrWhiteSpace(clearTag[..colon]))
+        {
+            throw new InvalidOperationException(
+                $"The Sluice cache's InternalStrings.{option} is '{clearTag}', which is also a tag Sluice uses for "
+                    + $"source '{clearTag[..colon]}', so invalidating that source would clear the cache on every node. "
+                    + "Use a clear tag without ':': leave InternalStrings at its defaults, or call SetToSafeStrings."
+            );
+        }
+    }
+
     internal static List<string> TagsOf(
         IEnumerable<Dependency> dependencies,
         Func<Dependency, string[]> tags

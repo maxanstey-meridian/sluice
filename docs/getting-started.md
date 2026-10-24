@@ -58,6 +58,10 @@ The context maps each id to its column with a value converter, so EF, and Sluice
 id as the key:
 
 ```csharp
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Sluice;
+
 public sealed class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
 {
     public DbSet<User> Users => Set<User>();
@@ -67,7 +71,7 @@ public sealed class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
     {
         modelBuilder.Entity<User>(user =>
         {
-            user.Property(u => u.Id).HasConversion(id => id.Value, value => new UserId(value));
+            user.Property(u => u.Id).HasConversion(new UserIdConverter());
             user.HasData(
                 new User
                 {
@@ -86,12 +90,29 @@ public sealed class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
 
         modelBuilder.Entity<Flag>(flag =>
         {
-            flag.Property(f => f.Id).HasConversion(id => id.Value, value => new FlagId(value));
+            flag.Property(f => f.Id).HasConversion(new FlagIdConverter());
             flag.HasData(new Flag { Id = FlagId.DarkMode });
         });
     }
 }
+
+// A typed id over the column's own value round-trips, which Sluice needs vouched for on a key.
+[SluiceRoundTrips]
+public sealed class UserIdConverter()
+    : ValueConverter<UserId, string>(id => id.Value, value => new UserId(value));
+
+[SluiceRoundTrips]
+public sealed class FlagIdConverter()
+    : ValueConverter<FlagId, string>(id => id.Value, value => new FlagId(value));
 ```
+
+Each converter is a class of its own, marked `[SluiceRoundTrips]`. A save tells Sluice the value
+it would write back for what EF loaded, and a read the value it asked for, so a converter on a
+key, foreign key or unique column must give back exactly the value it loaded (`"alice"` loaded and
+written as `"alice"`). Only you know that, so you say so once, on the class. Sluice refuses a
+model with an unmarked converter there the first time it uses it, naming the property;
+`HasConversion(id => id.Value, value => new UserId(value))` has no class to mark, which is why the
+lambdas move into one. See [Key folding](/guides/ef-core#key-folding).
 
 And a greeting API that isn't EF. In a real app it might be an HTTP API, Dapper or a file:
 
@@ -121,6 +142,7 @@ public sealed class GreetingApi
 
 ```csharp
 builder.Services.AddSluice();
+builder.Services.AddSluiceEntityFrameworkCore();
 builder.Services.AddDbContextFactory<AppDb>(
     (services, options) => options.UseSqlite(connectionString).UseSluice(services)
 );
@@ -129,6 +151,8 @@ builder.Services.AddDbContextFactory<AppDb>(
 `AddSluice` registers `SluiceCache`, which you inject wherever you cache or invalidate. It
 creates a FusionCache of its own. To configure it (durations, Redis, several servers), pass a
 callback to `AddSluice`; see [Configuration](/guides/configuration).
+`AddSluiceEntityFrameworkCore` registers the EF package, beside `AddSluice`; `UseSluice` throws
+without it.
 
 `AddDbContextFactory` registers `AppDb` for your own code (`AddDbContext` works too). Each
 cached value's computation takes an `AppDb` of its own from a DI scope it opens for itself.

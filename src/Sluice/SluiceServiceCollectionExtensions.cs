@@ -22,7 +22,10 @@ public static class SluiceServiceCollectionExtensions
     /// <remarks>
     /// The entry lifetimes configured here are checked against the tag-data lifetimes when <see cref="SluiceCache"/>
     /// is first resolved, which throws <see cref="InvalidOperationException"/> if an entry could outlive the tag data
-    /// that invalidates it.
+    /// that invalidates it, or if the <c>InternalStrings</c> set here could mix tags with entries or dependencies with
+    /// clears: a <c>TagCacheKeyPrefix</c> that doesn't start with <c>__fc</c>, or a clear tag with ':' in it. A
+    /// <see cref="TimeProvider"/> registered here times the re-publishing of invalidations; otherwise it's
+    /// <see cref="TimeProvider.System"/>.
     /// </remarks>
     public static IServiceCollection AddSluice(
         this IServiceCollection services,
@@ -41,9 +44,10 @@ public static class SluiceServiceCollectionExtensions
         var builder = services.AddFusionCache(SluiceCache.CacheName);
         configure?.Invoke(builder);
 
-        // FusionCache copies its options and doesn't expose TagsDefaultEntryOptions afterwards,
-        // so capture them here for the lifetime check. These actions run after the user's.
+        // FusionCache copies its options and doesn't expose TagsDefaultEntryOptions or InternalStrings afterwards,
+        // so capture them here for the lifetime and tag prefix checks. These actions run after the user's.
         FusionCacheEntryOptions? tagOptions = null;
+        FusionCacheInternalStrings? internalStrings = null;
         builder
             .WithCacheKeyPrefixByCacheName()
             .WithOptions(options =>
@@ -57,6 +61,7 @@ public static class SluiceServiceCollectionExtensions
                 options.TagsDefaultEntryOptions.Priority = CacheItemPriority.NeverRemove;
                 options.TagsDefaultEntryOptions.Size = 0;
                 tagOptions = options.TagsDefaultEntryOptions;
+                internalStrings = options.InternalStrings;
             });
 
         services.AddSingleton(provider =>
@@ -64,14 +69,17 @@ public static class SluiceServiceCollectionExtensions
             var cache = provider
                 .GetRequiredService<IFusionCacheProvider>()
                 .GetCache(SluiceCache.CacheName);
-            return new SluiceCache(
-                cache,
-                provider,
-                tagOptions
-                    ?? throw new UnreachableException(
-                        "FusionCache built the Sluice cache without running Sluice's options action."
-                    )
-            );
+            return tagOptions is null || internalStrings is null
+                ? throw new UnreachableException(
+                    "FusionCache built the Sluice cache without running Sluice's options action."
+                )
+                : new SluiceCache(
+                    cache,
+                    provider,
+                    tagOptions,
+                    internalStrings,
+                    provider.GetService<TimeProvider>() ?? TimeProvider.System
+                );
         });
 
         return services;

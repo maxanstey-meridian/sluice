@@ -363,6 +363,7 @@ public sealed class ComputeGuardTests
         FlowWrites
             .AddProbe(
                 node.Cache,
+                "transaction",
                 () =>
                 {
                     asked = true;
@@ -377,6 +378,44 @@ public sealed class ComputeGuardTests
         asked.Should().BeFalse();
     }
 
+    // A package adds a probe each time it sees the flow write in a transaction, keyed by the transaction's id: a value,
+    // boxed afresh on each call, so the box compares keys by value.
+    [Fact]
+    public async Task A_probe_with_a_key_the_box_already_holds_is_not_kept()
+    {
+        await using var node = new SluiceNode();
+        await using var other = new SluiceNode();
+        var transaction = Guid.NewGuid();
+        var asked = new List<string>();
+
+        Func<IReadOnlyCollection<Dependency>> Probe(string name, params Dependency[] written) =>
+            () =>
+            {
+                asked.Add(name);
+                return written;
+            };
+
+        using var flow = SluiceFlow.Begin();
+        FlowWrites
+            .AddProbe(node.Cache, transaction, Probe("first", _rows.For(1)))
+            .Should()
+            .BeTrue();
+        FlowWrites
+            .AddProbe(node.Cache, transaction, Probe("same key", _rows.For(2)))
+            .Should()
+            .BeTrue("the flow has a box, though it keeps nothing new");
+        FlowWrites.AddProbe(node.Cache, Guid.NewGuid(), Probe("another key"));
+        FlowWrites.AddProbe(other.Cache, transaction, Probe("another cache"));
+
+        var call = () => node.Cache.GetOrSetAsync(_outer, "k", Good).AsTask();
+
+        await call.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(Uncommitted.Replace("*", "guard-rows:1"));
+        (await other.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
+        asked.Should().BeEquivalentTo("first", "another key", "another cache");
+    }
+
     [Fact]
     public async Task A_read_of_the_flow_s_uncommitted_writes_throws_caches_nothing_and_after_the_flow_caches_as_usual()
     {
@@ -384,7 +423,7 @@ public sealed class ComputeGuardTests
 
         using (SluiceFlow.Begin())
         {
-            FlowWrites.AddProbe(node.Cache, Pending(_rows.For(1))).Should().BeTrue();
+            FlowWrites.AddProbe(node.Cache, "transaction", Pending(_rows.For(1))).Should().BeTrue();
             var call = () => node.Cache.GetOrSetAsync(_outer, "k", Good).AsTask();
 
             await call.Should()
@@ -405,7 +444,7 @@ public sealed class ComputeGuardTests
 
         using (SluiceFlow.Begin())
         {
-            FlowWrites.AddProbe(node.Cache, Pending(_rows.For(2)));
+            FlowWrites.AddProbe(node.Cache, "transaction", Pending(_rows.For(2)));
 
             (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#2");
             (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#3");
@@ -425,7 +464,7 @@ public sealed class ComputeGuardTests
     {
         await using var node = new SluiceNode();
         using var flow = SluiceFlow.Begin();
-        FlowWrites.AddProbe(node.Cache, Pending(_rows.For(2)));
+        FlowWrites.AddProbe(node.Cache, "transaction", Pending(_rows.For(2)));
 
         var call = () =>
             node
@@ -485,7 +524,7 @@ public sealed class ComputeGuardTests
 
         using (SluiceFlow.Begin())
         {
-            FlowWrites.AddProbe(node.Cache, Pending());
+            FlowWrites.AddProbe(node.Cache, "transaction", Pending());
 
             (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
             (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
@@ -505,7 +544,7 @@ public sealed class ComputeGuardTests
         var written = writes == "a key" ? _rows.For(5) : _rows.All;
 
         using var flow = SluiceFlow.Begin();
-        FlowWrites.AddProbe(node.Cache, Pending(written));
+        FlowWrites.AddProbe(node.Cache, "transaction", Pending(written));
         var call = () =>
             node
                 .Cache.GetOrSetAsync(
@@ -536,6 +575,7 @@ public sealed class ComputeGuardTests
         using var flow = SluiceFlow.Begin();
         FlowWrites.AddProbe(
             other.Cache,
+            "transaction",
             () =>
             {
                 asked = true;
@@ -603,15 +643,15 @@ public sealed class ComputeGuardTests
         var outer = SluiceFlow.Begin();
         using (SluiceFlow.Begin())
         {
-            FlowWrites.AddProbe(node.Cache, Pending(_rows.For(1))).Should().BeTrue();
+            FlowWrites.AddProbe(node.Cache, "transaction", Pending(_rows.For(1))).Should().BeTrue();
         }
 
         await call.Should().ThrowAsync<InvalidOperationException>().WithMessage(Uncommitted);
-        FlowWrites.AddProbe(node.Cache, Pending()).Should().BeTrue();
+        FlowWrites.AddProbe(node.Cache, "another transaction", Pending()).Should().BeTrue();
 
         outer.Dispose();
 
-        FlowWrites.AddProbe(node.Cache, Pending()).Should().BeFalse();
+        FlowWrites.AddProbe(node.Cache, "transaction", Pending()).Should().BeFalse();
         (await call()).Should().Be("good#2");
         (await call()).Should().Be("good#2");
     }

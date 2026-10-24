@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
@@ -60,5 +62,171 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         (await CachedRead.IsEvictedBy(ReadTea, db.Products.Dependency(new Sku("tea-2"))))
             .Should()
             .BeFalse();
+    }
+
+    // A save reports the value it would write back for what EF loaded, so a converter that loads a stored value and
+    // writes back another misses the readers of the stored value. Each model is refused the first time Sluice reads it,
+    // whichever way: these tables don't exist, so a save that ran would fail on the database instead.
+    public static TheoryData<string, Func<DbContextOptionsBuilder, DbContext>, string> Untrusted =>
+        new()
+        {
+            {
+                "a key's HasConversion lambdas",
+                options => new UntrustedKeyDb(options.Options),
+                "*Gadget.Id (ValueConverter<GadgetNo, Int32>)*[SluiceRoundTrips]*"
+            },
+            {
+                "a foreign key's HasConversion lambdas",
+                options => new UntrustedForeignKeyDb(options.Options),
+                "*Gadget.ParentId (ValueConverter<Nullable<Int32>, Nullable<Int32>>)*"
+            },
+            {
+                "a unique column's enum stored as text",
+                options => new UntrustedUniqueDb(options.Options),
+                "*Gadget.Colour (EnumToStringConverter<Colour>)*"
+            },
+        };
+
+    [Theory]
+    [MemberData(nameof(Untrusted))]
+    public async Task A_model_with_an_unmarked_converter_on_a_key_foreign_key_or_unique_column_is_refused_at_first_use(
+        string converter,
+        Func<DbContextOptionsBuilder, DbContext> create,
+        string message
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var db = create(
+            new DbContextOptionsBuilder()
+                .UseNpgsql(postgres.ConnectionString)
+                .UseSluice(node.Services)
+        );
+
+        var dependency = () => db.Set<Gadget>().AllDependencies();
+        dependency.Should().Throw<InvalidOperationException>(converter).WithMessage(message);
+        db.Add(new Gadget { Id = new GadgetNo(1) });
+        var save = () => db.SaveChangesAsync();
+        (await save.Should().ThrowAsync<DbUpdateException>(converter))
+            .WithInnerException<InvalidOperationException>()
+            .WithMessage(message);
+        var bulk = () => db.Set<Gadget>().ExecuteDeleteAsync();
+        await bulk.Should().ThrowAsync<InvalidOperationException>(converter).WithMessage(message);
+    }
+
+    [Fact]
+    public void A_marked_converter_and_EF_s_built_ins_that_round_trip_are_trusted()
+    {
+        using var db = new TrustedDb(
+            new DbContextOptionsBuilder().UseNpgsql(postgres.ConnectionString).Options
+        );
+
+        var dependencies = () => db.Set<Gadget>().AllDependencies();
+
+        dependencies.Should().NotThrow();
+    }
+
+    public readonly record struct GadgetNo(int Value);
+
+    public enum Colour
+    {
+        Red,
+        Blue,
+    }
+
+    public sealed class Gadget
+    {
+        public GadgetNo Id { get; set; }
+        public int? ParentId { get; set; }
+        public Colour Colour { get; set; }
+        public long ShelfId { get; set; }
+        public DateTime Made { get; set; }
+        public Guid Tag { get; set; }
+    }
+
+    public sealed class Shelf
+    {
+        public long Id { get; set; }
+    }
+
+    [SluiceRoundTrips]
+    public sealed class GadgetNoConverter()
+        : ValueConverter<GadgetNo, int>(no => no.Value, value => new GadgetNo(value));
+
+    private static void Gadgets(ModelBuilder model, Action<EntityTypeBuilder<Gadget>> map)
+    {
+        var gadget = model.Entity<Gadget>();
+        gadget.ToTable("gadgets_that_do_not_exist");
+        gadget.Ignore(g => g.ShelfId).Ignore(g => g.Made).Ignore(g => g.Tag);
+        map(gadget);
+    }
+
+    private sealed class UntrustedKeyDb(DbContextOptions options) : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder model) =>
+            Gadgets(
+                model,
+                gadget =>
+                    gadget
+                        .Property(g => g.Id)
+                        .HasConversion(no => no.Value, value => new GadgetNo(value))
+            );
+    }
+
+    private sealed class UntrustedForeignKeyDb(DbContextOptions options) : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder model) =>
+            Gadgets(
+                model,
+                gadget =>
+                {
+                    gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter());
+                    gadget.Property(g => g.ParentId).HasConversion(id => id, id => id);
+                    gadget.HasOne<Parent>().WithMany().HasForeignKey(g => g.ParentId);
+                }
+            );
+    }
+
+    public sealed class Parent
+    {
+        public int Id { get; set; }
+    }
+
+    private sealed class UntrustedUniqueDb(DbContextOptions options) : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder model) =>
+            Gadgets(
+                model,
+                gadget =>
+                {
+                    gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter());
+                    gadget.Property(g => g.Colour).HasConversion<string>();
+                    gadget.HasIndex(g => g.Colour).IsUnique();
+                }
+            );
+    }
+
+    // A typed id marked by its author; an enum stored as its number; a long key stored in an int column, which holds
+    // every value the column can; a DateTime stored as ticks; a Guid stored as bytes.
+    private sealed class TrustedDb(DbContextOptions options) : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder model)
+        {
+            var gadget = model.Entity<Gadget>();
+            gadget.ToTable("gadgets_that_do_not_exist");
+            gadget.Ignore(g => g.ParentId);
+            gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter());
+            gadget.HasIndex(g => g.Colour).IsUnique();
+            gadget.Property(g => g.ShelfId).HasConversion(new CastingConverter<long, int>());
+            gadget.HasOne<Shelf>().WithMany().HasForeignKey(g => g.ShelfId);
+            gadget.Property(g => g.Made).HasConversion(new DateTimeToTicksConverter());
+            gadget.HasIndex(g => g.Made).IsUnique();
+            gadget.Property(g => g.Tag).HasConversion(new GuidToBytesConverter());
+            gadget.HasIndex(g => g.Tag).IsUnique();
+            model.Entity<Shelf>().ToTable("shelves_that_do_not_exist");
+            model
+                .Entity<Shelf>()
+                .Property(s => s.Id)
+                .HasConversion(new CastingConverter<long, int>());
+        }
     }
 }

@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Sluice.Tests.Support;
 using ZiggyCreatures.Caching.Fusion;
 
@@ -46,6 +48,42 @@ public sealed class MultiNodeTests
 
         (await View(b.Cache)).Should().Be("new");
         _runs.Should().Be(2);
+    }
+
+    // Node A publishes its invalidation again after the delay (SLUICE-CORE-022), through the backplane like the first,
+    // so node B's value cached in between is evicted too.
+    [Fact]
+    public async Task A_re_invalidation_reaches_other_nodes()
+    {
+        var time = new FakeTimeProvider();
+        await using var a = SluiceNode.Clustered(
+            _l2,
+            _bus,
+            services: services => services.AddSingleton<TimeProvider>(time)
+        );
+        await using var b = SluiceNode.Clustered(_l2, _bus);
+        await View(b.Cache);
+        await a.Cache.InvalidateAsync(_rows.For(1));
+        await View(b.Cache);
+        _runs.Should().Be(2);
+
+        var republished = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+        var tags = 0;
+        a.Fusion.Events.RemoveByTag += (_, _) =>
+        {
+            // The key's tag and the whole-source readers' tag.
+            if (Interlocked.Increment(ref tags) == 2)
+            {
+                republished.TrySetResult();
+            }
+        };
+        time.Advance(TimeSpan.FromSeconds(5));
+        await republished.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await View(b.Cache);
+        _runs.Should().Be(3);
     }
 
     [Fact]

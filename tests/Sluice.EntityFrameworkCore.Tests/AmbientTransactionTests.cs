@@ -172,6 +172,119 @@ public sealed class AmbientTransactionTests(PostgresFixture postgres)
         node.Logs.GetSnapshot().Should().NotContain(record => record.Level >= LogLevel.Error);
     }
 
+    public enum HiddenScope
+    {
+        WarmPool,
+        ColdPool,
+        ColdPoolSeveralBatches,
+        OpenedOnTheScopeThreadSavedFromAnother,
+    }
+
+    // A TransactionScope without TransactionScopeAsyncFlowOption.Enabled is in Transaction.Current on the thread that
+    // made it only, so an async save blocked on there completes on another thread, which can't see it. On a cold
+    // connection pool, Npgsql enlists after its first await, so even the save's first command can't see it; only the
+    // connection's opening can. Sluice publishes such a save at once, and again when the scope completes.
+    [Theory]
+    [InlineData(HiddenScope.WarmPool, true)]
+    [InlineData(HiddenScope.WarmPool, false)]
+    [InlineData(HiddenScope.ColdPool, true)]
+    [InlineData(HiddenScope.ColdPool, false)]
+    [InlineData(HiddenScope.ColdPoolSeveralBatches, true)]
+    [InlineData(HiddenScope.ColdPoolSeveralBatches, false)]
+    [InlineData(HiddenScope.OpenedOnTheScopeThreadSavedFromAnother, true)]
+    [InlineData(HiddenScope.OpenedOnTheScopeThreadSavedFromAnother, false)]
+    public async Task Inside_a_TransactionScope_without_async_flow_an_async_save_is_evicted_again_once_the_scope_completes(
+        HiddenScope setup,
+        bool complete
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb(enlist: false);
+        var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        await using var connection = new NpgsqlConnection(
+            setup is HiddenScope.WarmPool
+                ? postgres.ConnectionString
+                : $"{postgres.ConnectionString};Application Name=sluice-{Guid.NewGuid():N}"
+        );
+        await using var db = postgres.CreateDb(
+            node,
+            npgsql =>
+            {
+                if (setup is HiddenScope.ColdPoolSeveralBatches)
+                {
+                    npgsql.MaxBatchSize(1);
+                }
+            },
+            connection: connection
+        );
+        Customer[] customers = [new() { Id = ada, Name = "Ada" }, new() { Id = bob, Name = "Bob" }];
+        db.AttachRange(setup is HiddenScope.ColdPoolSeveralBatches ? customers : customers[..1]);
+        Array.ForEach(customers, c => c.Name += " (edited)");
+        var evictedInScope = false;
+        Task completed = Task.CompletedTask;
+
+        await OnAThreadOfItsOwn(() =>
+        {
+            using var scope = new TransactionScope();
+            if (setup is HiddenScope.OpenedOnTheScopeThreadSavedFromAnother)
+            {
+                db.Database.OpenConnectionAsync().GetAwaiter().GetResult();
+                Task.Run(() => db.SaveChangesAsync()).GetAwaiter().GetResult();
+            }
+            else
+            {
+                db.SaveChangesAsync().GetAwaiter().GetResult();
+            }
+
+            completed = Completion.Of(Transaction.Current!);
+
+            // Another request caches Ada's committed row again.
+            evictedInScope = adaRead.WasEvictedForAnotherCaller().GetAwaiter().GetResult();
+            if (complete)
+            {
+                scope.Complete();
+            }
+        });
+
+        await completed;
+        evictedInScope
+            .Should()
+            .BeTrue("Sluice can't tell the save is in the scope, so it publishes at once");
+        (await reader.NameOf(ada))
+            .Should()
+            .Be(complete ? "Ada (edited)" : "Ada", "the save was in the scope");
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the scope's completion published the save again");
+        node.Logs.GetSnapshot()
+            .Should()
+            .ContainSingle(record =>
+                record.Category == typeof(SluiceInterceptor).FullName
+                && record.Level == LogLevel.Warning
+                && record.Id.Id == 5
+            );
+    }
+
+    // Runs body on a new thread, as code holding a TransactionScope that doesn't flow into async code must.
+    internal static Task OnAThreadOfItsOwn(Action body)
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        new Thread(() =>
+        {
+            try
+            {
+                body();
+                done.SetResult();
+            }
+            catch (Exception exception)
+            {
+                done.SetException(exception);
+            }
+        }).Start();
+        return done.Task;
+    }
+
     [Fact]
     public async Task A_completing_TransactionScope_evicts_without_going_through_async_code()
     {

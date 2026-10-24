@@ -19,15 +19,20 @@ no longer than the entry's duration.
 
 ## Everywhere
 
-- **A crash between commit and invalidation loses the invalidation.** Nothing replays it after
-  a restart. See
+- **A crash between commit and invalidation loses the invalidation**, and the old value lives
+  until its entry expires. That's a deliberate trade-off: Sluice keeps no outbox of pending
+  invalidations, so the entry's duration bounds how long a lost one lasts. An app that needs
+  more records what it wrote in an outbox of its own, in the same transaction, and calls
+  `InvalidateAsync` from the outbox's handler. See
   [Transactions](/guides/transactions#what-s-not-covered).
-- **A FusionCache 2.9 race can lose an invalidation on one server.** An invalidation that lands
-  in the same microseconds as a read checking that dependency can be overwritten by the check.
-  That server then keeps serving the values cached before it until they expire or are replaced,
-  or the dependency is invalidated again. The window opens when a server first checks a
-  dependency, and again about once an hour after that. It's a FusionCache bug; Sluice has no
-  workaround.
+- **A FusionCache 2.9 race can delay an invalidation on one server by up to 5 s.** An
+  invalidation that lands in the same microseconds as a read checking that dependency can be
+  overwritten by the check (FusionCache#659), and that server keeps serving the values cached
+  before it. Sluice publishes every invalidation and clear again 5 s later, which restores it;
+  it stays lost only if that server's Redis lookup of the tag takes longer than 5 s (the
+  [recommended Redis timeouts](/guides/configuration#multi-node) of one second keep lookups well
+  under that). See
+  [What Sluice sets](/guides/configuration#what-sluice-sets).
 - **Computes must read committed data from the primary database**, not inside your own open
   transaction or from a replica that may lag behind. See
   [Computes and transactions](/guides/transactions#computes-and-transactions).
@@ -37,15 +42,14 @@ no longer than the entry's duration.
   [Shared instances](/guides/configuration#shared-instances-and-auto-clone).
 - **Your `format` functions and `IFormattable` ids must give different text for different
   keys.** Sluice can't check that. See [Key text](/guides/sources-and-queries#key-text).
-- **Source names aren't checked for duplicates**, and query names only within one process. See
+- **Query and source names are checked only within one process**, and two declarations'
+  formats only by the method they compile to: one lambda that formats differently depending on
+  what it captured, and a format compiled from an expression, aren't caught. See
   [Names](/guides/sources-and-queries#names) and [Queries](/guides/sources-and-queries#queries).
-- **Renaming a source or query, or changing a `format`, changes its cache keys.** During a
-  rolling deploy, old and new servers don't evict each other's entries. See
+- **Renaming a source or query, or changing a `format`, changes its cache keys**, and so does
+  renaming a table, or its schema, that EF maps. During a rolling deploy, old and new servers
+  don't evict each other's entries. See
   [Renaming changes the cache keys](/guides/sources-and-queries#renaming-changes-the-cache-keys).
-- **Moving or renaming an EF entity class changes its dependencies' names**, which are the
-  class's full name (`Shop.Domain.Order`). During a rolling deploy, old and new servers don't
-  evict each other's cached reads of that type until those entries expire. See
-  [What a query records](/guides/ef-core#what-a-query-records).
 - **A caller waiting on another caller's compute can't cancel the wait.** See
   [Cancellation](/guides/invalidation#cancellation).
 - **FusionCache's factory timeouts and its per-key `DefaultEntryOptionsProvider` don't apply**
@@ -90,10 +94,8 @@ no longer than the entry's duration.
 - **Reading by a unique column needs the model to know it's unique**: a single-column unique
   index (filtered or not) or alternate key. Composite unique indexes, and owned types' columns,
   can't be read by value. A unique column or foreign key whose value converter stores null as a
-  value (EF's internal `convertsNulls`) is refused with `NotSupportedException`. A value
-  converter on a key, foreign key or unique column must round-trip (stored value to .NET and
-  back gives the stored value), or readers by the stored value are missed; Sluice can't check
-  that. `set.Dependency(key)` evicts readers by a unique column that found that row, but not a
+  value (EF's internal `convertsNulls`) is refused with `NotSupportedException`.
+  `set.Dependency(key)` evicts readers by a unique column that found that row, but not a
   cached "not found"; use `AllDependencies()` after a write Sluice can't see that may have given
   a row the value. See [By a unique column](/guides/ef-core#by-a-unique-column) and
   [Key folding](/guides/ef-core#key-folding).
@@ -101,14 +103,17 @@ no longer than the entry's duration.
   real old parent when its foreign key differs from the stored one, and its real old value of a
   unique column likewise. See
   [Rows saved without loading them](/guides/ef-core#rows-saved-without-loading-them).
-- **Two entity types splitting one table and sharing a column**: saving one doesn't evict the
-  other's readers. See [Model shapes](/guides/ef-core#model-shapes).
-- **Two classes mapped to the same table aren't linked.** Dependencies belong to entity
-  types (classes), not tables. A second class over the same table, such as a read model in
-  another context, is a separate type: a write through either doesn't evict reads through the
-  other, both ways. To link them, have each one's reads also record the other's
-  `AllDependencies()` with `read.From`, or invalidate by hand. See
-  [What a query records](/guides/ef-core#what-a-query-records).
+- **A value converter on a key, foreign key or unique column must round-trip**, and Sluice
+  can't check that it does: it never sees the stored value. So it refuses the model unless each
+  such converter is one of EF's lossless built-ins or its class is marked `[SluiceRoundTrips]`,
+  your promise. A converter from `HasConversion` lambdas moves into a class to be marked. See
+  [Key folding](/guides/ef-core#key-folding).
+- **Classes over one table are linked only when their key columns, and the schema's spelling,
+  match.** Dependencies are named after tables, so a read model in another context over the same
+  table is linked to the first class. One with other key columns, one over only one table of a
+  TPT or TPC hierarchy, or one naming the schema differently (`null` against `"public"`) isn't:
+  have its reads also record the other's `AllDependencies()` with `read.From`, or invalidate by
+  hand. See [What a query records](/guides/ef-core#what-a-query-records).
 - **Broad eviction, by design**: a plain query is evicted by any write to any type it reads, a
   `Children` list by a change to any row in it, and every read of a type by an `ExecuteUpdate`
   or `ExecuteDelete` on its table, unless it names its rows with `ForKey` or `ForKeys`. A keyed
@@ -119,19 +124,19 @@ no longer than the entry's duration.
   [What a query records](/guides/ef-core#what-a-query-records),
   [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes) and
   [Bulk writes by key](/guides/ef-core#bulk-writes-by-key).
-- **Commits Sluice doesn't see**: a raw `DbTransaction` committed outside EF, and some
-  `TransactionScope` setups. See [Transactions](/guides/transactions#ef-core).
+- **A `DbTransaction` committed or rolled back outside EF is invalidated late**: when Sluice
+  next looks, such as the flow's next cached read or the connection closing, since EF raises no
+  event for it. A read in between can cache the old value. Commit through EF. See
+  [Committing outside EF](/guides/transactions#committing-outside-ef).
 - **A cached read of your own uncommitted writes is caught only where Sluice sees the
-  transaction**: a `TransactionScope` by itself, and an EF transaction begun, or an enlisted one
-  written in, inside `SluiceFlow.Begin()`.
-  Elsewhere the read returns the committed value. While such writes are pending, every cached
-  read on the flow goes to the database. See
+  transaction**: a `TransactionScope` by itself, and an EF or enlisted transaction once the
+  flow writes in it after `SluiceFlow.Begin()`. Elsewhere the read returns the committed value.
+  While such writes are pending, every cached read on the flow goes to the database. Writes
+  rolled back to a savepoint made outside EF still count as pending. See
   [Reading your own uncommitted writes](/guides/strict-reads#reading-your-own-uncommitted-writes).
-- **Interceptors that change entities in `SavingChanges`** must come before `UseSluice`. See
-  [Interceptor order](/guides/ef-core#interceptor-order).
 - **Relational providers only, and no `UseInternalServiceProvider`.** Computes take the context
-  from a DI scope of their own, so it must be registered as a scoped service (every EF
-  registration does that). See [Setup](/guides/ef-core#setup).
+  from a DI scope of their own, so it must be registered scoped or transient (every EF
+  registration's default is scoped); a singleton is refused. See [Setup](/guides/ef-core#setup).
 - **Tested on PostgreSQL only.** Key folding assumes PostgreSQL's comparison rules, and doesn't
   fold accent- or culture-sensitive collations. See [Key folding](/guides/ef-core#key-folding).
 - **Composite primary keys can't be read with `read.Entity`**, and `read.Children` takes a
@@ -142,7 +147,7 @@ no longer than the entry's duration.
 ## What a compute can't read
 
 - **Some reads go unchecked inside a compute**, such as `Find` of an entity a captured outside
-  context already tracks, or Dapper on a context's connection. See
+  context already tracks, or Dapper on any connection. See
   [What isn't checked](/guides/strict-reads#what-isn-t-checked).
 - **Some reads only work in a fused fetch**: raw SQL, views, keyless types and your own
   database functions. See [The declared route](/guides/strict-reads#the-declared-route).
@@ -152,16 +157,16 @@ no longer than the entry's duration.
   context holds, an unmarked property with a body, a method, a readonly field, or a virtual,
   init-only or get-only property) are refused. See
   [Tenants](/guides/strict-reads#tenants-and-other-context-state).
-- **`[SluiceContextState]` is taken on trust.** A filter may read a scoped tenant service
-  through a context property marked with it, set by `read.Db<AppDb>((db, services) => …)`.
-  Sluice doesn't read the property's body: one that reads anything the configure didn't set
-  caches one caller's rows for everyone with that key. On a context leased straight from
-  `AddDbContextPool`, the service the property reads may be an earlier lease's, not the one the
-  configure set. See
+- **`[SluiceContextState]` is partly taken on trust.** A filter may read a scoped tenant
+  service through a context property marked with it, set by
+  `read.Db<AppDb>((db, services) => …)`. Sluice checks that the property reads the same with and
+  without the caller's async state, which catches a body reading the request, but a body that
+  reads a static, the clock, or a service it resolves later and that keeps the caller, caches
+  one value for everyone with that key. See
   [A tenant read through a scoped service](/guides/strict-reads#a-tenant-read-through-a-scoped-service).
 - **Invalidation isn't per tenant.** A write in one tenant evicts other tenants' cached reads
   of the same entity type, unless they read through `read.Children` on a tenant foreign key.
-- **Entities that load lazily or hold their context can't be returned by a query in a
-  compute.** Select the values you need. See
+- **Entities that load lazily or hold their context can't be cached**, returned by a query or
+  wrapped in a value of your own. Select the values you need. See
   [What throws inside a compute](/guides/strict-reads#what-throws-inside-a-compute).
 - **Writes can't run inside a compute.** See [Writes](/guides/strict-reads#writes).

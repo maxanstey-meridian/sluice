@@ -36,7 +36,9 @@ read the context). It can't for these, so they throw when they run inside a comp
   later, outside the compute, or keep its context alive. They're refused even when they arrive
   through `Include` or an auto-include rather than as the query's own result. To be safe, a
   query that returns entities is refused if it reads such a type anywhere, even only in a
-  filter; select the values you need instead;
+  filter; select the values you need instead. One wrapped in a type of your own (a DTO or
+  record holding it) is caught in the value, before it's stored: see
+  [Cache projections or detached entities](/guides/ef-core#cache-projections-or-detached-entities);
 - an `Include` path that isn't a constant, or `IgnoreQueryFilters` names that aren't, since
   Sluice can't tell what the query loads or which filters still apply;
 - an EF command that isn't a LINQ query, so Sluice never worked out what it reads;
@@ -69,6 +71,14 @@ Every EF command inside a compute must come from the context `read.Db` gave it. 
 context may hold tracked entities with unsaved edits, or rows it loaded before a write evicted
 the value, or be inside a transaction, and the cached value is served to every caller. The read
 helpers check this when you call them, too.
+
+That includes a context without `UseSluice`, which Sluice can't record a query on. Sluice sees
+its commands through EF's diagnostic events, which EF raises for every context, and inside a
+compute every one throws before it reaches the database: a write anywhere, a read outside a
+[fused fetch](#the-declared-route). Add `.UseSluice(services)` to that context's options and
+query it through `read.Db`, or read it in a fused fetch with a source you declare. Raw ADO.NET
+and Dapper aren't EF commands, so they're still not seen: see
+[What isn't checked](#what-isn-t-checked).
 
 Use the compute's own `read`, the one its lambda was given. What you record through a `read`
 lands on its compute, so one captured from another compute would record it there (or nowhere,
@@ -200,18 +210,17 @@ transaction counts as a save does.
 - **A `TransactionScope`**: always, with nothing to set up. Create it with
   `TransactionScopeAsyncFlowOption.Enabled`, as
   [async code needs anyway](/guides/transactions#transactionscope-with-async-code).
-- **An EF transaction** (`BeginTransaction`, or one a context joins with `UseTransaction`): only
-  on a flow that called `SluiceFlow.Begin()` before the transaction began, or before the context
-  joined it.
+- **An EF transaction** (`BeginTransaction`, or one a context joins with `UseTransaction`): on a
+  flow that called `SluiceFlow.Begin()`, from when the transaction begins or the context joins
+  it, or, for one begun earlier, from the flow's first write in it after the call.
 - **A transaction joined with `Database.EnlistTransaction`**, with no `TransactionScope` around
-  it: only on a flow that called `SluiceFlow.Begin()` before it saved in the transaction. If
-  several flows that called it write in one enlisted transaction, only the first to write is
-  checked.
+  it: on every flow that called `SluiceFlow.Begin()` and then writes in the transaction, from
+  its first write.
 
-EF tells Sluice when a transaction begins, but from inside EF's own async method, and anything
-an async method sets on the flow (an `AsyncLocal`) is undone when it returns. So Sluice can only
-note the transaction in something an outer method set up first, and that's what
-`SluiceFlow.Begin()` does. Call it once per entry point, not per unit of work: repositories
+EF tells Sluice when a transaction begins, or a write in it completes, but from inside EF's own
+async method, and anything an async method sets on the flow (an `AsyncLocal`) is undone when it
+returns. So Sluice can only note the transaction in something an outer method set up first, and
+that's what `SluiceFlow.Begin()` does. Call it once per entry point, not per unit of work: repositories
 often open their own transactions deep in a call, and one call at the top covers them all.
 
 ```csharp
@@ -234,12 +243,18 @@ covered. Dispose it on the flow that began it.
 - **An EF transaction on a flow without `SluiceFlow.Begin()`.** Its writes aren't seen as
   pending, so a cached read returns the committed value. It costs nothing, but leaves the trap
   open.
-- **An EF transaction begun before `SluiceFlow.Begin()` ran**, such as one opened earlier in the
-  pipeline than the middleware.
-- **An enlisted transaction on a flow without `SluiceFlow.Begin()`**, or one the flow saved in
-  only before calling it.
-- **Writes undone by a rollback to a savepoint** still count as pending until the transaction
-  ends, so a cached read of those rows still throws, though what's committed would be right.
+- **A transaction the flow wrote in only before `SluiceFlow.Begin()` ran**, such as one opened
+  and written in earlier in the pipeline than the middleware. A cached read has no context to
+  look at, so nothing tells Sluice of those writes. Call `SluiceFlow.Begin()` before opening the
+  transaction.
+- **An enlisted transaction on a flow without `SluiceFlow.Begin()`.**
+- **Savepoints made outside EF** (ADO.NET's `DbTransaction.Save`). Writes rolled back to a
+  savepoint EF made (`CreateSavepoint`, and EF's own around a save in your transaction, which it
+  rolls back when the save fails) stop counting as pending; they're still invalidated when the
+  transaction ends. Sluice doesn't see one made outside EF, so writes rolled back to it still
+  count, and a read of them throws, though it would read what's committed correctly. Never mix
+  the two in one transaction: rolling back through EF to a savepoint made outside it would undo
+  more than the database did.
 - **Edits you haven't saved.** They're only in your context's change tracker, not in the
   database or the transaction, so no compute could read them and there's nothing to check. Save
   first, or use the tracked entity.
@@ -254,20 +269,13 @@ covered. Dispose it on the flow that began it.
   and calls `Find` on an entity it already tracks, or reads `Local` or a navigation that's
   already loaded, no command runs, so nothing sees it: the context hands back what it holds,
   unsaved edits included. Query `read.Db`'s context instead.
-- **Raw ADO.NET or Dapper on a context's connection**, `read.Db`'s included. They aren't EF
-  commands, so outside a fetch they record nothing. Run them in a
+- **Raw ADO.NET or Dapper on any connection**, `read.Db`'s included. They aren't EF commands,
+  so outside a fetch they record nothing, and EF raises no event for them. Run them in a
   [fused fetch](#the-declared-route).
-- **A context without `UseSluice`.** Its queries aren't seen at all. A compute that reads only
-  through one records nothing, and throws for that instead.
 - **Work started under `ExecutionContext.SuppressFlow`.** It can't see the compute, so every
   guard is off there.
-- **An entity that loads lazily, wrapped in your own type** (a DTO or record holding it). The
-  check only looks at entities a query returns directly, and in anonymous types, tuples and
-  arrays.
 - **A query in a fused fetch that reads rows its dependency doesn't cover.** You declared what
   the fetch reads; Sluice takes your word for it.
-- **A query expression interceptor of your own added after `UseSluice`**, or in
-  `OnConfiguring`. It rewrites queries after Sluice has worked out what they read.
 - **A database function mapped with `IsBuiltIn = true`.** It's trusted not to read other tables.
 
 ## Tenants and other context state
@@ -317,10 +325,11 @@ Sluice takes three things on trust here, as it takes a fused fetch's dependencie
 - **The values come from the key.** `db.TenantId = tenantId`, where `tenantId` is the key, is
   right; `db.TenantId = tenantProvider.TenantId` reads the request, not the key.
 - **The configure overwrites what the constructor set.** The compute's context is made in a DI
-  scope of the compute's own, so it can take scoped services, but it's made on the async
-  context (`AsyncLocal`, `IHttpContextAccessor`) of whichever caller computes first. A tenant
-  provider over `IHttpContextAccessor` gives that caller's tenant, and the configure must
-  overwrite it.
+  scope of the compute's own, so it can take scoped services. It's made without the caller's
+  async state (`AsyncLocal`, `IHttpContextAccessor`, `Activity.Current`), and so are its
+  constructor's services and those the configure asks for, so a tenant provider over
+  `IHttpContextAccessor` sees no request there, not whichever caller computes first. What the
+  filter reads is what the configure sets, or the constructor's default.
 
 What Sluice does check: the filter must read the state where it's stored and where the
 configure can set it: a field that isn't readonly, or an auto-property that isn't virtual and has
@@ -343,8 +352,8 @@ Dependencies are per entity type and row, not per tenant or database, so a write
 evicts other tenants' cached reads of the same type (or, through `read.Entity`, the same key).
 That's safe, just broader than it needs to be.
 
-With a pooled context, what the configure set stays on the context for its next use; see
-[Pooling and factories](/guides/ef-core#pooling-and-factories).
+A compute's context never comes from a pool, so nothing the configure sets reaches a
+request's next lease; see [Pooling and factories](/guides/ef-core#pooling-and-factories).
 
 When the tenant id is a foreign key to a tenants table, read through `read.Children` to narrow
 that: `read.Children(read.Db<AppDb>(db => db.TenantId = tenantId).Invoices, invoice =>
@@ -398,19 +407,28 @@ public sealed class AppDb(DbContextOptions<AppDb> options, TenantProvider tenant
 ```
 
 The configure then sets the service, not the context. Its second argument is the compute's own
-DI scope. On a context `AddDbContext` or a scoped factory makes, that's the scope the context
-was made in, so the service it gets is the one the context holds:
+DI scope, the one the context was made in, whatever the registration (a pooled one too), so the
+service it gets is the one the context holds:
 
 ```csharp
 read.Db<AppDb>((db, services) => services.GetRequiredService<TenantProvider>().Set(tenantId))
 ```
 
 `[SluiceContextState]` is your promise: "this property's body reads only state that `read.Db`'s
-configure sets". Sluice doesn't read the body. A marked property is treated exactly like a
-settable field: the filter runs only on a configured context, and its queries carry the
-`-- Sluice reads the context's state: …` comment. If the body reads anything else (the clock, a
-static, a value the configure didn't set), one caller's rows are cached for everyone with that
-key. The property must hold a plain value, must have a body and mustn't be virtual or abstract,
+configure sets". A marked property is treated exactly like a settable field: the filter runs
+only on a configured context, and its queries carry the
+`-- Sluice reads the context's state: …` comment. Sluice checks what it can of the promise: each
+time such a query runs, it reads the property twice, on the compute's flow, which carries the
+first caller's async state, and again without it. A body that reads the caller's request
+(`IHttpContextAccessor`, an `AsyncLocal`, `Activity.Current`, the culture) gives two different
+values, or throws without the request, and the query throws `InvalidOperationException`,
+naming the filter and the property (never the values), rather than cache that caller's rows for
+everyone with the key. Set that state in the configure, from the key. The check costs about
+64 ns per query. What it can't see stays your promise: a body that reads the clock, a static,
+or a service it resolves later on the compute's flow and that keeps the caller's request,
+caches one value for every caller.
+
+The property must hold a plain value, must have a body and mustn't be virtual or abstract,
 though an interface's implementation is fine; it may be private. The mark does nothing on an
 auto-property: a settable one is already accepted, and a get-only or init-only one is still
 refused, since it holds only what the constructor set. Unmarked properties with a body, methods, and members of objects the context holds
@@ -441,41 +459,33 @@ public sealed class AppDb(DbContextOptions<AppDb> options, UserContext user) : D
 read.Db<AppDb>(db => db.ReadAsTenant(tenantId))
 ```
 
-The configure's tenant must come first. A user service that reads `IHttpContextAccessor` gives
-the compute the user of whichever caller computes first (see above), and with the user first,
-that user's tenant would be cached for everyone with the key. On a request's context the field
-is never set, so the user's tenant applies as before. Call `ReadAsTenant` only from a compute's
-configure: on a request's context it would override the user's tenant. With a pooled context
-the field is still set for the next lease, which may be a request's, so clear it on every lease
-in the scoped factory, or don't pool this context.
-
-A context leased straight from `AddDbContextPool` was made by the pool, not the compute's scope,
-and keeps whatever service an earlier lease gave it, so the configure would set a different
-object from the one the property reads. Lease it through a scoped factory that hands it the
-scope's service on every lease, as EF documents for pooled tenants, or point the context at the
-scope's service in the configure as well.
+The configure's tenant must come first. With the user first, the property would read the
+first caller's user on the compute's flow and no user without the caller's async state, so a
+query through it would throw whenever the caller is signed in. On a request's context the
+field is never set, so the user's tenant applies as before. Call `ReadAsTenant` only from a
+compute's configure: on a request's context it would override the user's tenant.
 
 #### Keep the setter behind one helper
 
-Sluice doesn't read a `[SluiceContextState]` body, and can't see what a configure sets. So
-`ReadAsTenant` is safe only while nothing but a compute's configure calls it, and a review
-won't always catch the call that breaks that. Make the safe call the only call: one extension
+Sluice checks a `[SluiceContextState]` body inside a compute, but it can't see who calls the
+setter. A request that calls `ReadAsTenant` on its own context reads another tenant's rows, and
+no compute is running to notice. So `ReadAsTenant` is safe only while nothing but a compute's
+configure calls it, and a review won't always catch the call that breaks that. Make the safe call the only call: one extension
 method on `read` that opens the compute's context as a tenant, and is the setter's only caller.
-Casebridge's context reads its organisation the way `AppDb` above reads its tenant, and its
-helper is this:
+For `AppDb` above, that's this:
 
 ```csharp
 public static class TenantScope
 {
-    // A compute's context, read as one organisation: the cache key's, never the request's.
-    public static CaseBridgeDbContext OrganisationDb(this SluiceReads read, Guid organisationId) =>
-        read.Db<CaseBridgeDbContext>(db => db.ReadAsOrganisation(organisationId));
+    // A compute's context, read as one tenant: the cache key's, never the request's.
+    public static AppDb TenantDb(this SluiceReads read, Guid tenantId) =>
+        read.Db<AppDb>(db => db.ReadAsTenant(tenantId));
 }
 ```
 
-A compute opens its context with `read.OrganisationDb(organisationId)`, never with a configure of
-its own. The helper takes a `read`, which only a compute has, so a request can't call it; the
-organisation must still come from the key, as every configure's values must.
+A compute opens its context with `read.TenantDb(tenantId)`, never with a configure of its own.
+The helper takes a `read`, which only a compute has, so a request can't call it; the tenant must
+still come from the key, as every configure's values must.
 
 Then have an architecture test hold the rule. It fails when anything else calls the setter, and
 when nothing calls the helper. The second check proves the scan reaches where computes run:
@@ -487,15 +497,15 @@ the helper, which the second check fails on.
 public sealed class TenantScopeTests
 {
     [Fact]
-    public void Only_OrganisationDb_calls_ReadAsOrganisation() =>
+    public void Only_TenantDb_calls_ReadAsTenant() =>
         Assert.Equal(
             new[] { typeof(TenantScope).FullName },
-            CallersOf(typeof(CaseBridgeDbContext), nameof(CaseBridgeDbContext.ReadAsOrganisation))
+            CallersOf(typeof(AppDb), nameof(AppDb.ReadAsTenant))
         );
 
     [Fact]
-    public void Computes_open_their_context_with_OrganisationDb() =>
-        Assert.NotEmpty(CallersOf(typeof(TenantScope), nameof(TenantScope.OrganisationDb)));
+    public void Computes_open_their_context_with_TenantDb() =>
+        Assert.NotEmpty(CallersOf(typeof(TenantScope), nameof(TenantScope.TenantDb)));
 
     // The full names of the types in the app's assembly with a method that calls this one,
     // counting a nested type (a lambda's closure, an async method's state machine) as the type
@@ -504,5 +514,5 @@ public sealed class TenantScopeTests
 }
 ```
 
-Casebridge's `CallersOf` reads each method body's IL with reflection; any tool that can list a
-method's callers will do.
+`CallersOf` can read each method body's IL with reflection; any tool that can list a method's
+callers will do.

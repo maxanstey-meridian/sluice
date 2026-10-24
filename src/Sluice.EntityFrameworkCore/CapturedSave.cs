@@ -5,22 +5,31 @@ using Microsoft.EntityFrameworkCore.Metadata;
 namespace Sluice.EntityFrameworkCore;
 
 /// <summary>
-/// The rows one save writes, captured before it runs. Original foreign key and unique column values are read then,
-/// because accepting the save overwrites them; keys and current values are read after it, because generated keys are
-/// temporary until the save runs. A changed owned row counts as its owner modified. An original value is what EF
-/// loaded, so it's only used where EF's <c>UPDATE</c> or <c>DELETE</c> checks the database still holds it.
+/// The rows one save writes, captured when EF initialises the save's first command: after every <c>SavingChanges</c>
+/// interceptor, EF's change detection and its own cascades, before any row is written. Original foreign key and unique
+/// column values are read then, because accepting the save overwrites them; keys and current values are read after it,
+/// because generated keys are temporary until the save runs. A changed owned row counts as its owner modified. An
+/// original value is what EF loaded, so it's only used where EF's <c>UPDATE</c> or <c>DELETE</c> checks the database
+/// still holds it. A row stored in a table another entity type maps too (table splitting) also changes that type's row.
 /// </summary>
 internal sealed class CapturedSave
 {
-    private readonly List<(EntityEntry Entry, EntityState State)> _changes = [];
+    // Each row, with the properties it writes when that's needed later, after EF has accepted the save: an update's
+    // modified properties, for a type sharing its table with another.
+    private readonly List<(
+        EntityEntry Entry,
+        EntityState State,
+        IReadOnlyCollection<IProperty> Written
+    )> _changes = [];
     private readonly List<Dependency> _originals = [];
     private readonly HashSet<IEntityType> _unversioned = [];
 
     private CapturedSave(ContextTransaction transaction) => Transaction = transaction;
 
     /// <summary>
-    /// The transaction the save began in. Only a save left over when its context saves again uses it; a save that
-    /// completes reads its transaction then.
+    /// The transaction the save's first command ran in, with the ambient one its connection was opened in when the
+    /// command couldn't see one. A save that completes reads its transaction again then, and falls back on the
+    /// ambient one recorded here; a save left over when its context saves again uses this.
     /// </summary>
     internal ContextTransaction Transaction { get; }
 
@@ -30,47 +39,55 @@ internal sealed class CapturedSave
     /// </summary>
     internal IReadOnlyCollection<IEntityType> Unversioned => _unversioned;
 
-    /// <summary>Captures what <paramref name="context"/> is about to save, without changing what EF saves.</summary>
-    /// <exception cref="NotSupportedException">The context's provider isn't relational.</exception>
-    internal static CapturedSave Capture(DbContext context)
+    /// <summary>
+    /// Captures what <paramref name="context"/> is saving, from its first command, without changing what EF saves.
+    /// </summary>
+    /// <param name="context">The context whose save EF is about to run the first command of.</param>
+    /// <param name="transaction">The transaction that command runs in.</param>
+    /// <exception cref="InvalidOperationException">
+    /// The model has a key, foreign key or unique column whose value converter isn't known to round-trip
+    /// (<see cref="ModelSources.EnsureRoundTrips"/>).
+    /// </exception>
+    internal static CapturedSave Capture(DbContext context, ContextTransaction transaction)
     {
-        // First, so a provider Sluice can't see transactions for is refused before anything else happens.
-        var save = new CapturedSave(ContextTransaction.Of(context));
+        // Before the save writes anything: once it has, a refusal could only be logged.
+        ModelSources.EnsureRoundTrips(context.Model);
+        var save = new CapturedSave(transaction);
         var tracker = context.ChangeTracker;
 
-        // EF cascades OnSaveChanges deletes after this point; surface them now. The public call forces every
-        // cascade, so it's skipped when either timing is Never: it would delete what EF was told to leave.
-        if (
-            (
-                tracker.CascadeDeleteTiming is CascadeTiming.OnSaveChanges
-                || tracker.DeleteOrphansTiming is CascadeTiming.OnSaveChanges
-            )
-            && tracker.CascadeDeleteTiming is not CascadeTiming.Never
-            && tracker.DeleteOrphansTiming is not CascadeTiming.Never
-        )
+        // EF has detected changes and applied its own cascades by now, and accepts none until every batch has run.
+        // Detecting again would scan the tracker once more, and could only find an edit made since (by a command
+        // interceptor), which this save doesn't write.
+        var detect = tracker.AutoDetectChangesEnabled;
+        List<EntityEntry> entries;
+        tracker.AutoDetectChangesEnabled = false;
+        try
         {
-            tracker.CascadeChanges();
+            entries = [.. tracker.Entries()];
+        }
+        finally
+        {
+            tracker.AutoDetectChangesEnabled = detect;
         }
 
-        // Entries() detects changes only when AutoDetectChangesEnabled, exactly as SaveChanges is about to.
-        var entries = tracker.Entries().ToList();
         foreach (var entry in entries)
         {
-            if (
-                entry.State
-                is not (EntityState.Added or EntityState.Modified or EntityState.Deleted)
-            )
+            var state = StateOf(entry);
+            if (state is not (EntityState.Added or EntityState.Modified or EntityState.Deleted))
             {
                 continue;
             }
 
             if (!entry.Metadata.IsOwned())
             {
-                save.Add(entry, entry.State);
+                save.Add(entry, state);
             }
             // An owned row is part of its owner, and readers only see it through the owner, which the tracker leaves
-            // Unchanged. A changed owner is captured in its own right.
-            else if (OwnerOf(entry, entries) is { State: EntityState.Unchanged } owner)
+            // unchanged. A changed owner is captured in its own right.
+            else if (
+                OwnerOf(entry, entries) is var owner
+                && StateOf(owner) is EntityState.Unchanged
+            )
             {
                 save.Add(owner, EntityState.Modified);
             }
@@ -78,6 +95,16 @@ internal sealed class CapturedSave
 
         return save;
     }
+
+    // The entry's own state. Before a save's first command, EF marks every unchanged entry that shares a row with a
+    // changed one (table splitting, an owned type in its owner's table) Modified with nothing modified, so the row's
+    // command carries it; what it writes is the other entry's, which is captured as itself.
+    private static EntityState StateOf(EntityEntry entry) =>
+        entry.State is EntityState.Modified
+        && !entry.Properties.Any(property => property.IsModified)
+        && !entry.ComplexProperties.Any(property => property.IsModified)
+            ? EntityState.Unchanged
+            : entry.State;
 
     /// <summary>
     /// Everything the save may have changed: each row's key, and its foreign keys and unique columns before and after,
@@ -88,7 +115,7 @@ internal sealed class CapturedSave
     internal List<Dependency> Dependencies()
     {
         var dependencies = new List<Dependency>(_originals);
-        foreach (var (entry, state) in _changes)
+        foreach (var (entry, state, written) in _changes)
         {
             // A failed save's generated keys are temporary again, though an earlier batch may have committed the
             // row under one. Which row is unknown, so the whole type is invalidated, and so is the whole of each
@@ -172,23 +199,77 @@ internal sealed class CapturedSave
 
                 dependencies.AddRange(ModelSources.Cascades(entityType));
             }
+
+            foreach (var sharer in ModelSources.RowSharers(entityType))
+            {
+                dependencies.AddRange(SharerDependencies(entry, state, written, sharer));
+            }
         }
 
         return dependencies;
     }
 
+    // What a save of a row changes for another type stored in the same row (table splitting). A delete deletes the
+    // row, so its row too: by key, or whole for a composite or unknown key. An insert or update changes it where the
+    // save writes a column the other type maps: its row, and, whole, its foreign keys and unique columns in those
+    // columns, whose value before is unknown, since that type's entry isn't loaded.
+    private static IEnumerable<Dependency> SharerDependencies(
+        EntityEntry entry,
+        EntityState state,
+        IReadOnlyCollection<IProperty> written,
+        ModelSources.RowSharer sharer
+    )
+    {
+        var key = sharer.OwnKey is { } ownKey
+            ? KeyOf(entry, ownKey, Current, convertTo: sharer.Key)
+            : null;
+        if (state is EntityState.Deleted)
+        {
+            return key is not null && sharer.Key is [_]
+                ? ModelSources.KeyedDeleteDependencies(sharer.Root, [key])
+                : ModelSources.AllDependencies(sharer.Root, sharers: false);
+        }
+
+        bool Writes(IReadOnlyList<IProperty> properties) =>
+            state is EntityState.Added || properties.Any(written.Contains);
+
+        var source = ModelSources.Entity(sharer.Root);
+        return
+        [
+            .. Writes(sharer.Shared)
+                ? [key is null ? source.All : source.For(key)]
+                : (Dependency[])[],
+            .. sharer
+                .Columns.Where(column => Writes(column.Writers))
+                .Select(column => column.Whole),
+        ];
+    }
+
     private void Add(EntityEntry entry, EntityState state)
     {
-        _changes.Add((entry, state));
+        _changes.Add(
+            (
+                entry,
+                state,
+                state is EntityState.Modified && ModelSources.RowSharers(entry.Metadata).Length > 0
+                    ?
+                    [
+                        .. entry
+                            .Properties.Where(property => property.IsModified)
+                            .Select(property => property.Metadata),
+                    ]
+                    : []
+            )
+        );
         if (state is EntityState.Added)
         {
             return;
         }
 
-        // Whether EF writes the row itself: an owner saved for its owned row's sake is left unchanged by the tracker, so
+        // Whether EF writes the row itself: an owner saved for its owned row's sake has nothing of its own modified, so
         // EF checks none of its values.
         var entityType = entry.Metadata;
-        var written = entry.State is EntityState.Modified or EntityState.Deleted;
+        var written = StateOf(entry) is EntityState.Modified or EntityState.Deleted;
         foreach (var foreignKey in entityType.GetForeignKeys())
         {
             var source = ModelSources.ForeignKey(foreignKey);
@@ -310,24 +391,29 @@ internal sealed class CapturedSave
 
     // The key a model source takes: the value itself, or an array of the values of a composite key.
     // Null when any part is null, or stored as null by its converter (a foreign key that points nowhere), or unknown.
-    // A principal's key, read for its dependents' source, is stored as their foreign key stores it: storedAs.
+    // A principal's key, read for its dependents' source, is stored as their foreign key stores it: storedAs. Another
+    // type's key over the same columns is that type's value of what they store: convertTo.
     private static object? KeyOf(
         EntityEntry entry,
         IReadOnlyList<IProperty> properties,
         Func<PropertyEntry, object?> value,
-        IReadOnlyList<IProperty>? storedAs = null
+        IReadOnlyList<IProperty>? storedAs = null,
+        IReadOnlyList<IProperty>? convertTo = null
     )
     {
         var values = new object[properties.Count];
         for (var i = 0; i < values.Length; i++)
         {
-            if (
-                ModelSources.StoredValue(
-                    (storedAs ?? properties)[i],
-                    value(entry.Property(properties[i]))
-                )
-                is not { } part
-            )
+            var part = ModelSources.StoredValue(
+                (storedAs ?? properties)[i],
+                value(entry.Property(properties[i]))
+            );
+            if (part is not null && convertTo is not null)
+            {
+                part = ModelSources.ValueAs(properties[i], convertTo[i], part);
+            }
+
+            if (part is null)
             {
                 return null;
             }

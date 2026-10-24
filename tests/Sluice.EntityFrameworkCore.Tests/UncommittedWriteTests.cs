@@ -1,5 +1,6 @@
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
@@ -52,7 +53,7 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
                 .Awaiting(read => read.WasEvicted())
                 .Should()
                 .ThrowAsync<InvalidOperationException>()
-                .WithMessage($"Query 'ef-cached-read' depends on *Customer:{ada}*{Uncommitted}");
+                .WithMessage($"Query 'ef-cached-read' depends on *Customers:{ada}*{Uncommitted}");
             (await bobRead.WasEvicted()).Should().BeTrue("it computed fresh, past the cache");
             (await adaRead.WasEvictedForAnotherCaller())
                 .Should()
@@ -148,7 +149,7 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
             .Awaiting(read => read.WasEvicted())
             .Should()
             .ThrowAsync<InvalidOperationException>()
-            .WithMessage($"*Page:{page.Id}*{Uncommitted}");
+            .WithMessage($"*Pages:{page.Id}*{Uncommitted}");
     }
 
     [Fact]
@@ -260,7 +261,8 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
     }
 
     // A transaction disposed without commit or rollback raises no event, and committed nothing; the provider may hand
-    // its DbTransaction object out again for the next one.
+    // its DbTransaction object out again for the next one. Disposing it closes the connection EF opened for it, which
+    // publishes what it held, as it would had it been committed outside EF.
     [Fact]
     public async Task A_transaction_disposed_without_commit_leaves_nothing_pending()
     {
@@ -277,6 +279,9 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
         }
 
         db.ChangeTracker.Clear();
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("closing the connection published the write, which over-invalidates");
         (await adaRead.WasEvicted()).Should().BeFalse("nothing is pending, and nothing committed");
         await using (var next = await db.Database.BeginTransactionAsync())
         {
@@ -350,6 +355,401 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
         (await adaRead.WasEvicted())
             .Should()
             .BeFalse("without the box, the transaction isn't seen");
+    }
+
+    // EF raises no event for a savepoint made outside it, so these go through EF. PostgreSQL keeps the savepoint it
+    // rolls back to.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Writes_rolled_back_to_a_savepoint_are_no_longer_pending_and_those_before_it_still_are(
+        bool sync,
+        bool bulk
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, bob) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Rename(bob, "Bob Babbage");
+
+        await Savepoint(transaction, sync);
+        if (bulk)
+        {
+            var renameAda = db.Customers.ForKey(ada);
+            _ = sync
+                ? renameAda.ExecuteUpdate(set => set.SetProperty(c => c.Name, "Ada Lovelace"))
+                : await renameAda.ExecuteUpdateAsync(set =>
+                    set.SetProperty(c => c.Name, "Ada Lovelace")
+                );
+        }
+        else
+        {
+            (await db.Customers.SingleAsync(c => c.Id == ada)).Name = "Ada Lovelace";
+            _ = sync ? db.SaveChanges() : await db.SaveChangesAsync();
+        }
+
+        await RollBackToSavepoint(transaction, sync);
+
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("Ada's write was undone, so her read computes fresh past Bob's pending write");
+        await bobRead
+            .Awaiting(read => read.WasEvicted())
+            .Should()
+            .ThrowAsync<InvalidOperationException>("Bob's write came before the savepoint")
+            .WithMessage(Uncommitted);
+        await transaction.CommitAsync();
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("what was undone still publishes when the transaction ends");
+        (await db.NameOf(ada)).Should().Be("Ada");
+        (await db.NameOf(bob)).Should().Be("Bob Babbage");
+    }
+
+    [Fact]
+    public async Task A_released_savepoint_s_writes_belong_to_the_one_around_it()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, bob) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+
+        await transaction.CreateSavepointAsync("outer");
+        await db.Rename(bob, "Bob Babbage");
+        await transaction.CreateSavepointAsync("inner");
+        await db.Rename(ada, "Ada Lovelace");
+        await transaction.ReleaseSavepointAsync("inner");
+        await transaction.RollbackToSavepointAsync("outer");
+
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing is pending, and nothing has ended");
+        (await bobRead.WasEvicted()).Should().BeFalse("nothing is pending, and nothing has ended");
+    }
+
+    // Casebridge's unit of work names every savepoint alike. PostgreSQL's ROLLBACK TO keeps the savepoint, a new one
+    // of the same name shadows it, and a release drops the newer, so the last rollback goes back to the first.
+    [Fact]
+    public async Task A_savepoint_name_reused_after_a_rollback_shadows_the_first()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, bob) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+
+        await transaction.CreateSavepointAsync("uow_1");
+        await db.Rename(ada, "Ada Lovelace");
+        await transaction.RollbackToSavepointAsync("uow_1");
+        await transaction.CreateSavepointAsync("uow_1");
+        await db.Rename(bob, "Bob Babbage");
+        await transaction.ReleaseSavepointAsync("uow_1");
+        await db.Rename(ada, "Ada Byron");
+        await transaction.RollbackToSavepointAsync("uow_1");
+
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing is pending, and nothing has ended");
+        (await bobRead.WasEvicted()).Should().BeFalse("nothing is pending, and nothing has ended");
+        await transaction.CommitAsync();
+        (await db.NameOf(ada)).Should().Be("Ada");
+        (await db.NameOf(bob)).Should().Be("Bob");
+        (await adaRead.WasEvicted()).Should().BeTrue("the commit publishes what was undone");
+        (await bobRead.WasEvicted()).Should().BeTrue("the commit publishes what was undone");
+    }
+
+    // Npgsql hands the same DbTransaction object out for the next transaction on the connection, so a save left over
+    // from the first is told apart by EF's id for it. No savepoint, so nothing rolls the conflict's write back.
+    [Fact]
+    public async Task A_save_left_over_from_an_ended_transaction_is_not_pending_in_the_next_one_on_the_connection()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node);
+        db.Database.AutoSavepointsEnabled = false;
+        var (ada, bob) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        await db.Database.OpenConnectionAsync();
+        using var flow = SluiceFlow.Begin();
+        var first = await db.Database.BeginTransactionAsync();
+        var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
+        await reader.Customers.Where(c => c.Id == bob).ExecuteDeleteAsync();
+        customers.ForEach(c => c.Name += " (edited)");
+        var conflict = () => db.SaveChangesAsync();
+        await conflict.Should().ThrowAsync<DbUpdateConcurrencyException>();
+        var firstTransaction = first.GetDbTransaction();
+        await first.DisposeAsync();
+
+        await using var next = await db.Database.BeginTransactionAsync();
+        next.GetDbTransaction().Should().BeSameAs(firstTransaction);
+        db.ChangeTracker.Clear();
+        db.Customers.Add(new Customer { Name = "Cy" });
+        await db.SaveChangesAsync();
+
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue(
+                "Ada's leftover isn't pending, so her read computes fresh past Cy's pending insert"
+            );
+    }
+
+    // EF rolls a failed save back to the savepoint it made for it; one whose earlier statements ran is undone too.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_save_that_fails_inside_the_flow_s_transaction_leaves_nothing_pending(
+        bool sync
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        var slug = $"taken-{Guid.NewGuid():N}";
+        db.Pages.Add(new Page { Slug = slug, Section = $"taken-{Guid.NewGuid():N}" });
+        await db.SaveChangesAsync();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+
+        (await db.Customers.SingleAsync(c => c.Id == ada)).Name = "Ada Lovelace";
+        db.Pages.Add(new Page { Slug = slug, Section = $"taken-{Guid.NewGuid():N}" });
+        var save = () => sync ? Task.FromResult(db.SaveChanges()) : db.SaveChangesAsync();
+        await save.Should().ThrowAsync<DbUpdateException>();
+
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing is pending, and nothing has ended");
+        await transaction.CommitAsync();
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the commit publishes what the save may have written");
+        (await db.NameOf(ada)).Should().Be("Ada");
+    }
+
+    [Fact]
+    public async Task A_concurrency_conflict_inside_the_flow_s_transaction_leaves_nothing_pending()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node);
+        var (ada, bob) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
+        await reader.Customers.Where(c => c.Id == bob).ExecuteDeleteAsync();
+
+        customers.ForEach(c => c.Name += " (edited)");
+        var save = () => db.SaveChangesAsync();
+        await save.Should().ThrowAsync<DbUpdateConcurrencyException>();
+
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing is pending, and nothing has ended");
+        await transaction.CommitAsync();
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the commit publishes what the save may have written");
+    }
+
+    [Fact]
+    public async Task A_rollback_to_a_savepoint_that_fails_leaves_its_writes_pending()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node, before: [new FailRollbackToSavepoint()]);
+        var (ada, _) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+
+        await transaction.CreateSavepointAsync("a");
+        await db.Rename(ada, "Ada Lovelace");
+        var rollBack = () => transaction.RollbackToSavepointAsync("a");
+        await rollBack.Should().ThrowAsync<InvalidOperationException>();
+
+        await adaRead
+            .Awaiting(read => read.WasEvicted())
+            .Should()
+            .ThrowAsync<InvalidOperationException>("the write is still in the transaction")
+            .WithMessage(Uncommitted);
+    }
+
+    // The probe joins the box at the flow's first write in the transaction, and reports every write the transaction
+    // has pending, those before the box included.
+    [Theory]
+    [InlineData(Kind.EfTransaction)]
+    [InlineData(Kind.UsedTransaction)]
+    public async Task A_transaction_begun_before_Begin_is_checked_from_its_first_write_inside_it(
+        Kind kind
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb(enlist: false);
+        var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        await using var transaction = await Begin(node, kind);
+        await transaction.Db.Rename(bob, "Bob Babbage");
+
+        using var flow = SluiceFlow.Begin();
+        await transaction.Db.Rename(ada, "Ada Lovelace");
+
+        await adaRead
+            .Awaiting(read => read.WasEvicted())
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(Uncommitted);
+        await bobRead
+            .Awaiting(read => read.WasEvicted())
+            .Should()
+            .ThrowAsync<InvalidOperationException>("the write before the box is pending too")
+            .WithMessage(Uncommitted);
+    }
+
+    // A cached read has no context to look at, so a transaction is seen only through a write the flow makes in it
+    // inside the box (the documented remedy: call Begin() before opening it).
+    [Fact]
+    public async Task A_transaction_written_in_only_before_Begin_is_not_checked()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Rename(ada, "Ada Lovelace");
+
+        using var flow = SluiceFlow.Begin();
+
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeFalse("the cached value from before the save is served");
+    }
+
+    // Each flow's box gets its own probe of the transaction, at its own first write in it.
+    [Fact]
+    public async Task An_enlisted_transaction_written_in_from_two_flows_with_boxes_is_checked_in_both()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb(enlist: false);
+        var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var bobRead = await CachedRead.Customer(node.Cache, bob);
+        await using var transaction = await Begin(node, Kind.EnlistedTransaction);
+
+        async Task WriteAndRead(int id, string name, CachedRead read)
+        {
+            using var flow = SluiceFlow.Begin();
+            await transaction.Db.Rename(id, name);
+            await read.Awaiting(r => r.WasEvicted())
+                .Should()
+                .ThrowAsync<InvalidOperationException>()
+                .WithMessage(Uncommitted);
+        }
+
+        // Each on a flow of its own, without this one's box, one after the other, since they share the context.
+        Task OnItsOwnFlow(Func<Task> write)
+        {
+            using (ExecutionContext.SuppressFlow())
+            {
+                return Task.Run(write);
+            }
+        }
+
+        await OnItsOwnFlow(() => WriteAndRead(ada, "Ada Lovelace", adaRead));
+        await OnItsOwnFlow(() => WriteAndRead(bob, "Bob Babbage", bobRead));
+    }
+
+    // Committing or rolling back the DbTransaction itself raises no EF event, and EF still holds it, so Sluice sees the
+    // end when it next looks: at the flow's next cached read.
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public async Task A_transaction_committed_outside_EF_is_evicted_at_the_flow_s_next_read_and_leaves_nothing_pending(
+        bool commit,
+        bool sync
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Rename(ada, "Ada Lovelace");
+
+        var raw = transaction.GetDbTransaction();
+        switch (commit, sync)
+        {
+            case (true, true):
+                raw.Commit();
+                break;
+            case (true, false):
+                await raw.CommitAsync();
+                break;
+            case (false, true):
+                raw.Rollback();
+                break;
+            default:
+                await raw.RollbackAsync();
+                break;
+        }
+
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the read saw the transaction end, and published");
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing is pending, so it cached again");
+        (await reader.NameOf(ada)).Should().Be(commit ? "Ada Lovelace" : "Ada");
+    }
+
+    // A failed statement aborts a PostgreSQL transaction without ending it: it holds its writes until it's rolled back.
+    [Fact]
+    public async Task A_failed_statement_in_the_flow_s_transaction_keeps_its_writes_pending()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        db.Database.AutoSavepointsEnabled = false;
+        var (ada, _) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        using var flow = SluiceFlow.Begin();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Rename(ada, "Ada Lovelace");
+
+        var fail = () => db.Database.ExecuteSqlRawAsync("select 1 / 0");
+        await fail.Should().ThrowAsync<PostgresException>();
+
+        await adaRead
+            .Awaiting(read => read.WasEvicted())
+            .Should()
+            .ThrowAsync<InvalidOperationException>("the aborted transaction hasn't ended")
+            .WithMessage(Uncommitted);
+    }
+
+    private static Task Savepoint(IDbContextTransaction transaction, bool sync)
+    {
+        if (!sync)
+        {
+            return transaction.CreateSavepointAsync("a");
+        }
+
+        transaction.CreateSavepoint("a");
+        return Task.CompletedTask;
+    }
+
+    private static Task RollBackToSavepoint(IDbContextTransaction transaction, bool sync)
+    {
+        if (!sync)
+        {
+            return transaction.RollbackToSavepointAsync("a");
+        }
+
+        transaction.RollbackToSavepoint("a");
+        return Task.CompletedTask;
     }
 
     // Not async, so a TransactionScope it creates is the caller's ambient transaction, as it would be in the caller.

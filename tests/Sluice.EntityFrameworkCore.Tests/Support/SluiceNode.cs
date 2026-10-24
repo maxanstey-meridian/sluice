@@ -26,7 +26,10 @@ public sealed class SluiceNode : IAsyncDisposable
         bool validateScopes = false
     )
     {
-        var collection = new ServiceCollection().AddFakeLogging().AddSluice(configure);
+        var collection = new ServiceCollection()
+            .AddFakeLogging()
+            .AddSluice(configure)
+            .AddSluiceEntityFrameworkCore();
         services?.Invoke(collection);
         if (
             !collection.Any(service =>

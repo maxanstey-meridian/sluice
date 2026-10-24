@@ -94,7 +94,12 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         (await adaRead.WasEvicted())
             .Should()
             .BeTrue("the outer save committed before the inner save's transaction began");
-        (await bobRead.WasEvicted()).Should().BeFalse("the inner transaction never committed");
+        (await bobRead.WasEvicted())
+            .Should()
+            .BeTrue(
+                "the inner transaction never committed, but disposing it closed its connection, which publishes "
+                    + "what it held in case it was committed outside EF; that only over-invalidates"
+            );
     }
 
     [Fact]
@@ -225,10 +230,13 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         (await bobRead.WasEvicted()).Should().BeTrue("the commit publishes the second save");
     }
 
+    // Sluice can't tell a transaction disposed without commit from one committed outside EF and then disposed: neither
+    // raises an event. So what it held publishes when its DbTransaction object is handed out again (Npgsql reuses it),
+    // which over-invalidates the first, and is needed for the second.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task A_transaction_disposed_without_commit_evicts_nothing_even_when_its_connection_commits_later(
+    public async Task A_transaction_disposed_without_commit_evicts_when_its_connection_begins_the_next(
         bool sync
     )
     {
@@ -243,7 +251,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await db.Rename(ada, "Ada Lovelace");
         var abandonedTransaction = abandoned.GetDbTransaction();
         await abandoned.DisposeAsync();
-        (await adaRead.WasEvicted()).Should().BeFalse("nothing committed");
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the transaction end yet");
 
         await using var next = sync
             ? db.Database.BeginTransaction()
@@ -251,12 +259,98 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         next.GetDbTransaction()
             .Should()
             .BeSameAs(abandonedTransaction, "Npgsql reuses a connection's transaction object");
-        await next.CommitAsync();
 
         (await adaRead.WasEvicted())
             .Should()
-            .BeFalse("the abandoned transaction's write never committed");
+            .BeTrue("the next transaction on the object published what the abandoned one held");
+        await next.CommitAsync();
+        (await adaRead.WasEvicted()).Should().BeFalse("the next transaction wrote nothing");
         (await reader.NameOf(ada)).Should().Be("Ada");
+    }
+
+    // Npgsql refuses a command in a transaction committed on the DbTransaction itself, so the save fails before it
+    // writes; Sluice sees the save start, which is where it looks. Without savepoints, since EF making one there fails
+    // and is reported as a failed transaction, which publishes too.
+    [Fact]
+    public async Task A_write_after_its_transaction_was_committed_outside_EF_evicts_what_the_transaction_wrote()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node);
+        db.Database.AutoSavepointsEnabled = false;
+        var (ada, bob) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        customers.Single(c => c.Id == ada).Name = "Ada Lovelace";
+        await db.SaveChangesAsync();
+
+        await transaction.GetDbTransaction().CommitAsync();
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
+        customers.Single(c => c.Id == bob).Name = "Bob Babbage";
+        var save = () => db.SaveChangesAsync();
+
+        (
+            await save.Should().ThrowAsync<DbUpdateException>()
+        ).WithInnerException<InvalidOperationException>("Npgsql refuses the ended transaction");
+        (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+        (await adaRead.WasEvicted()).Should().BeTrue("the save saw the transaction had ended");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_transaction_committed_outside_EF_then_disposed_is_evicted_when_its_connection_closes(
+        bool sync
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node);
+        var (ada, _) = await db.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var transaction = await db.Database.BeginTransactionAsync();
+        await db.Rename(ada, "Ada Lovelace");
+
+        await transaction.GetDbTransaction().CommitAsync();
+        (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
+        if (sync)
+        {
+            transaction.Dispose();
+        }
+        else
+        {
+            await transaction.DisposeAsync();
+        }
+
+        (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("disposing the transaction closed the connection EF opened for it");
+    }
+
+    // A provider or interceptor that writes without a SaveChanges command looks like this to Sluice.
+    [Fact]
+    public async Task A_save_that_reports_rows_written_without_a_command_logs_an_error()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        await using var db = postgres.CreateDb(node, after: [new SuppressSave(rows: 1)]);
+        var (ada, _) = await reader.AddCustomers();
+
+        db.Customers.Attach(new Customer { Id = ada, Name = "Ada" }).Entity.Name = "Ada Lovelace";
+        await db.SaveChangesAsync();
+
+        node.Logs.GetSnapshot()
+            .Should()
+            .ContainSingle(record =>
+                record.Category == typeof(SluiceInterceptor).FullName
+                && record.Level == LogLevel.Error
+                && record.Id.Id == 6
+            )
+            .Which.Message.Should()
+            .Contain("ShopDb")
+            .And.Contain("1 rows");
     }
 
     [Fact]

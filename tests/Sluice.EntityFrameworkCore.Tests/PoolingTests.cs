@@ -22,7 +22,7 @@ public sealed class PoolingTests(PostgresFixture postgres)
     [InlineData(Registration.DbContextPool)]
     [InlineData(Registration.PooledDbContextFactory)]
     [InlineData(Registration.DbContextFactory)]
-    public async Task Each_lease_evicts_what_it_commits_and_nothing_an_earlier_lease_left_uncommitted(
+    public async Task Each_lease_evicts_what_it_wrote_and_nothing_an_earlier_lease_wrote(
         Registration registration
     )
     {
@@ -75,6 +75,13 @@ public sealed class PoolingTests(PostgresFixture postgres)
             await db.Rename(ada, "Ada Lovelace");
         }
 
+        // Ending the lease disposes its abandoned transaction and closes its connection, and a write still pending
+        // when its connection closes is published, since over-invalidating is safe.
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("the first lease's connection closed with its write pending");
+        (await reader.NameOf(ada)).Should().Be("Ada", "the transaction never committed");
+
         (db, lease) = Lease();
         await using (lease)
         {
@@ -91,7 +98,6 @@ public sealed class PoolingTests(PostgresFixture postgres)
         (await bobRead.WasEvicted()).Should().BeTrue();
         (await adaRead.WasEvicted())
             .Should()
-            .BeFalse("the first lease's transaction never committed");
-        (await reader.NameOf(ada)).Should().Be("Ada");
+            .BeFalse("the second lease's save doesn't publish what the first lease wrote again");
     }
 }

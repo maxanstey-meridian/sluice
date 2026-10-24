@@ -13,6 +13,7 @@ public sealed class ComputeScopeTests
 {
     private static readonly Source<int> _rows = new("scope-rows");
     private static readonly Query<string, bool> _query = new("scope-query");
+    private static readonly Query<string, object?> _checked = new("scope-checked");
 
     private class Held : IAsyncDisposable
     {
@@ -626,6 +627,139 @@ public sealed class ComputeScopeTests
         late.Should()
             .Throw<InvalidOperationException>()
             .WithMessage("*already returned, so nothing more can run before its value is stored*");
+    }
+
+    [Fact]
+    public async Task A_store_check_that_refuses_a_value_fails_the_call_and_caches_nothing()
+    {
+        await using var node = new SluiceNode();
+        var refused = new object();
+        var refusal = new InvalidOperationException("refused");
+        var log = new List<string>();
+        SluiceReads? running = null;
+        Held? held = null;
+        var runs = 0;
+
+        Exception? Check(object value)
+        {
+            log.Add(
+                $"{(value == refused ? "refused" : "kept")}: own compute {ActiveCompute.Reads == running}, "
+                    + $"held {held is { Disposed: false }}"
+            );
+            return value == refused ? refusal : null;
+        }
+
+        StoreChecks.Add(node.Cache, Check);
+        StoreChecks.Add(node.Cache, Check);
+
+        Task<object?> Get(string key, object? value) =>
+            node
+                .Cache.GetOrSetAsync(
+                    _checked,
+                    key,
+                    (read, _) =>
+                    {
+                        runs++;
+                        running = read;
+                        read.From(_rows.For(1));
+                        held = ActiveCompute.Hold(read, _ => new Held());
+                        return Task.FromResult(value);
+                    }
+                )
+                .AsTask();
+
+        var call = () => Get("k", refused);
+
+        (await call.Should().ThrowAsync<InvalidOperationException>())
+            .Which.Should()
+            .BeSameAs(refusal);
+        held!.Disposed.Should().BeTrue();
+        var kept = new object();
+        (await Get("k", kept)).Should().BeSameAs(kept, "nothing was cached");
+        (await Get("k", refused)).Should().BeSameAs(kept, "a hit isn't checked");
+        (await Get("null", null)).Should().BeNull();
+        runs.Should().Be(3);
+        log.Should()
+            .Equal("refused: own compute True, held True", "kept: own compute True, held True");
+    }
+
+    [Theory]
+    [InlineData("throws")]
+    [InlineData("records a violation")]
+    [InlineData("records no dependencies")]
+    [InlineData("leaves uncached")]
+    [InlineData("runs while the flow has uncommitted writes")]
+    public async Task Store_checks_do_not_run_when_nothing_will_be_stored(string ending)
+    {
+        await using var node = new SluiceNode();
+        var ran = false;
+        StoreChecks.Add(
+            node.Cache,
+            _ =>
+            {
+                ran = true;
+                return new InvalidOperationException("refused");
+            }
+        );
+        using var flow = SluiceFlow.Begin();
+        if (ending == "runs while the flow has uncommitted writes")
+        {
+            FlowWrites.AddProbe(node.Cache, "transaction", () => [_rows.For(2)]);
+        }
+
+        var call = async () =>
+            await node.Cache.GetOrSetAsync(
+                _query,
+                ending,
+                (read, ct) =>
+                {
+                    if (ending != "records no dependencies")
+                    {
+                        read.From(_rows.For(1));
+                    }
+
+                    switch (ending)
+                    {
+                        case "throws":
+                            throw new InvalidOperationException("compute failed");
+                        case "records a violation":
+                            _ = ActiveCompute.Violate(
+                                read,
+                                new InvalidOperationException("guard violated")
+                            );
+                            break;
+                        case "leaves uncached":
+                            read.DoNotCache();
+                            break;
+                    }
+
+                    return Task.FromResult(false);
+                }
+            );
+
+        switch (ending)
+        {
+            case "throws":
+                await call.Should()
+                    .ThrowAsync<InvalidOperationException>()
+                    .WithMessage("compute failed");
+                break;
+            case "records a violation":
+                await call.Should()
+                    .ThrowAsync<InvalidOperationException>()
+                    .WithMessage("guard violated");
+                break;
+            case "records no dependencies":
+                await call.Should()
+                    .ThrowAsync<InvalidOperationException>()
+                    .WithMessage("*recorded no dependencies*");
+                break;
+            default:
+                (await call()).Should().BeFalse();
+                break;
+        }
+
+        ran.Should().BeFalse();
     }
 
     private static Task<bool> Fresh(SluiceReads read, CancellationToken ct)

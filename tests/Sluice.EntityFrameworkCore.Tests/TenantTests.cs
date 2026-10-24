@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
@@ -7,15 +8,21 @@ namespace Sluice.EntityFrameworkCore.Tests;
 /// <summary>
 /// Tenants: <c>read.Db(configure)</c> sets the compute's own context up from the compute's arguments, so a query filter
 /// on the context's tenant works inside a compute; the context comes from a DI scope of the compute's own, so it can
-/// take scoped services. What Sluice can't check, it takes on trust, and these tests pin down where that line is.
+/// take scoped services, and is made without the caller's async state, so it keeps nothing of the caller's request. A
+/// pooled context is built, never leased. What Sluice can't check, it takes on trust, and these tests pin down where
+/// that line is.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 public sealed class TenantTests : IAsyncLifetime
 {
     private static readonly Query<string, List<string>> _tickets = new("helpdesk-tickets");
     private static readonly Query<string, List<string>> _forms = new("helpdesk-forms");
+    private static readonly Query<string, List<string>> _queues = new("helpdesk-queues");
 
     public static TheoryData<string> Registrations => new(["AddDbContext", "scoped factory"]);
+
+    public static TheoryData<string> Pools =>
+        new(["AddDbContextPool", "AddPooledDbContextFactory", "hand-built factory"]);
 
     public Task InitializeAsync() => HelpdeskModel.EnsureCreated();
 
@@ -179,6 +186,9 @@ public sealed class TenantTests : IAsyncLifetime
         var acme = await AddForm(node, "acme");
         var globex = await AddForm(node, "globex");
         var computes = 0;
+
+        // A caller with a tenant of its own: the marked property reads only the service the configure set.
+        AmbientTenant.Current = "acme";
 
         ValueTask<List<string>> Forms(string tenant) =>
             node.Cache.GetOrSetAsync(
@@ -443,44 +453,43 @@ public sealed class TenantTests : IAsyncLifetime
         computes.Should().Be(2);
     }
 
-    // The compute runs on the first caller's flow, so a scoped service reading the request (IHttpContextAccessor, here
-    // an AsyncLocal) reads that caller's tenant inside the compute, whatever the cache key says.
+    // The compute runs on the first caller's flow, but its context, and the scoped services its constructor takes, are
+    // made without that flow, so a constructor reading the request (IHttpContextAccessor, here an AsyncLocal) reads no
+    // caller's tenant, whatever the caller is.
     [Fact]
-    public async Task The_compute_s_context_is_made_on_the_first_caller_s_flow_so_its_scoped_services_see_that_caller_s_tenant()
+    public async Task The_compute_s_context_is_made_without_the_caller_s_async_state()
     {
         await using var node = Node("AddDbContext");
-        string? constructedWith = null;
-        string? serviceSays = null;
+        string? constructedWith = "unset";
         await AddTicket(node, HelpdeskModel.A, "acme");
+        var globex = await AddTicket(node, HelpdeskModel.A, "globex");
         AmbientTenant.Current = "acme";
 
         var tickets = await node.Cache.GetOrSetAsync(
             _tickets,
             "globex",
             (r, ct) =>
-            {
-                var db = r.Db<HelpdeskDb>(db =>
-                {
-                    constructedWith = db.TenantId;
-                    db.TenantId = "globex";
-                });
-                serviceSays = db.Tenants.TenantId;
-                return db.Tickets.Select(t => t.Title).ToListAsync(ct);
-            }
+                r.Db<HelpdeskDb>(db =>
+                    {
+                        constructedWith = db.TenantId;
+                        db.TenantId = "globex";
+                    })
+                    .Tickets.Select(t => t.Title)
+                    .ToListAsync(ct)
         );
 
-        constructedWith.Should().Be("acme", "the constructor read the caller's ambient tenant");
-        serviceSays.Should().Be("acme");
-        tickets.Should().NotContain(title => title.StartsWith("acme-"), "configure overrode it");
+        constructedWith.Should().BeNull("the constructor read no caller's ambient tenant");
+        tickets.Should().Contain(globex).And.OnlyContain(title => title.StartsWith("globex-"));
     }
 
-    // What Sluice takes on trust: a configure that sets something else leaves the tenant the constructor took from
-    // the first caller, and Sluice can't tell, so that caller's rows are cached under a key without a tenant.
+    // What Sluice takes on trust: a configure that sets something else leaves the tenant the constructor took, and
+    // Sluice can't tell, so the rows of that tenant are cached under a key without one. Made without a caller, the
+    // constructor took none, so no caller's rows are served to another.
     [Fact]
-    public async Task A_configure_that_leaves_the_filter_s_state_alone_caches_the_first_caller_s_tenant_for_everyone()
+    public async Task A_configure_that_leaves_the_filter_s_state_alone_caches_what_a_context_made_without_a_caller_reads()
     {
         await using var node = Node("AddDbContext");
-        var acme = await AddTicket(node, HelpdeskModel.A, "acme");
+        await AddTicket(node, HelpdeskModel.A, "acme");
         var query = new Query<string, List<string>>("helpdesk-all-tickets");
 
         Task<List<string>> Compute(SluiceReads r, CancellationToken ct) =>
@@ -489,11 +498,117 @@ public sealed class TenantTests : IAsyncLifetime
                 .ToListAsync(ct);
 
         AmbientTenant.Current = "acme";
-        await node.Cache.GetOrSetAsync(query, "all", Compute);
+        var servedToAcme = await node.Cache.GetOrSetAsync(query, "all", Compute);
         AmbientTenant.Current = "globex";
         var servedToGlobex = await node.Cache.GetOrSetAsync(query, "all", Compute);
 
-        servedToGlobex.Should().Contain(acme);
+        servedToAcme.Should().BeEmpty("the context's tenant is null, which no ticket has");
+        servedToGlobex.Should().BeEmpty();
+    }
+
+    // A marked property's body is the app's promise to read only what the configure sets. One that falls back to the
+    // caller's request reads one value on the caller's flow and another without it, which Sluice sees.
+    [Theory]
+    [InlineData(
+        "desk",
+        "*HelpQueue's query filter \"desk\" reads [SluiceContextState] HelpdeskDb.DeskTenant, which gives a different "
+            + "value with the caller's async state (IHttpContextAccessor, an AsyncLocal) than without it, so it reads "
+            + "the caller rather than what read.Db's configure set*read.Db<HelpdeskDb>(db => …), or "
+            + "(db, services) => … for a scoped service."
+    )]
+    [InlineData(
+        "request",
+        "*HelpQueue's query filter \"request\" reads [SluiceContextState] HelpdeskDb.RequestTenant, which throws "
+            + "without the caller's async state (InvalidOperationException: There's no request.), so it reads the "
+            + "caller*"
+    )]
+    public async Task A_marked_property_reading_the_caller_s_async_state_throws_unless_the_configure_set_it(
+        string filter,
+        string message
+    )
+    {
+        await using var node = Node("AddDbContext");
+        var acme = await AddQueue(node, "acme");
+        var globex = await AddQueue(node, "globex");
+        var other = filter == "desk" ? "request" : "desk";
+        var computes = 0;
+
+        ValueTask<List<string>> Queues(string key, Action<HelpdeskDb> configure) =>
+            node.Cache.GetOrSetAsync(
+                _queues,
+                key,
+                (r, ct) =>
+                {
+                    computes++;
+                    return r.Db(configure)
+                        .Queues.IgnoreQueryFilters([other])
+                        .Select(q => q.Title)
+                        .ToListAsync(ct);
+                }
+            );
+
+        AmbientTenant.Current = "acme";
+        var timeoutOnly = () => Queues("unset", db => db.Database.SetCommandTimeout(30)).AsTask();
+
+        await timeoutOnly.Should().ThrowAsync<InvalidOperationException>().WithMessage(message);
+        await timeoutOnly.Should().ThrowAsync<InvalidOperationException>();
+        computes.Should().Be(2, "nothing was cached");
+        (await Queues("globex", db => db.ReadAs("globex")))
+            .Should()
+            .Contain(globex)
+            .And.NotContain(acme);
+    }
+
+    [Fact]
+    public async Task A_marked_property_reading_the_caller_s_async_state_runs_in_a_compute_with_no_caller()
+    {
+        await using var node = Node("AddDbContext");
+        await AddQueue(node, "acme");
+
+        var queues = await node.Cache.GetOrSetAsync(
+            _queues,
+            "nobody",
+            (r, ct) =>
+                r.Db<HelpdeskDb>(db => db.Database.SetCommandTimeout(30))
+                    .Queues.IgnoreQueryFilters(["request"])
+                    .Select(q => q.Title)
+                    .ToListAsync(ct)
+        );
+
+        queues.Should().BeEmpty("with no caller the desk tenant is null, which no queue has");
+    }
+
+    // The services the configure asks for are made without the caller's async state, whichever way it asks, so one
+    // that reads the request when it's made keeps no caller's.
+    [Fact]
+    public async Task A_scoped_service_the_configure_resolves_first_is_made_without_the_caller_s_async_state()
+    {
+        await using var node = Node("AddDbContext");
+        List<string?> seen = [];
+        AmbientTenant.Current = "acme";
+
+        await node.Cache.GetOrSetAsync(
+            _tickets,
+            "acme",
+            (r, ct) =>
+                r.Db<HelpdeskDb>(
+                        (db, services) =>
+                        {
+                            seen =
+                            [
+                                services.GetService<CallerSnapshot>()!.Tenant,
+                                services.GetRequiredService<CallerSnapshot>().Tenant,
+                                services.GetKeyedService<CallerSnapshot>("keyed")!.Tenant,
+                                services.GetRequiredKeyedService<CallerSnapshot>("keyed").Tenant,
+                            ];
+                            db.TenantId = "acme";
+                        }
+                    )
+                    .Tickets.Select(t => t.Title)
+                    .ToListAsync(ct)
+        );
+
+        seen.Should().HaveCount(4).And.OnlyContain(tenant => tenant == null);
     }
 
     [Fact]
@@ -536,38 +651,108 @@ public sealed class TenantTests : IAsyncLifetime
         services[1].Should().BeSameAs(services[0]);
     }
 
-    // EF resets a pooled context's own state between leases, not the app's fields, nor the connection string.
-    [Fact]
-    public async Task A_pooled_context_keeps_what_a_compute_s_configure_set_for_its_next_lease()
+    // EF resets a pooled context's own state between leases, not the app's fields, nor the connection string, so a
+    // compute's context is built from the pool's options instead, and the pool's instance is left as it was.
+    [Theory]
+    [MemberData(nameof(Pools))]
+    public async Task A_compute_s_context_never_comes_from_the_pool_so_the_next_lease_keeps_nothing_its_configure_set(
+        string pool
+    )
     {
-        await using var node = Pooled(leases: false);
+        await using var node = Pool(pool);
+        DbContextId pooled;
+        await using (var request = node.Services.CreateAsyncScope())
+        {
+            pooled = request.ServiceProvider.GetRequiredService<PooledHelpdeskDb>().ContextId;
+        }
 
+        DbContextId computed = default;
+        DbContextId leasedMeanwhile = default;
         await node.Cache.GetOrSetAsync(
             _tickets,
             "globex",
-            (r, ct) =>
-                r.Db<PooledHelpdeskDb>(db =>
-                    {
-                        db.TenantId = "globex";
-                        db.Database.SetConnectionString(
-                            HelpdeskModel.ConnectionString(HelpdeskModel.B)
-                        );
-                    })
-                    .Tickets.Select(t => t.Title)
-                    .ToListAsync(ct)
-        );
-        await using var next = node
-            .Services.GetRequiredService<IDbContextFactory<PooledHelpdeskDb>>()
-            .CreateDbContext();
+            async (r, ct) =>
+            {
+                var db = r.Db<PooledHelpdeskDb>(db =>
+                {
+                    db.TenantId = "globex";
+                    db.Database.SetConnectionString(
+                        HelpdeskModel.ConnectionString(HelpdeskModel.B)
+                    );
+                });
+                computed = db.ContextId;
+                await using (var request = node.Services.CreateAsyncScope())
+                {
+                    leasedMeanwhile = request
+                        .ServiceProvider.GetRequiredService<PooledHelpdeskDb>()
+                        .ContextId;
+                }
 
-        next.TenantId.Should().Be("globex");
-        next.Database.GetConnectionString().Should().Contain(HelpdeskModel.B);
+                return await db.Tickets.Select(t => t.Title).ToListAsync(ct);
+            }
+        );
+        await using var next = node.Services.CreateAsyncScope();
+        var lease = next.ServiceProvider.GetRequiredService<PooledHelpdeskDb>();
+
+        // A pool registered through EF isn't even leased. One the app built by hand is leased only to see that it's a
+        // pool, and goes back untouched, after the request's lease, so the pool keeps the request's.
+        if (pool == "hand-built factory")
+        {
+            leasedMeanwhile.InstanceId.Should().NotBe(pooled.InstanceId);
+        }
+        else
+        {
+            leasedMeanwhile.InstanceId.Should().Be(pooled.InstanceId);
+        }
+
+        lease
+            .ContextId.InstanceId.Should()
+            .Be(leasedMeanwhile.InstanceId, "the pool keeps one instance");
+        computed.InstanceId.Should().NotBe(pooled.InstanceId).And.NotBe(leasedMeanwhile.InstanceId);
+        lease.TenantId.Should().BeNull();
+        lease.Database.GetConnectionString().Should().Contain(HelpdeskModel.A);
+    }
+
+    // A pooled context's constructor services come from the compute's scope, so the service the configure sets is the
+    // one its marked property reads, not the one the pool made it with.
+    [Fact]
+    public async Task A_pooled_context_s_marked_property_reads_the_service_the_configure_set()
+    {
+        await using var node = new SluiceNode(services: services =>
+        {
+            services.AddScoped<TenantContext>();
+            services.AddPooledDbContextFactory<PooledFormsDb>(
+                (provider, options) =>
+                    options
+                        .UseNpgsql(HelpdeskModel.ConnectionString(HelpdeskModel.A))
+                        .UseSluice(provider),
+                poolSize: 1
+            );
+        });
+        var acme = await AddForm(node, "acme");
+        var globex = await AddForm(node, "globex");
+
+        ValueTask<List<string>> Forms(string tenant) =>
+            node.Cache.GetOrSetAsync(
+                _forms,
+                tenant,
+                (r, ct) =>
+                    r.Db<PooledFormsDb>(
+                            (db, services) =>
+                                services.GetRequiredService<TenantContext>().Set(tenant)
+                        )
+                        .Forms.Select(f => f.Title)
+                        .ToListAsync(ct)
+            );
+
+        (await Forms("acme")).Should().Contain(acme).And.NotContain(globex);
+        (await Forms("globex")).Should().Contain(globex).And.NotContain(acme);
     }
 
     [Fact]
     public async Task With_EF_s_pattern_of_setting_the_tenant_on_every_lease_a_request_gets_its_own()
     {
-        await using var node = Pooled(leases: true);
+        await using var node = PerLease();
 
         await Tickets(node, "globex", pooled: true);
         AmbientTenant.Current = "acme";
@@ -636,6 +821,8 @@ public sealed class TenantTests : IAsyncLifetime
             {
                 services.AddScoped<ITenantProvider, AmbientTenant>();
                 services.AddScoped<TenantContext>();
+                services.AddTransient<CallerSnapshot>();
+                services.AddKeyedTransient<CallerSnapshot>("keyed");
                 var connection = HelpdeskModel.ConnectionString(HelpdeskModel.A);
                 switch (registration)
                 {
@@ -661,8 +848,46 @@ public sealed class TenantTests : IAsyncLifetime
             validateScopes: validateScopes
         );
 
-    // A pool of one, so the next lease is the context the compute used; with leases, EF's tenant-per-lease pattern.
-    private static SluiceNode Pooled(bool leases) =>
+    // A pool of one, registered each way an app can, so a lease after the compute is the pool's one instance.
+    private static SluiceNode Pool(string pool) =>
+        new(services: services =>
+        {
+            var connection = HelpdeskModel.ConnectionString(HelpdeskModel.A);
+            switch (pool)
+            {
+                case "AddDbContextPool":
+                    services.AddDbContextPool<PooledHelpdeskDb>(
+                        (provider, options) => options.UseNpgsql(connection).UseSluice(provider),
+                        poolSize: 1
+                    );
+                    break;
+                case "AddPooledDbContextFactory":
+                    services.AddPooledDbContextFactory<PooledHelpdeskDb>(
+                        (provider, options) => options.UseNpgsql(connection).UseSluice(provider),
+                        poolSize: 1
+                    );
+                    break;
+                case "hand-built factory":
+                    services.AddSingleton<IDbContextFactory<PooledHelpdeskDb>>(
+                        provider => new PooledDbContextFactory<PooledHelpdeskDb>(
+                            new DbContextOptionsBuilder<PooledHelpdeskDb>()
+                                .UseNpgsql(connection)
+                                .UseSluice(provider)
+                                .Options,
+                            poolSize: 1
+                        )
+                    );
+                    services.AddScoped(provider =>
+                        provider
+                            .GetRequiredService<IDbContextFactory<PooledHelpdeskDb>>()
+                            .CreateDbContext()
+                    );
+                    break;
+            }
+        });
+
+    // A pool of one, with EF's tenant-per-lease pattern.
+    private static SluiceNode PerLease() =>
         new(services: services =>
         {
             services.AddScoped<ITenantProvider, AmbientTenant>();
@@ -673,11 +898,8 @@ public sealed class TenantTests : IAsyncLifetime
                         .UseSluice(provider),
                 poolSize: 1
             );
-            if (leases)
-            {
-                services.AddScoped<TenantLeases>();
-                services.AddScoped(provider => provider.GetRequiredService<TenantLeases>().Lease());
-            }
+            services.AddScoped<TenantLeases>();
+            services.AddScoped(provider => provider.GetRequiredService<TenantLeases>().Lease());
         });
 
     private static ValueTask<List<string>> Tickets(
@@ -711,6 +933,23 @@ public sealed class TenantTests : IAsyncLifetime
             new TenantContext()
         );
         db.Forms.Add(new HelpForm { TenantId = tenant, Title = title });
+        await db.SaveChangesAsync();
+        return title;
+    }
+
+    // Saved through a context with UseSluice, so its write invalidates the node's cache.
+    private static async Task<string> AddQueue(SluiceNode node, string tenant)
+    {
+        var title = $"{tenant}-queue-{Guid.NewGuid():N}";
+        await using var db = new HelpdeskDb(
+            new DbContextOptionsBuilder<HelpdeskDb>()
+                .UseNpgsql(HelpdeskModel.ConnectionString(HelpdeskModel.A))
+                .UseSluice(node.Services)
+                .Options,
+            new AmbientTenant(),
+            new TenantContext()
+        );
+        db.Queues.Add(new HelpQueue { TenantId = tenant, Title = title });
         await db.SaveChangesAsync();
         return title;
     }

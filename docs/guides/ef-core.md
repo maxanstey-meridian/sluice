@@ -11,6 +11,7 @@ everywhere else: queries record ordinary dependencies, and writes call
 
 ```csharp
 builder.Services.AddSluice();
+builder.Services.AddSluiceEntityFrameworkCore();
 builder.Services.AddDbContextFactory<ShopDb>(
     (services, options) => options.UseNpgsql(connectionString).UseSluice(services)
 );
@@ -19,18 +20,29 @@ builder.Services.AddDbContextFactory<ShopDb>(
 - Register the context however you like: `AddDbContext`, `AddDbContextFactory`,
   `AddDbContextPool` or `AddPooledDbContextFactory`. Each compute opens a DI scope of its own
   and takes `ShopDb` from it, as a request does (see [Reading](#reading)); each of those
-  registers `ShopDb` as a scoped service. If you register it more than one way, `UseSluice`
-  runs once per context either way. Registered only through a factory class of your own (EF's
-  pattern for setting a pooled context's tenant)? Register the context too, so the scope can
-  make it: `services.AddScoped(sp => sp.GetRequiredService<TenantDbFactory>().CreateDbContext())`.
+  registers `ShopDb` as a scoped service. A pooled registration works too, but a compute's
+  context never comes from the pool (see [Pooling and factories](#pooling-and-factories)). If
+  you register it more than one way, `UseSluice` runs once per context either way. Registered
+  only through a factory class of your own (EF's pattern for setting a pooled context's
+  tenant)? Register the context too, so the scope can make it:
+  `services.AddScoped(sp => sp.GetRequiredService<TenantDbFactory>().CreateDbContext())`.
+- Register the context scoped (every EF registration's default) or transient, never as a
+  singleton. `read.Db` checks, once per context type, that two DI scopes get different
+  instances, and throws `InvalidOperationException` before the compute's first query if they
+  get the same one: a singleton registration, or a factory that hands out one instance, would
+  share one context between every compute and request, and a compute's configure would change
+  it under them.
 - A context whose constructor takes scoped services (a
   [tenant provider](/guides/strict-reads#tenants-and-other-context-state)) needs a registration
   that makes it in the scope: `AddDbContext`, or `AddDbContextFactory(..., ServiceLifetime.Scoped)`.
   The default singleton factory makes it from the root provider, which refuses scoped services
   in Development and, elsewhere, hands every context one shared instance.
-- `UseSluice` needs `SluiceCache` (`AddSluice`) and logging registered. ASP.NET Core and the
-  Generic Host register logging; a bare `ServiceCollection` needs `AddLogging()`. Without
-  either, `UseSluice` throws `InvalidOperationException`.
+- `UseSluice` needs `SluiceCache` (`AddSluice`), the EF package (`AddSluiceEntityFrameworkCore`,
+  called where you call `AddSluice`) and logging registered. ASP.NET Core and the Generic Host register
+  logging; a bare `ServiceCollection` needs `AddLogging()`. Without any of them, `UseSluice`
+  throws `InvalidOperationException`. `AddSluiceEntityFrameworkCore` also starts Sluice's watch
+  for [contexts without `UseSluice`](/guides/strict-reads#a-query-on-another-context) inside a
+  compute, so it covers the very first compute.
 - Relational providers only: Sluice reads each save's transaction from the relational
   connection. A context on any other provider throws `NotSupportedException` when it saves,
   before it writes anything, and `read.Db` and the read helpers refuse it the same way. The
@@ -44,41 +56,50 @@ builder.Services.AddDbContextFactory<ShopDb>(
 
 ### Interceptor order
 
-EF runs interceptors in the order they were added, and Sluice records what a save writes just
-before EF saves it (in `SavingChanges`). Call `UseSluice` *after* adding any interceptor that
-changes entities at that point, such as soft delete, auditing or an outbox, or Sluice misses
-those changes:
+The order of save interceptors doesn't matter. Sluice records what a save writes when EF
+initialises the save's first command: after every `SavingChanges` interceptor (soft delete,
+auditing, an outbox), wherever it was added, after EF's own change detection, and after the
+cascades and orphan deletions EF applies during the save. So whatever those change is
+invalidated too.
+
+A query expression interceptor of your own (`IQueryExpressionInterceptor`) must come before
+`UseSluice`, in the same options:
 
 ```csharp
 builder.Services.AddDbContextFactory<ShopDb>(
     (services, options) =>
         options
             .UseNpgsql(connectionString)
-            .AddInterceptors(new SoftDeleteInterceptor())
+            .AddInterceptors(new ShardingQueryRewriter())
             .UseSluice(services)
 );
 ```
 
-Interceptors added in the context's `OnConfiguring` always run after those in the
-registration's options, so after Sluice. Add such interceptors where you call `UseSluice`
-instead. The same goes for a query expression interceptor of your own: one added after
-`UseSluice`, or in `OnConfiguring`, rewrites queries after Sluice has
-[worked out what they read](#what-a-query-records).
+EF runs query expression interceptors in the order they were added, those in the context's
+`OnConfiguring` last, so one added after `UseSluice`, or in `OnConfiguring`, would rewrite a
+query after Sluice had [worked out what it reads](#what-a-query-records), and a table it adds
+wouldn't be recorded. `read.Db` and the read helpers throw `InvalidOperationException` for such
+a context, naming the interceptor and saying to add it before `UseSluice`.
 
 ### Pooling and factories
 
 `AddDbContextPool((services, options) => ...)`, `AddPooledDbContextFactory` and
 `AddDbContextFactory` all work, for reads and writes. Each use of a pooled context invalidates
-what it commits, and nothing an earlier use left uncommitted. Contexts sharing a transaction
+what it wrote, and nothing an earlier use wrote. Contexts sharing a transaction
 need nothing more, as long as each uses `UseSluice` with the same `SluiceCache`. See
 [Contexts sharing a transaction](/guides/transactions#contexts-sharing-a-transaction).
 
-EF resets a pooled context's own state between uses, but not your fields, and not a
-connection string you set. So what a compute's
-[configure](/guides/strict-reads#tenants-and-other-context-state) sets (a tenant, a tenant's
-database) is still there for the next use, which may be a request's. Set that state on every
-lease, as [EF's docs do for tenants](https://learn.microsoft.com/ef/core/performance/advanced-performance-topics#managing-state-in-pooled-contexts):
-a scoped factory that leases from the pool and sets the request's tenant.
+A compute's context never comes from the pool. EF resets a pooled context's own state between
+uses, but not your fields, and not a connection string you set, so what a compute's
+[configure](/guides/strict-reads#tenants-and-other-context-state) set (a tenant, a tenant's
+database) would still be there for the next use, a request's. Instead, Sluice builds the
+compute's context from the pool's options, with its constructor's other services from the
+compute's own DI scope, and disposes it when the compute ends. A factory of your own that
+leases from the pool is still called (it's how the scope makes the context), but its lease goes
+back untouched. EF's model and internal services are shared, so this costs one context
+construction per compute that uses one. Requests keep using the pool as before, and you still
+set a request's tenant on every lease, as
+[EF's docs do for tenants](https://learn.microsoft.com/ef/core/performance/advanced-performance-topics#managing-state-in-pooled-contexts).
 
 ## Reading
 
@@ -132,13 +153,17 @@ the customer). That's always correct, just broad. When it's too broad, narrow it
 see which queries do this, Sluice logs each one the first time it runs, at `Information`,
 naming the query and the types it reads whole (see [Logging](/guides/configuration#logging)).
 
-Dependencies belong to entity types, the classes in your EF model, not to tables. Each is named
-by EF's entity type name, usually its class's full name, such as `Shop.Domain.Order` (in an
-inheritance hierarchy, the base class's). So a second class mapped to the same table, such as a
-read model in another context, isn't linked to the first: a write through one doesn't evict
-reads through the other. And moving or renaming an entity class changes its dependencies'
-names. See
-[Limitations](/misc/limitations#ef-core).
+Dependencies are named after the tables a type is stored in: `Orders` (or `sales.Orders` when
+the model gives a schema), `Orders[CustomerId]` for the orders under one customer, and
+`Pages(Slug)` for a read by a unique column. An inheritance hierarchy uses its root's table, and
+a TPC hierarchy whose root has no table of its own joins its concrete types' tables
+(`Circles+Squares`). You'll see these names in Sluice's error messages. So a second class mapped
+to the same table, such as a read model in another context, is linked to the first: a write
+through either evicts reads through the other, by key, by foreign key, by unique column and
+whole. Moving or renaming a class changes nothing. Two classes link only when they agree on the
+key columns and spell the schema the same way (`null` and `"public"` are different names); a
+read model over just one table of a TPT or TPC hierarchy isn't linked. Renaming a table or its
+schema, which comes with a migration, renames its dependencies.
 
 ### Narrowing to rows
 
@@ -234,7 +259,7 @@ uncached with [`read.DoNotCache()`](/guides/sources-and-queries#leaving-a-value-
 
 - Pass the key as the exact .NET type the model uses: the primary key's type for `Entity`, the
   foreign key property's for `Children`. A typed id with a value converter is passed as the
-  typed id. Any other type, such as `1L` for an `int` key, throws
+  typed id (and its converter marked `[SluiceRoundTrips]`: see [Key folding](#key-folding)). Any other type, such as `1L` for an `int` key, throws
   `ArgumentException` naming the type expected. The compiler can't check these keys: the type
   comes from the EF model.
 - `Entity` doesn't support composite primary keys: it throws `NotSupportedException`. Use
@@ -262,9 +287,10 @@ anyway:
 - a query filter that reads the context's state, such as a tenant id, unless the compute set it
   with `read.Db<ShopDb>(configure)`, or other state that can change, such as a static tenant
   accessor, a captured service or `DateTime.Now`;
-- entities that load lazily, or hold their context: select the values you need instead;
-- a query on any context other than `read.Db`'s, and reading inside a transaction. See
-  [Transactions](/guides/transactions);
+- entities that load lazily, or hold their context, even wrapped in a type of your own: select
+  the values you need instead;
+- a query on any context other than `read.Db`'s, a context without `UseSluice` included, and
+  reading inside a transaction. See [Transactions](/guides/transactions);
 - another compute's `read`, captured and used in this one (for `read.From`, `read.Db` or a
   helper);
 - writes.
@@ -291,6 +317,13 @@ That depends on every order and customer, so it's broad. See
 Cached entities aren't attached to any context; to edit one, load it again on your own context.
 Every caller also gets the same object, so never modify one; see
 [Shared instances](/guides/configuration#shared-instances-and-auto-clone).
+
+Once a model with entities that load lazily or hold their context has been seen, Sluice checks
+every value before it's stored. A value that holds a lazy loader or a `DbContext` anywhere in
+its fields, such as an entity wrapped in your own record, throws `InvalidOperationException`,
+naming the query and the path to it, and nothing is cached: the cached value would load related
+rows later, outside the compute, or keep the compute's context alive. Select the values you need
+into your own type instead.
 
 ## Writing
 
@@ -319,9 +352,11 @@ deleted:
 A `Children` list is evicted when *any* row in it changes, not only when rows join or leave.
 One dependency covers the whole list; that's coarse on purpose.
 
-Sluice reads what changed from the change tracker the same way EF does, so it never changes
-what EF saves: with `AutoDetectChangesEnabled` off, an edit EF doesn't detect is neither saved
-nor invalidated. A save that fails, is cancelled or hits a concurrency conflict still
+Sluice reads what changed from the change tracker when EF initialises the save's first command,
+once EF has detected changes and applied its cascades and orphan deletions at the timings you
+set, and it detects nothing itself, so it never changes what EF saves: with
+`AutoDetectChangesEnabled` off, an edit EF doesn't detect is neither saved nor invalidated. A
+save with nothing to write runs no command and invalidates nothing. A save that fails, is cancelled or hits a concurrency conflict still
 invalidates what it was saving, because part of it may already have committed.
 
 ### Row versions
@@ -413,7 +448,7 @@ they touch by hand.
 | Composite keys | the row's `Children` readers and plain queries of its type (there are no `Entity` reads of it) |
 | Types mapped to views | their dependencies as usual, though nothing reads them in a compute; the rest of the save is unaffected |
 | Alternate keys | a foreign key to one is keyed by that key's value |
-| Table splitting | each type's own dependencies. Two types sharing a non-key column don't evict each other: saving one leaves the other's `Entity` readers and plain queries cached |
+| Table splitting | the row, for every type stored in it: they share the table's dependencies, so a save or delete of one evicts the others' readers of that row and their plain queries. A foreign key or unique column of another type, in a column the save writes, is evicted whole, and deleting the row evicts what a delete of each type cascades into |
 
 ### Key folding
 
@@ -429,9 +464,37 @@ untested. One that stores dates less precisely, such as SQL Server's `datetime` 
 could give the same row different key text on a read and a write, and miss an eviction.
 
 A value converter on a key, foreign key or unique column must round-trip: converting a stored
-value to .NET and back must give the stored value. A save reports what it would write for the
-values EF loaded, so a converter that loads `""` as null makes a save of that row report
-nothing for `""`, and a cached read by `""` is never evicted. Sluice can't detect this.
+value to .NET and back must give the stored value. A save reports what it would write back for
+the values EF loaded, and a reader the value it asked for, so a converter that loads `"01"` as 1
+and writes it back as `"1"` leaves the readers of `"01"` cached with stale data. Only the
+converter's author knows whether it round-trips, so Sluice asks you to say so, once, on the
+converter's class:
+
+```csharp
+user.Property(u => u.Id).HasConversion(new UserIdConverter());
+
+// A typed id over the column's own value round-trips.
+[SluiceRoundTrips]
+public sealed class UserIdConverter()
+    : ValueConverter<UserId, string>(id => id.Value, value => new UserId(value));
+```
+
+Without the mark, the first time Sluice uses the model (a read, `Dependency`,
+`AllDependencies`, a save or a bulk write) it throws `InvalidOperationException`, naming each
+such property and its converter, before anything is written. These EF built-ins give back
+every value they can load, so they need no mark: `EnumToNumberConverter`, a `CastingConverter`
+into a type that holds every stored value (the same type, a wider integer, any integer into
+`decimal`, `float` into `double`), `DateTimeToTicksConverter` and `GuidToBytesConverter`. The rest
+need it, if they round-trip for your data: the string-parsing ones (enum, number or `Guid` to
+string) accept more than one spelling of a value (`"01"`, `" Active"`), a cast that narrows or
+rounds loses values, `DateTimeToBinaryConverter` reads kind bits it never writes, and the bool
+converters read every value but the true one as false.
+
+- `HasConversion(id => id.Value, value => new UserId(value))` has no class to mark: move the two
+  lambdas into a class deriving from `ValueConverter<TModel, TProvider>`, as above.
+- A converter you don't own: derive from it and mark the derived class. The mark isn't
+  inherited, since a derived converter can convert differently.
+- The mark is your promise; Sluice never sees the stored value, so it can't check it.
 
 ### Rows saved without loading them
 

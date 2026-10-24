@@ -13,21 +13,26 @@ public sealed class Query<TKey, TValue>
     /// Declares a query whose key is a <c>string</c> or <see cref="IFormattable"/>, formatted with the invariant culture.
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The name is blank, contains ':' or starts with <c>__fc</c>, or is already declared with other types, or <typeparamref name="TKey"/>
-    /// is an interface or abstract type, is neither <c>string</c> nor <see cref="IFormattable"/>, or is <see cref="DateTime"/>,
+    /// The name is blank, contains ':' or starts with <c>__fc</c>, or is already declared with other types or another
+    /// format, or <typeparamref name="TKey"/> is an interface or abstract type, is neither <c>string</c> nor <see cref="IFormattable"/>, or is <see cref="DateTime"/>,
     /// <see cref="DateTimeOffset"/> or <see cref="TimeOnly"/> (pass a format function instead).
     /// </exception>
     public Query(string name)
         : this(name, KeyText.Default<TKey>()) { }
 
     /// <summary>Declares a query whose key text is produced by <paramref name="format"/>, which must give different text for different keys.</summary>
+    /// <remarks>
+    /// A name declared again must use the same format: the same lambda or method, not another one written the same
+    /// way. A compiled expression's format isn't compared.
+    /// </remarks>
     /// <exception cref="ArgumentException">
-    /// The name is blank, contains ':' or starts with <c>__fc</c>, or is already declared with other types.
+    /// The name is blank, contains ':' or starts with <c>__fc</c>, or is already declared with other types or another
+    /// format.
     /// </exception>
     public Query(string name, Func<TKey, string> format)
     {
         ArgumentNullException.ThrowIfNull(format);
-        QueryNames.Claim(name, typeof(Query<TKey, TValue>));
+        QueryNames.Claim(name, typeof(Query<TKey, TValue>), format);
 
         Name = name;
         _format = format;
@@ -81,7 +86,7 @@ public sealed class Query<TValue>
     /// </exception>
     public Query(string name)
     {
-        QueryNames.Claim(name, typeof(Query<TValue>));
+        QueryNames.Claim(name, typeof(Query<TValue>), format: null);
         Name = name;
     }
 

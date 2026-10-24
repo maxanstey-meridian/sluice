@@ -47,11 +47,14 @@ fail-safe would catch the exception and serve a stale value instead. The factory
 memory write, the distributed write and the backplane message, and returns. `GetOrSetAsync` then
 throws once FusionCache returns. The EF package's strict-read checks use the same route, so a
 compute that catches their exception still caches nothing. `read.DoNotCache()` takes the same
-route, skipping the three writes, but hands the value back instead of throwing.
+route, skipping the three writes, but hands the value back instead of throwing. A package can
+also add a store check to the cache, run on every value about to be stored; the EF package's
+refuses one holding a lazy loader or a `DbContext`, and a refusal takes the guards' route too.
 
 A compute also runs outside the caller's ambient transaction (`TransactionScope`), so a
 connection it opens can't see the caller's uncommitted rows. And it can hold resources for its
-own lifetime: the EF package's DI scope for `read.Db` is one, opened on first use. Everything a
+own lifetime: the EF package's DI scope for `read.Db` is one, opened on first use, with the
+contexts it built. Everything a
 compute holds is disposed when it ends, newest first. A dispose that throws takes the guards'
 route too, so it can't hide the compute's own exception or let fail-safe serve a stale value.
 
@@ -61,14 +64,18 @@ compute starts, and not into anything else.
 ### Reads inside your own transaction
 
 `SluiceFlow.Begin()` installs a box on the flow (another `AsyncLocal`); a nested call reuses the
-outer one. The EF package adds a probe to it for each EF transaction it sees begin or be used,
-returning that transaction's pending dependencies. The probe holds the context's connection
-weakly and reports only while the connection is still in the transaction it was added for,
-matched by EF's transaction id, since a provider may reuse the `DbTransaction` object for a later
-transaction. For an ambient transaction it keeps its own list, read with the caller's
-`Transaction.Current` before the compute suppresses it; for an enlisted transaction that isn't
-the current one (`EnlistTransaction` without a scope), it adds a probe for that list the first
-time a flow with a box writes in it. `GetOrSetAsync` asks the probes; with no box that's one `AsyncLocal` lookup, plus a read of
+outer one. The EF package adds a probe to it for each EF transaction it sees begin, be used, or
+be written in, keyed by EF's transaction id, and the box keeps one per cache and key. A probe
+returns that transaction's pending dependencies, less what a rollback to a savepoint undid. It
+holds the context's connection weakly and reports only while the connection is still in the
+transaction it was added for, matched by EF's transaction id, since a provider may reuse the
+`DbTransaction` object for a later transaction. When the transaction was committed or rolled
+back outside EF (its `DbTransaction` has no connection, or won't report its isolation level),
+the probe publishes what it held and reports nothing. For an ambient transaction the package
+keeps its own list, read with the caller's `Transaction.Current` before the compute suppresses
+it; for an enlisted transaction that isn't the current one (`EnlistTransaction` without a
+scope), each write in it adds a probe for that list, keyed by the transaction, to the writing
+flow's box. `GetOrSetAsync` asks the probes; with no box that's one `AsyncLocal` lookup, plus a read of
 `Transaction.Current` once the EF package has registered its ambient lookup. If anything is pending, the call skips FusionCache
 entirely, so it never joins another caller's stampede lock: it runs the compute through the same
 `read`, guards and held resources, stores nothing, and intersects the tags the compute read with
@@ -81,21 +88,37 @@ concurrently. With a distributed cache, each removal is a write to it and a back
 It takes no cancellation token and passes none, so an aborted request still invalidates.
 `Invalidate` is the same, synchronously, one tag at a time.
 
+Then it schedules the same removal again, 5 s later, on the `TimeProvider` registered in DI
+(`ClearAsync` does the same with its clear). FusionCache 2.9 writes a tag's marker without the
+lock its tag check holds, so an invalidation landing in the middle of a check on the same server
+can be overwritten by what the check read (FusionCache#659). The check that won leaves its
+marker in memory, so the second removal sticks, unless a check's distributed cache read on that
+server takes longer than 5 s. Disposing `SluiceCache` runs every scheduled removal at once and
+waits for them.
+
 ## EF Core reads
 
 The EF package builds core sources from the model, once per model:
 
-- one per root entity type, named by EF's root type name, so reads and writes of derived types
-  meet, keyed by the primary key;
-- one per foreign key, named `<root type>[<FK properties>]`, keyed by the foreign key value.
+- one per root entity type, named after its table (`schema.table` when the model gives a
+  schema), so reads and writes of derived types meet, and so do two classes over one table,
+  keyed by the primary key;
+- one per foreign key, named `<table>[<FK columns>]`, keyed by the foreign key value;
+- one per unique column, named `<table>(<column>)`, keyed by the column's value.
 
 Keys go through the property's value converter to the value the database stores, then are folded
 (decimal scale, string case and trailing spaces, dates to the microsecond), so values the
-database treats as equal give one tag.
+database treats as equal give one tag. Before building any of them, the package checks that
+every converter on a key, foreign key or unique column is one it can trust to round-trip: marked
+`[SluiceRoundTrips]`, or one of EF's lossless built-ins.
 
 `read.Db<TContext>()` takes the compute's own context from a DI scope the compute opens for
 itself, with no-tracking queries, runs its configure if it has one, and disposes the scope, and
-the context with it, when the compute ends.
+the context with it, when the compute ends. It makes the context on a clean flow, an empty
+`ExecutionContext`, so neither the context nor its constructor's services see the caller's
+async state, and the configure's services resolve the same way. A pooled registration's context
+is built from its options rather than leased. Once per context type, it checks that another
+scope of the app gets a different instance, and refuses a shared one.
 
 Recording what a query reads is one EF interceptor for the whole process:
 
@@ -112,8 +135,14 @@ Recording what a query reads is one EF interceptor for the whole process:
   command from a context other than `read.Db`'s throws, unless it runs in a fused fetch; otherwise
   the tag is read, and each type it names is recorded as a whole-type dependency, or the command
   throws if the tag says it can't be tracked, or has none, or reads the context's state on a
-  context the compute didn't configure. A read inside a transaction throws.
-  Outside a compute it returns at once.
+  context the compute didn't configure. A read inside a transaction throws. On a configured
+  context, a property marked `[SluiceContextState]` that a filter reads is read again on the
+  clean flow, and two different values throw. Outside a compute it returns at once.
+
+A context without `UseSluice` has no Sluice interceptor, so the package also listens to EF's
+diagnostic events, which EF raises for every context, from `AddSluiceEntityFrameworkCore` on:
+inside a compute, a command on such a context throws when it's initialised, a write anywhere
+and a read outside a fused fetch.
 
 `read.Entity` and `read.Children` record a narrower dependency, one row (by key, or by a unique
 column's value) or one parent's rows, then return the set as a no-tracking query with
@@ -132,21 +161,26 @@ writes, as the compute's own reads are.
 
 A second interceptor, one per `SluiceCache`, handles writes. For a save:
 
-1. **`SavingChanges`**: reads the changed entries through `ChangeTracker.Entries()`, which detects
-   changes the way EF's own save does, and snapshots the original values of their foreign keys
-   and unique columns. EF overwrites those when it accepts the save. An original is what EF loaded, so it's only used
+1. **The save's first command** (`CommandInitialized`, from `SaveChanges`): reads the changed
+   entries once, with change detection off, after every `SavingChanges` interceptor and EF's own
+   detection and cascades, and snapshots the original values of their foreign keys and unique
+   columns. EF overwrites those when it accepts the save. Later batches and retries find the
+   save already captured. An original is what EF loaded, so it's only used
    where EF's `UPDATE` or `DELETE` checks the database still holds it: a key, a concurrency
    token, or any column of a row with a row version. Otherwise the foreign key, or the unique
    column, is invalidated whole.
 2. **`SavedChanges`**: builds the dependencies, now that generated keys are real. Each row gives
    its key, and its foreign keys and unique columns before and after (or whole); a deleted row also gives every
    foreign key that points at it, and the whole of every type the model lets the database cascade
-   into or set to null (worked out once per type); an owned row gives its owner.
+   into or set to null (worked out once per type); an owned row gives its owner; a row sharing
+   its table with another type (table splitting) gives that type's row too.
 3. **Publish**, depending on the transaction EF used, read the way EF's batch executor reads it:
    - none: invalidate now;
-   - an EF transaction: hold the dependencies against the `DbTransaction`, and invalidate on
-     commit, rollback or failure;
-   - an enlisted or ambient transaction: invalidate from its `TransactionCompleted` event.
+   - an EF transaction: hold the dependencies against the transaction, and invalidate on
+     commit, rollback or failure, or once Sluice sees it was ended outside EF;
+   - an enlisted or ambient transaction: invalidate from its `TransactionCompleted` event;
+   - none where it completes, but a live `TransactionScope` its connection was opened in, or its
+     first command ran in: invalidate now, and again from that scope's `TransactionCompleted`.
 
 An `ExecuteUpdate` or `ExecuteDelete` publishes the same way, once it has run: EF drops query tags
 from these statements, so the tables it wrote are found by their quoted names in its SQL, and

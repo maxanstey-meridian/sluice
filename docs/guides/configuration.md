@@ -35,6 +35,24 @@ configuration, overriding anything that conflicts:
 | `ClearAsync` | without fail-safe | a cleared value is never served as a fallback |
 | `TagsDefaultEntryOptions.Priority`, `.Size` | `NeverRemove`, `0` | under a memory size limit, a tag marker evicted or refused for want of room would let an invalidated value be served again |
 
+And it refuses, when `SluiceCache` is first resolved, two `InternalStrings` settings that would
+let entries and tags collide. Both throw `InvalidOperationException`; leave `InternalStrings`
+at its defaults, or call `SetToSafeStrings()` with its default special character, `_`:
+
+- a `TagCacheKeyPrefix` that doesn't start with `__fc`, set directly or through
+  `SetToSafeStrings` with another character. FusionCache keeps a tag's marker at the prefix plus
+  the tag, among the entries, and treats any key under the prefix as tag data, so under the
+  prefix `t:`, query `t`'s entry for key `x` would be tag `x`'s marker, and never invalidated;
+- a `ClearRemoveTag` or `ClearExpireTag` with a `:` that has a name before it. `a:b` is also
+  the tag of source `a`'s key `b`, so invalidating that key would clear the cache on every node.
+
+Every invalidation and clear is also published a second time, 5 s after the first, timed by the
+`TimeProvider` registered in DI (`TimeProvider.System` unless you register one). FusionCache 2.9
+can lose an invalidation that lands while the same server is checking that tag
+(FusionCache#659); the second publish restores it. A value cached in those 5 s is evicted again,
+so a hot entry is computed once more per invalidation. Disposing the service provider publishes
+whatever is still waiting at once, and waits for it.
+
 So FusionCache's factory timeouts (a factory is FusionCache's word for a compute) don't apply to
 Sluice. A slow data source makes the caller wait; put the timeout on the data source instead (a
 command timeout, an HTTP timeout).
@@ -96,6 +114,16 @@ under every parent, not just the parent the row had (see
 [Row versions](/guides/ef-core#row-versions)): event id 3 when the type has no row version, 4
 when it's stored across several tables. Those are under the category
 `Sluice.EntityFrameworkCore.SluiceInterceptor`, so raise that one to hide them.
+
+Two more, under the same category, mean something to fix:
+
+- event id 5, at `Warning`, once per cache: a save inside a `TransactionScope` created without
+  `TransactionScopeAsyncFlowOption.Enabled` couldn't see the scope where it completed, so Sluice
+  invalidated at once and will again when the scope completes. See
+  [TransactionScope with async code](/guides/transactions#transactionscope-with-async-code).
+- event id 6, at `Error`: a save reported rows written but ran no command Sluice saw, so nothing
+  was invalidated for it. Sluice reads what a save writes at its first command, so a provider
+  or interceptor that writes without one isn't supported.
 
 FusionCache logs several lines at `Information` for every cache call. To keep them out of your
 logs, raise its category in `appsettings.json`:
@@ -170,7 +198,8 @@ treats that tag as never invalidated for up to an hour.
 
 ### Fail fast at startup
 
-The lifetime rule below is checked when `SluiceCache` is first resolved. To find a bad
+The lifetime rule below, and the `InternalStrings` checks in
+[What Sluice sets](#what-sluice-sets), run when `SluiceCache` is first resolved. To find a bad
 configuration at deploy time rather than on the first request, resolve it once at startup:
 
 ```csharp

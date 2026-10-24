@@ -42,13 +42,15 @@ recording and storing; your fetch comes on top.
 ## Invalidation
 
 Invalidating one key removes two tags: about 1.0 µs through Sluice, against 0.57 µs for FusionCache removing the same
-two itself. With Redis, each tag is also a Redis write and a backplane message; see
+two itself (measured before 0.5.0, which also publishes each invalidation again 5 s later, in the background). With Redis, each tag is also a Redis write and a backplane message; see
 [When Redis is slow or down](/guides/configuration#when-redis-is-slow-or-down).
 
 ## EF Core
 
 On in-memory SQLite, the fastest database there is, so Sluice's share is as large as it gets. Sluice's misses
-include opening the compute's own DI scope and leasing its context from the pool:
+include opening the compute's own DI scope and leasing its context from the pool (measured
+before 0.5.0, which builds a pooled registration's context for the compute rather than leasing
+it):
 
 | | Without Sluice | With Sluice |
 |---|---:|---:|

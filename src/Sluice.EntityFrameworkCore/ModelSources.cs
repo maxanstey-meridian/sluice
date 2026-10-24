@@ -5,17 +5,21 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Sluice.EntityFrameworkCore;
 
 /// <summary>
-/// The core sources an EF model implies: one per root entity type, named by EF so TPH and TPT reads and writes
-/// agree, and one per foreign key. Each is built once per model, through the core's public <c>format</c>
-/// overload, and kept as a runtime annotation on the model.
+/// The core sources an EF model implies, named after the tables they read so every class mapped to a table, in any
+/// context, meets on one source: one per root entity type, so TPH and TPT reads and writes agree, one per foreign key
+/// and one per unique column. Each is built once per model, through
+/// <see cref="Sluice.Infrastructure.ModelSource.Create{TKey}"/>, and kept as a runtime annotation on the model.
 /// </summary>
 internal static class ModelSources
 {
     private const string SourceAnnotation = "Sluice:Source";
+    private const string RowSharersAnnotation = "Sluice:RowSharers";
+    private const string RoundTripsAnnotation = "Sluice:RoundTrips";
     private const string CascadeAnnotation = "Sluice:Cascades";
     private const string TablePatternAnnotation = "Sluice:TablePattern";
     private const string RowVersionAnnotation = "Sluice:RowVersion";
@@ -38,18 +42,22 @@ internal static class ModelSources
         var root = entityType.GetRootType();
         return root.GetOrAddRuntimeAnnotationValue(
             SourceAnnotation,
-            static root => Build(root!.Name, root.FindPrimaryKey()!.Properties),
+            static root => Build(root!, SourceName(root!), root!.FindPrimaryKey()!.Properties),
             root
         );
     }
 
-    /// <summary>The source of the rows that point at one principal through <paramref name="foreignKey"/>.</summary>
+    /// <summary>
+    /// The source of the rows that point at one principal through <paramref name="foreignKey"/>, named
+    /// <c>{source}[{columns}]</c> after its type's <see cref="SourceName"/> and its columns.
+    /// </summary>
     internal static Source<object> ForeignKey(IForeignKey foreignKey) =>
         foreignKey.GetOrAddRuntimeAnnotationValue(
             SourceAnnotation,
             static foreignKey =>
                 Build(
-                    $"{foreignKey!.DeclaringEntityType.GetRootType().Name}[{string.Join(",", foreignKey.Properties.Select(property => property.Name))}]",
+                    foreignKey!.DeclaringEntityType,
+                    $"{SourceName(foreignKey.DeclaringEntityType)}[{string.Join(",", foreignKey.Properties.Select(ColumnName))}]",
                     foreignKey.Properties
                 ),
             foreignKey
@@ -57,16 +65,58 @@ internal static class ModelSources
 
     /// <summary>
     /// The source of the rows of <paramref name="property"/>'s type by that property's value, which
-    /// <c>read.Entity</c> by a unique column reads. Only for a <see cref="UniqueColumns"/> property: a save publishes
-    /// for no other.
+    /// <c>read.Entity</c> by a unique column reads, named <c>{source}({column})</c>. Only for a
+    /// <see cref="UniqueColumns"/> property: a save publishes for no other.
     /// </summary>
     internal static Source<object> Unique(IProperty property) =>
         property.GetOrAddRuntimeAnnotationValue(
             SourceAnnotation,
             static property =>
-                Build($"{property!.DeclaringType.Name}({property.Name})", [property]),
+                Build(
+                    property!.DeclaringType.ContainingEntityType,
+                    $"{SourceName(property.DeclaringType.ContainingEntityType)}({ColumnName(property)})",
+                    [property]
+                ),
             property
         );
+
+    /// <summary>
+    /// What names <paramref name="entityType"/>'s sources: its root's table, as <c>schema.table</c> when the model gives
+    /// a schema; a table-per-concrete-type root with no table of its own is named for its concrete types' tables, sorted
+    /// and joined with <c>+</c>. An owned type is its owner's. A type stored in no table keeps its root's EF name: no
+    /// read of one is accepted.
+    /// </summary>
+    internal static string SourceName(IEntityType entityType)
+    {
+        var root = Unowned(entityType).GetRootType();
+        if (TableName(root) is { } table)
+        {
+            return table;
+        }
+
+        var tables = root.GetDerivedTypes()
+            .Select(TableName)
+            .OfType<string>()
+            .Distinct()
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        return tables.Count > 0 ? string.Join("+", tables) : root.Name;
+    }
+
+    private static string? TableName(IEntityType entityType) =>
+        entityType.GetTableName() is { } table
+            ? entityType.GetSchema() is { } schema
+                ? $"{schema}.{table}"
+                : table
+            : null;
+
+    // The column a property is stored in, in its type's table; a type with no table of its own (a TPC root) names it
+    // as its concrete types do by default.
+    private static string ColumnName(IProperty property) =>
+        StoreObjectIdentifier.Create(property.DeclaringType, StoreObjectType.Table) is { } table
+        && property.GetColumnName(table) is { } column
+            ? column
+            : property.GetColumnName();
 
     /// <summary>
     /// The properties of <paramref name="entityType"/> and its base types that a single-column unique index (filtered
@@ -298,15 +348,127 @@ internal static class ModelSources
     /// <summary>
     /// Every dependency on <paramref name="entityType"/>: its <see cref="UpdateDependencies"/>, and every foreign key
     /// that points at it and lets the database act on its rows, so every read of it is evicted. Also the same for
-    /// every type the model lets the database delete or set to null when its rows are deleted. Unchecked, like
-    /// <see cref="Entity"/>.
+    /// every type the model lets the database delete or set to null when its rows are deleted, and, unless
+    /// <paramref name="sharers"/> is false, for every type stored in the same rows (<see cref="RowSharers"/>), whose
+    /// rows a delete deletes too. Unchecked, like <see cref="Entity"/>.
     /// </summary>
-    internal static IEnumerable<Dependency> AllDependencies(IEntityType entityType) =>
+    internal static IEnumerable<Dependency> AllDependencies(
+        IEntityType entityType,
+        bool sharers = true
+    ) =>
         [
             .. UpdateDependencies(entityType),
             .. CascadingForeignKeys(entityType).Select(foreignKey => ForeignKey(foreignKey).All),
             .. Cascades(entityType),
+            .. sharers
+                ? entityType
+                    .GetDerivedTypesInclusive()
+                    .SelectMany(RowSharers)
+                    .Select(sharer => sharer.Root)
+                    .Distinct()
+                    .SelectMany(root => AllDependencies(root, sharers: false))
+                : [],
         ];
+
+    /// <summary>
+    /// The other root entity types stored in a table <paramref name="entityType"/>'s rows are stored in (table
+    /// splitting), each with how a save of one of its rows changes theirs. A type in the same hierarchy is the same
+    /// source, and an owned type is its owner, so neither is one. Built once per type.
+    /// </summary>
+    internal static RowSharer[] RowSharers(IEntityType entityType) =>
+        entityType.GetOrAddRuntimeAnnotationValue(
+            RowSharersAnnotation,
+            static entityType => BuildRowSharers(entityType!),
+            entityType
+        );
+
+    private static RowSharer[] BuildRowSharers(IEntityType entityType)
+    {
+        var root = entityType.GetRootType();
+        var sharers = new List<RowSharer>();
+        foreach (var mapping in entityType.GetTableMappings().Where(m => m.Table.IsShared))
+        {
+            var table = mapping.Table;
+            var own = mapping.ColumnMappings.ToList();
+            IReadOnlyList<IProperty> Writing(IEnumerable<IColumn?> columns) =>
+                [.. own.Where(c => columns.Contains(c.Column)).Select(c => c.Property)];
+
+            foreach (
+                var other in table
+                    .EntityTypeMappings.GroupBy(m =>
+                        Unowned(m.TypeBase.ContainingEntityType).GetRootType()
+                    )
+                    .Where(other => other.Key != root && other.Key.FindPrimaryKey() is not null)
+            )
+            {
+                var key = other.Key.FindPrimaryKey()!.Properties;
+                var keyColumns = key.Select(table.FindColumn).ToList();
+                var ownKey = keyColumns
+                    .Select(column => own.FirstOrDefault(c => c.Column == column)?.Property)
+                    .ToList();
+                var theirs = other
+                    .SelectMany(m => m.ColumnMappings)
+                    .Select(c => c.Column)
+                    .ToHashSet();
+                var shared = Writing(theirs.Except(keyColumns.OfType<IColumn>()));
+
+                // A foreign key on the key's columns only links the row to itself.
+                var columns = RowForeignKeys(other.Key)
+                    .Where(foreignKey =>
+                        !foreignKey.Properties.All(property => property.IsPrimaryKey())
+                    )
+                    .Select(foreignKey =>
+                        (
+                            Whole: ForeignKey(foreignKey).All,
+                            Writers: Writing(foreignKey.Properties.Select(table.FindColumn))
+                        )
+                    )
+                    .Concat(
+                        RowUniqueColumns(other.Key)
+                            .Select(property =>
+                                (
+                                    Whole: Unique(property).All,
+                                    Writers: Writing([table.FindColumn(property)])
+                                )
+                            )
+                    )
+                    .Where(column => column.Writers.Count > 0)
+                    .ToList();
+                sharers.Add(
+                    new(
+                        other.Key,
+                        key,
+                        ownKey.Contains(null) ? null : [.. ownKey.OfType<IProperty>()],
+                        shared,
+                        columns
+                    )
+                );
+            }
+        }
+
+        return [.. sharers];
+    }
+
+    /// <summary>
+    /// Another root entity type whose rows share a table with a saved type's (<see cref="RowSharers"/>).
+    /// </summary>
+    /// <param name="Root">The other type.</param>
+    /// <param name="Key">The other type's primary key.</param>
+    /// <param name="OwnKey">
+    /// The saved type's properties in those key columns, in that order; null when it maps none of one.
+    /// </param>
+    /// <param name="Shared">The saved type's properties in the other type's other columns.</param>
+    /// <param name="Columns">
+    /// The other type's foreign keys and unique columns that the saved type's properties write, whole, each with those
+    /// properties.
+    /// </param>
+    internal sealed record RowSharer(
+        IEntityType Root,
+        IReadOnlyList<IProperty> Key,
+        IReadOnlyList<IProperty>? OwnKey,
+        IReadOnlyList<IProperty> Shared,
+        IReadOnlyList<(Dependency Whole, IReadOnlyList<IProperty> Writers)> Columns
+    );
 
     /// <summary>
     /// What an update of the <paramref name="entityType"/> rows with these primary keys may change, given its
@@ -633,11 +795,132 @@ internal static class ModelSources
             ? Unowned(ownership.PrincipalEntityType)
             : entityType;
 
-    // A composite key, which only writes produce, arrives as an array of its values in key order.
-    private static Source<object> Build(string name, IReadOnlyList<IProperty> properties) =>
-        properties is [var property]
-            ? new(name, key => KeyFolding.Fold(ToProvider(property, key)))
-            : new(
+    /// <summary>
+    /// Refuses a model with a key, foreign key or unique column (<see cref="UniqueColumns"/>) whose value converter
+    /// isn't known to round-trip: neither marked <see cref="SluiceRoundTripsAttribute"/> nor one of EF's built-ins that
+    /// gives back every value it can load. A save reports the value it would write for what EF loaded, so a converter
+    /// that loads a stored value and writes back another misses the readers of the stored value. Checked once per model,
+    /// before any of its sources is built, and before a save or bulk write on it runs.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The model has such a converter; the message names each.</exception>
+    internal static void EnsureRoundTrips(IModel model) =>
+        model.GetOrAddRuntimeAnnotationValue(
+            RoundTripsAnnotation,
+            static model =>
+            {
+                var refused = model!
+                    .GetEntityTypes()
+                    .SelectMany(entityType => entityType.GetDeclaredProperties())
+                    .Where(property =>
+                        property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
+                    )
+                    .Select(property => (Property: property, property.GetTypeMapping().Converter))
+                    .Where(mapped => mapped.Converter is { } converter && !RoundTrips(converter))
+                    .Select(mapped =>
+                        $"{mapped.Property.DeclaringType.DisplayName()}.{mapped.Property.Name} "
+                        + $"({DisplayName(mapped.Converter!.GetType())})"
+                    )
+                    .ToList();
+                return refused.Count == 0
+                    ? true
+                    : throw new InvalidOperationException(
+                        $"Sluice can't trust the value converter of {string.Join(", ", refused)}: a key, foreign key "
+                            + "or unique column. A save invalidates the value it would write back for what EF loaded, so a "
+                            + "converter that loads a stored value and writes back another (\"01\" loaded as 1 and written as "
+                            + "\"1\", a GUID stored with braces written without them, \" Active\" parsed as an enum) "
+                            + "leaves the readers of what the database held serving stale data. If converting every "
+                            + "stored value to .NET and back gives that same value, mark the converter's class "
+                            + "[SluiceRoundTrips]; one from HasConversion(toProvider, fromProvider) has no class, so move "
+                            + "its two conversions into a class deriving from ValueConverter<TModel, TProvider> and mark "
+                            + "that, and to vouch for one you don't own, derive from it and mark the derived class. If it "
+                            + "doesn't, make it round-trip, or store the value without a converter."
+                    );
+            },
+            model
+        );
+
+    // EF's built-ins that give back every value they can load. An enum or number cast into a type that holds every
+    // value the column can (int into long, float into double, any integer into decimal), and DateTime ticks and Guid
+    // bytes, which construct exactly what they read or throw. Off the list: everything that parses text, which accepts
+    // more than one spelling of a value; casts that narrow (a long column read as int, a decimal as long) or round;
+    // DateTimeToBinaryConverter, whose stored kind bits have spellings ToBinary never writes; and the bool converters,
+    // which read every value but the true one as false.
+    private static bool RoundTrips(ValueConverter converter)
+    {
+        var type = converter.GetType();
+        if (
+            type.IsDefined(typeof(SluiceRoundTripsAttribute), inherit: false)
+            || type == typeof(DateTimeToTicksConverter)
+            || type == typeof(GuidToBytesConverter)
+        )
+        {
+            return true;
+        }
+
+        return type.IsGenericType
+            && type.GetGenericTypeDefinition() is var definition
+            && (
+                definition == typeof(EnumToNumberConverter<,>)
+                || definition == typeof(CastingConverter<,>)
+            )
+            && Holds(Number(converter.ModelClrType), Number(converter.ProviderClrType));
+    }
+
+    // The numeric type a value is stored as: its own, or an enum's underlying one.
+    private static Type Number(Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        return underlying.IsEnum ? Enum.GetUnderlyingType(underlying) : underlying;
+    }
+
+    private static readonly Dictionary<Type, (decimal Min, decimal Max)> _integers = new()
+    {
+        [typeof(sbyte)] = (sbyte.MinValue, sbyte.MaxValue),
+        [typeof(byte)] = (byte.MinValue, byte.MaxValue),
+        [typeof(short)] = (short.MinValue, short.MaxValue),
+        [typeof(ushort)] = (ushort.MinValue, ushort.MaxValue),
+        [typeof(int)] = (int.MinValue, int.MaxValue),
+        [typeof(uint)] = (uint.MinValue, uint.MaxValue),
+        [typeof(long)] = (long.MinValue, long.MaxValue),
+        [typeof(ulong)] = (ulong.MinValue, ulong.MaxValue),
+    };
+
+    // Whether the model type holds every value of the provider type exactly, so a cast there and back gives it back.
+    private static bool Holds(Type model, Type provider) =>
+        model == provider
+        || (
+            _integers.TryGetValue(provider, out var stored)
+            && (
+                model == typeof(decimal)
+                || (
+                    _integers.TryGetValue(model, out var held)
+                    && held.Min <= stored.Min
+                    && stored.Max <= held.Max
+                )
+            )
+        )
+        || (provider == typeof(float) && model == typeof(double));
+
+    private static string DisplayName(Type type) =>
+        type.IsGenericType
+            ? $"{type.Name[..type.Name.IndexOf('`')]}<{string.Join(", ", type.GetGenericArguments().Select(DisplayName))}>"
+            : type.Name;
+
+    // A composite key, which only writes produce, arrives as an array of its values in key order. Every source is
+    // built here, so none is built for a model whose converters Sluice can't trust.
+    private static Source<object> Build(
+        IEntityType entityType,
+        string name,
+        IReadOnlyList<IProperty> properties
+    )
+    {
+        EnsureRoundTrips(entityType.Model);
+        return properties is [var property]
+            ? Sluice.Infrastructure.ModelSource.Create<object>(
+                name,
+                key => KeyFolding.Fold(ToProvider(property, key))
+            )
+            : Sluice.Infrastructure.ModelSource.Create<object>(
                 name,
                 key =>
                     JsonSerializer.Serialize(
@@ -646,6 +929,21 @@ internal static class ModelSources
                             .ToArray()
                     )
             );
+    }
+
+    /// <summary>
+    /// <paramref name="value"/>, of <paramref name="from"/>, as <paramref name="to"/> reads what it's stored as: the two
+    /// properties map one column in different types (table splitting). Null when it's stored as null.
+    /// </summary>
+    internal static object? ValueAs(IProperty from, IProperty to, object value)
+    {
+        var stored = from.GetTypeMapping().Converter is { } converter
+            ? converter.ConvertToProvider(value)
+            : value;
+        return stored is not null && to.GetTypeMapping().Converter is { } back
+            ? back.ConvertFromProvider(stored)
+            : stored;
+    }
 
     // A column's value as a read by value reads it: null where the column holds null, as it does where the value
     // converter stores the value as null, since no read by value finds a null.

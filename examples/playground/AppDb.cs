@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Sluice;
 
 namespace Playground;
 
@@ -37,7 +39,7 @@ public sealed class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
     {
         modelBuilder.Entity<User>(user =>
         {
-            user.Property(u => u.Id).HasConversion(id => id.Value, value => new UserId(value));
+            user.Property(u => u.Id).HasConversion(new UserIdConverter());
             user.HasData(
                 new User
                 {
@@ -56,8 +58,17 @@ public sealed class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
 
         modelBuilder.Entity<Flag>(flag =>
         {
-            flag.Property(f => f.Id).HasConversion(id => id.Value, value => new FlagId(value));
+            flag.Property(f => f.Id).HasConversion(new FlagIdConverter());
             flag.HasData(new Flag { Id = FlagId.DarkMode });
         });
     }
 }
+
+// A typed id over the column's own value round-trips, which Sluice needs vouched for on a key.
+[SluiceRoundTrips]
+public sealed class UserIdConverter()
+    : ValueConverter<UserId, string>(id => id.Value, value => new UserId(value));
+
+[SluiceRoundTrips]
+public sealed class FlagIdConverter()
+    : ValueConverter<FlagId, string>(id => id.Value, value => new FlagId(value));

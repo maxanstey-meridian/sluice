@@ -6,14 +6,10 @@ namespace Sluice.EntityFrameworkCore.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class ChildrenReadTests(PostgresFixture postgres)
 {
-    // The sources the model implies for these foreign keys: "<root entity type>[<FK properties>]", keyed by the
-    // FK value. Declaring them by hand pins those names, which are wire format.
-    private static readonly Source<int> _ordersByCustomer = new(
-        $"{typeof(Order).FullName}[CustomerId]"
-    );
-    private static readonly Source<int> _notesByCustomer = new(
-        $"{typeof(Note).FullName}[CustomerId]"
-    );
+    // The sources the model implies for these foreign keys: "<root's table>[<FK columns>]", keyed by the FK value.
+    // Declaring them by hand pins those names, which are wire format.
+    private static readonly Source<int> _ordersByCustomer = new("Orders[CustomerId]");
+    private static readonly Source<int> _notesByCustomer = new("Notes[CustomerId]");
     private static readonly Query<int, string[]> _items = new("ef-children-items");
 
     private async Task<(int Ada, int Bob)> AddCustomersWithOrdersAndNotes(ShopDb db)

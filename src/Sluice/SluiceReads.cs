@@ -305,6 +305,19 @@ public sealed class SluiceReads
         }
     }
 
+    // Whether the value would be stored if the compute closed now: it recorded dependencies, has no violation and
+    // didn't ask not to be cached.
+    internal bool WillStore
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _violation is null && !_uncached && _tags.Count > 0;
+            }
+        }
+    }
+
     internal bool HasViolation
     {
         get

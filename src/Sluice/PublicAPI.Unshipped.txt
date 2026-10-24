@@ -7,6 +7,12 @@ Sluice.SluiceReads.DoNotCache() -> void
 Sluice.Infrastructure.FlowWrites
 Sluice.SluiceFlow
 static Sluice.Infrastructure.ActiveCompute.BeforeStore(Sluice.SluiceReads! reads, System.Func<System.Threading.CancellationToken, System.Threading.Tasks.Task!>! step) -> void
-static Sluice.Infrastructure.FlowWrites.AddProbe(Sluice.SluiceCache! cache, System.Func<System.Collections.Generic.IReadOnlyCollection<Sluice.Dependency!>!>! pending) -> bool
+static Sluice.Infrastructure.FlowWrites.AddProbe(Sluice.SluiceCache! cache, object! key, System.Func<System.Collections.Generic.IReadOnlyCollection<Sluice.Dependency!>!>! pending) -> bool
 static Sluice.Infrastructure.FlowWrites.OnAmbient(Sluice.SluiceCache! cache, System.Func<System.Transactions.Transaction!, System.Collections.Generic.IReadOnlyCollection<Sluice.Dependency!>!>! pending) -> void
 static Sluice.SluiceFlow.Begin() -> System.IDisposable!
+Sluice.Infrastructure.ModelSource
+Sluice.Infrastructure.StoreChecks
+Sluice.SluiceCache.Dispose() -> void
+Sluice.SluiceCache.DisposeAsync() -> System.Threading.Tasks.ValueTask
+static Sluice.Infrastructure.ModelSource.Create<TKey>(string! name, System.Func<TKey, string!>! format) -> Sluice.Source<TKey>!
+static Sluice.Infrastructure.StoreChecks.Add(Sluice.SluiceCache! cache, System.Func<object!, System.Exception?>! check) -> void

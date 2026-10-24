@@ -1,4 +1,6 @@
+using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
 
 namespace Sluice.EntityFrameworkCore.Tests.Support;
@@ -53,6 +55,39 @@ public sealed class HelpForm
     public int Id { get; set; }
     public string TenantId { get; set; } = "";
     public string Title { get; set; } = "";
+}
+
+/// <summary>
+/// Filtered through properties of the context marked [SluiceContextState] whose bodies fall back to the caller's
+/// ambient tenant: one to null, one to throwing. Each filter is named, so a read can ignore the other.
+/// </summary>
+public sealed class HelpQueue
+{
+    public int Id { get; set; }
+    public string TenantId { get; set; } = "";
+    public string Title { get; set; } = "";
+}
+
+/// <summary>What the caller's ambient tenant was when the scope first made it.</summary>
+public sealed class CallerSnapshot
+{
+    public string? Tenant { get; } = AmbientTenant.Current;
+}
+
+/// <summary>
+/// A query expression interceptor that changes nothing, one instance for the run: EF builds an internal service
+/// provider per distinct set of them.
+/// </summary>
+public sealed class QueryRewriter : IQueryExpressionInterceptor
+{
+    private QueryRewriter() { }
+
+    public static QueryRewriter Instance { get; } = new();
+
+    public Expression QueryCompilationStarting(
+        Expression queryExpression,
+        QueryExpressionEventData eventData
+    ) => queryExpression;
 }
 
 /// <summary>
@@ -207,24 +242,77 @@ public sealed class HelpdeskDb : HelpdeskModel
 
     public ITenantProvider Tenants { get; }
 
+    // The tenant a configure reads as, which the desk filters prefer to the caller's.
+    private string? _readAs;
+
     public DbSet<HelpNote> Notes => Set<HelpNote>();
     public DbSet<HelpForm> Forms => Set<HelpForm>();
+    public DbSet<HelpQueue> Queues => Set<HelpQueue>();
 
     /// <summary>The tenant service's tenant, which only <c>read.Db</c>'s configure sets inside a compute.</summary>
     [SluiceContextState]
     private string? FormTenant => _tenantContext is { TenantId: { } tenant } ? tenant : null;
+
+    /// <summary>The tenant the configure set, or else the caller's, as an app reading the request's user does.</summary>
+    [SluiceContextState]
+    private string? DeskTenant => _readAs ?? AmbientTenant.Current;
+
+    /// <summary>As <see cref="DeskTenant"/>, but with no caller it throws, as reading a missing request does.</summary>
+    [SluiceContextState]
+    private string RequestTenant =>
+        _readAs
+        ?? AmbientTenant.Current
+        ?? throw new InvalidOperationException("There's no request.");
+
+    /// <summary>Reads as <paramref name="tenant"/>, whoever the caller is.</summary>
+    public void ReadAs(string tenant) => _readAs = tenant;
 
     protected override void OnModelCreating(ModelBuilder model)
     {
         base.OnModelCreating(model);
         model.Entity<HelpNote>().HasQueryFilter(note => note.TenantId == Tenants.TenantId);
         model.Entity<HelpForm>().HasQueryFilter(form => form.TenantId == FormTenant);
+        model.Entity<HelpQueue>().HasQueryFilter("desk", queue => queue.TenantId == DeskTenant);
+        model
+            .Entity<HelpQueue>()
+            .HasQueryFilter("request", queue => queue.TenantId == RequestTenant);
     }
 }
 
 /// <summary>A helpdesk context EF can pool: its constructor takes only its options.</summary>
 public sealed class PooledHelpdeskDb(DbContextOptions<PooledHelpdeskDb> options)
     : HelpdeskModel(options);
+
+/// <summary>
+/// A helpdesk context EF can pool whose forms are filtered through a marked property over the tenant service its
+/// constructor takes. The pool makes it from the root provider, so a leased one holds the root's service, not a
+/// scope's.
+/// </summary>
+public sealed class PooledFormsDb(
+    DbContextOptions<PooledFormsDb> options,
+    TenantContext tenantContext
+) : HelpdeskModel(options)
+{
+    public DbSet<HelpForm> Forms => Set<HelpForm>();
+
+    /// <summary>The tenant service's tenant, which only <c>read.Db</c>'s configure sets inside a compute.</summary>
+    [SluiceContextState]
+    private string? FormTenant => tenantContext.TenantId;
+
+    protected override void OnModelCreating(ModelBuilder model)
+    {
+        base.OnModelCreating(model);
+        model.Entity<HelpForm>().HasQueryFilter(form => form.TenantId == FormTenant);
+    }
+}
+
+/// <summary>A helpdesk context whose own OnConfiguring adds a query expression interceptor, after the options'.</summary>
+public sealed class ConfiguringHelpdeskDb(DbContextOptions<ConfiguringHelpdeskDb> options)
+    : HelpdeskModel(options)
+{
+    protected override void OnConfiguring(DbContextOptionsBuilder builder) =>
+        builder.AddInterceptors(QueryRewriter.Instance);
+}
 
 /// <summary>
 /// EF's documented pattern for pooled contexts with a tenant: a scoped factory that leases from the pool and sets the

@@ -20,8 +20,8 @@ invalidation has run.
 | with no transaction (EF's implicit one, or autocommit) | before `SaveChanges` returns |
 | in `BeginTransaction` | when `Commit` or `Rollback` runs, on whichever context calls it |
 | in a `TransactionScope`, or `Database.EnlistTransaction` | when the transaction completes, whatever the outcome |
-| in a transaction disposed without commit or rollback | never: nothing committed |
-| in a `DbTransaction` you commit outside EF | **never**: Sluice can't see it. Unsupported |
+| in a transaction disposed without commit or rollback | when its connection closes, or begins its next transaction |
+| in a `DbTransaction` you commit or roll back outside EF | late: when Sluice next looks (see below). Commit through EF |
 
 A rollback invalidates too, as does a save that fails, is cancelled or hits a concurrency
 conflict. Each might have committed something (an earlier batch, or a commit whose result never
@@ -29,7 +29,21 @@ came back), and evicting too much is safe where evicting too little isn't.
 
 Inside an EF transaction, all its saves are invalidated together at the commit. Inside a
 `TransactionScope` or an enlisted transaction, each save is invalidated separately when the
-transaction completes.
+transaction completes. A save rolled back to a savepoint is still invalidated when the
+transaction ends.
+
+### Committing outside EF
+
+EF raises no event when you call `Commit()` or `Rollback()` on the `DbTransaction` itself
+(`db.Database.CurrentTransaction.GetDbTransaction()`), nor when a transaction is disposed. So
+Sluice notices the transaction has ended the next time it looks: at the flow's next cached
+read, the context's next save, a write completing in it, the connection beginning another
+transaction, or the connection closing, whichever comes first. Until then, a read can cache the
+old value again. A transaction disposed without commit or rollback looks the same to Sluice as
+one committed outside EF, so it's invalidated too, which only evicts more than it needs to. Disposing
+the context closes a connection EF opened; one you opened yourself and keep open, unused, holds
+the invalidation back until you close or reuse it. Commit and roll back through EF (`transaction.Commit()` on the
+`IDbContextTransaction`) and none of this applies.
 
 ### `TransactionScope` with async code
 
@@ -44,9 +58,11 @@ using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled)
 }
 ```
 
-Without it, the transaction is lost after the first `await`. EF and Sluice then see no
-transaction when an async save completes, so Sluice invalidates straight away, before the scope
-commits, and another request can cache the old data in between.
+Without it, the transaction is lost after the first `await`, and EF fails a save that needs
+more than one batch. A save that does run then sees no transaction where it completes. Sluice
+noted the scope when the connection was opened, or when the save's first command ran, so it
+invalidates straight away and again when the scope completes, and logs a warning (event 5)
+once. A read in between can cache the old value, but only until the scope completes.
 
 A distributed transaction can complete after `Dispose` returns, and is invalidated then. A
 connection string with `Enlist=false` doesn't join the scope, so each save commits on its own
@@ -114,12 +130,13 @@ Because a compute runs outside your transaction, it can't see what your transact
 but not committed. A cached read that depends on such writes throws rather than return data
 older than your own write: see
 [Reading your own uncommitted writes](/guides/strict-reads#reading-your-own-uncommitted-writes).
-Sluice sees a `TransactionScope` by itself, and an EF transaction on a flow that called
-`SluiceFlow.Begin()` first.
+Sluice sees a `TransactionScope` by itself, and an EF transaction once the flow writes in it
+after calling `SluiceFlow.Begin()`.
 
 ## What's not covered
 
 - A crash between the commit and the invalidation loses the invalidation, and the old value
-  lives until its entry expires. Nothing stores pending invalidations to replay after a restart.
-- A `DbTransaction` committed outside EF isn't seen, and neither is a save or a `UseTransaction`
-  commit on a context without `UseSluice`.
+  lives until its entry expires. That's deliberate: Sluice keeps no outbox, so the entry's
+  duration bounds it. An app that needs more can record what it wrote in its own outbox, in the
+  same transaction, and call `InvalidateAsync` from the outbox's handler.
+- A save, or a `UseTransaction` commit, on a context without `UseSluice` isn't seen.

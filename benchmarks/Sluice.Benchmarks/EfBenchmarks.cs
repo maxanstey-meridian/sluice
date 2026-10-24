@@ -52,6 +52,7 @@ public class EfBenchmarks
         _services = new ServiceCollection()
             .AddLogging()
             .AddSluice()
+            .AddSluiceEntityFrameworkCore()
             .AddPooledDbContextFactory<ItemDb>(
                 (services, options) => options.UseSqlite(_connection).UseSluice(services)
             )

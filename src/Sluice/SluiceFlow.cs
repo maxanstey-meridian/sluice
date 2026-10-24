@@ -7,8 +7,9 @@ namespace Sluice;
 /// </summary>
 /// <remarks>
 /// Sluice sees a transaction's writes through the package that made them, such as the EF Core package. An ambient
-/// <c>TransactionScope</c> is seen without this; an EF transaction begun before <see cref="Begin"/>, or on a flow
-/// without it, isn't checked.
+/// <c>TransactionScope</c> is seen without this. Another transaction is checked from the flow's first write in it
+/// after <see cref="Begin"/>, even one begun before it; one the flow wrote in only before <see cref="Begin"/>, or only
+/// on a flow without it, isn't checked.
 /// </remarks>
 public static class SluiceFlow
 {
@@ -32,35 +33,46 @@ public static class SluiceFlow
         return new Handle(box);
     }
 
-    // Keeps a probe in the current flow's box; false when the flow has none.
-    internal static bool AddProbe(SluiceCache cache, Func<IReadOnlyCollection<Dependency>> pending)
+    // Keeps a probe in the current flow's box, unless it holds one for this cache and key; false when the flow has no
+    // box.
+    internal static bool AddProbe(
+        SluiceCache cache,
+        object key,
+        Func<IReadOnlyCollection<Dependency>> pending
+    )
     {
         if (_box.Value is not { } box)
         {
             return false;
         }
 
-        box.Add(cache, pending);
+        box.Add(cache, key, pending);
         return true;
     }
 
     // What the current flow's probes for this cache have pending, or null when nothing is. One lookup without a box.
     internal static List<Dependency>? Pending(SluiceCache cache) => _box.Value?.Pending(cache);
 
-    // A flow may fan out, so probes can be added from concurrent tasks.
+    // A flow may fan out, so probes can be added from concurrent tasks. One probe per cache and key: a package adds one
+    // each time it sees the flow write in a transaction, and a second for the same transaction would only report the
+    // same writes again.
     private sealed class Box
     {
         private readonly Lock _lock = new();
-        private readonly List<(
-            SluiceCache Cache,
-            Func<IReadOnlyCollection<Dependency>> Pending
-        )> _probes = [];
+        private readonly Dictionary<
+            (SluiceCache Cache, object Key),
+            Func<IReadOnlyCollection<Dependency>>
+        > _probes = [];
 
-        public void Add(SluiceCache cache, Func<IReadOnlyCollection<Dependency>> pending)
+        public void Add(
+            SluiceCache cache,
+            object key,
+            Func<IReadOnlyCollection<Dependency>> pending
+        )
         {
             lock (_lock)
             {
-                _probes.Add((cache, pending));
+                _probes.TryAdd((cache, key), pending);
             }
         }
 
@@ -77,7 +89,9 @@ public static class SluiceFlow
 
                 probes =
                 [
-                    .. _probes.Where(probe => probe.Cache == cache).Select(probe => probe.Pending),
+                    .. _probes
+                        .Where(probe => probe.Key.Cache == cache)
+                        .Select(probe => probe.Value),
                 ];
             }
 

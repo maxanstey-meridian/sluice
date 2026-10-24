@@ -143,6 +143,12 @@ public async Task MarkPaid(InvoiceId invoiceId, CustomerId customerId)
 
 Values that read none of it stay cached.
 
+Each call publishes again 5 s later, in the background, and so does `ClearAsync`. That restores
+an invalidation FusionCache 2.9 can lose to a read checking the same tag at the same moment on
+the same server (see [What Sluice sets](/guides/configuration#what-sluice-sets)). The cost is a
+second round of tag writes per invalidation, and a value cached in those 5 s is computed once
+more.
+
 ### Keep the invalidation with the write
 
 Give each kind of write one method that writes and then invalidates, as `MarkPaid` does, and

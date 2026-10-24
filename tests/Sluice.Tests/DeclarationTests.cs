@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Linq.Expressions;
+using Sluice.Infrastructure;
 using Sluice.Tests.Support;
 
 namespace Sluice.Tests;
@@ -12,6 +14,16 @@ public sealed class DeclarationTests
     {
         public sealed record CustomerId(string Value);
     }
+
+    // One lambda for every T: the same format whichever generic type holds it.
+    private static class Holder<T>
+    {
+        public static Query<int, string> Query(string name) => new(name, id => typeof(T).Name + id);
+
+        public static Source<int> Source(string name) => new(name, id => typeof(T).Name + id);
+    }
+
+    private static string Hash(int id) => $"#{id}";
 
     // A user IFormattable whose text differs for every key.
     public readonly record struct Sku(int Value) : IFormattable
@@ -212,24 +224,144 @@ public sealed class DeclarationTests
     }
 
     [Fact]
-    public void Redeclaring_a_query_name_with_the_same_types_is_allowed()
+    public void Redeclaring_a_query_or_source_name_with_the_same_types_and_format_is_allowed()
     {
         _ = new Query<int, string>("decl-repeated");
+        _ = new Query<int, string>("decl-repeated-format", Hash);
+        _ = new Source<int>("decl-repeated");
+        _ = new Source<int>("decl-repeated-format", Hash);
 
-        var query = () => new Query<int, string>("decl-repeated", id => $"#{id}");
+        var redeclare = () =>
+        {
+            _ = new Query<int, string>("decl-repeated");
+            _ = new Query<int, string>("decl-repeated-format", Hash);
+            _ = new Source<int>("decl-repeated");
+            _ = new Source<int>("decl-repeated-format", Hash);
+        };
 
-        query.Should().NotThrow();
+        redeclare.Should().NotThrow();
     }
 
-    // A source name clash only over-invalidates, so it isn't guarded.
+    // Two lambdas written the same way are still two formats: Sluice can't tell they agree.
     [Fact]
-    public void Source_names_are_not_checked_for_duplicates()
+    public void Redeclaring_a_query_or_source_name_with_another_format_throws()
+    {
+        _ = new Query<int, string>("decl-default-then-format");
+        _ = new Query<int, string>("decl-two-lambdas", id => $"#{id}");
+        _ = new Source<int>("decl-default-then-format");
+        _ = new Source<int>("decl-two-lambdas", id => $"#{id}");
+
+        new Func<object>(() => new Query<int, string>("decl-default-then-format", Hash))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage(
+                "'decl-default-then-format' is already declared as Query<System.Int32, System.String> with another "
+                    + "format (the default format, with no format given), so one key could get different text in each, "
+                    + "splitting or mixing their entries. Declare the query once and use that declaration everywhere.*"
+            );
+        new Func<object>(() => new Query<int, string>("decl-two-lambdas", id => $"#{id}"))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage("*with another format (Sluice.Tests.DeclarationTests+<>c.*)*");
+        new Func<object>(() => new Source<int>("decl-default-then-format", Hash))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage(
+                "Source 'decl-default-then-format' is already declared as Source<System.Int32> with another format "
+                    + "(the default format, with no format given), so one key could get different text in each, and a "
+                    + "write through one would miss the readers of the other.*"
+            );
+        new Func<object>(() => new Source<int>("decl-two-lambdas", id => $"#{id}"))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage("*with another format (Sluice.Tests.DeclarationTests+<>c.*)*");
+    }
+
+    [Fact]
+    public void Redeclaring_a_query_or_source_name_from_one_lambda_with_different_captures_or_generic_holders_is_allowed()
+    {
+        static Query<int, string> DeclareQuery(string prefix) =>
+            new("decl-captures", id => prefix + id);
+        static Source<int> DeclareSource(string prefix) => new("decl-captures", id => prefix + id);
+
+        var redeclare = () =>
+        {
+            _ = DeclareQuery("a");
+            _ = DeclareQuery("b");
+            _ = DeclareSource("a");
+            _ = DeclareSource("b");
+            _ = Holder<string>.Query("decl-generic-holders");
+            _ = Holder<Uri>.Query("decl-generic-holders");
+            _ = Holder<string>.Source("decl-generic-holders");
+            _ = Holder<Uri>.Source("decl-generic-holders");
+        };
+
+        redeclare.Should().NotThrow();
+    }
+
+    // A compiled expression is a new method on every compile, so it can't be compared; the first format that can be is
+    // what later declarations must match.
+    [Fact]
+    public void A_query_or_source_format_from_a_compiled_expression_is_not_compared()
+    {
+        Expression<Func<int, string>> format = id => id.ToString(CultureInfo.InvariantCulture);
+        _ = new Query<int, string>("decl-compiled", format.Compile());
+        _ = new Source<int>("decl-compiled", format.Compile());
+
+        var redeclare = () =>
+        {
+            _ = new Query<int, string>("decl-compiled", format.Compile());
+            _ = new Query<int, string>("decl-compiled", Hash);
+            _ = new Source<int>("decl-compiled", format.Compile());
+            _ = new Source<int>("decl-compiled", Hash);
+        };
+
+        redeclare.Should().NotThrow();
+        new Func<object>(() => new Query<int, string>("decl-compiled"))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage("*with another format (Sluice.Tests.DeclarationTests.Hash)*");
+        new Func<object>(() => new Source<int>("decl-compiled"))
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage("*with another format (Sluice.Tests.DeclarationTests.Hash)*");
+    }
+
+    // Int 1 and string "01" are one key to one declaration's readers and another to the other's writers.
+    [Fact]
+    public void Redeclaring_a_source_name_with_another_key_type_throws()
     {
         _ = new Source<int>("decl-shared-source");
 
         var otherKey = () => new Source<string>("decl-shared-source");
 
-        otherKey.Should().NotThrow();
+        otherKey
+            .Should()
+            .Throw<ArgumentException>()
+            .WithMessage(
+                "Source 'decl-shared-source' is already declared as Source<System.Int32>, so declaring it as "
+                    + "Source<System.String> would give one key different text in each*"
+            );
+    }
+
+    // A package's model names are unique by construction, and two models over one table share them on purpose.
+    [Fact]
+    public void A_model_source_is_not_checked_against_other_declarations_and_claims_nothing()
+    {
+        _ = new Source<int>("decl-model");
+
+        var model = () =>
+        {
+            _ = ModelSource.Create<int>("decl-model", id => $"#{id}");
+            _ = ModelSource.Create<string>("decl-model", id => id);
+            _ = ModelSource.Create<object>("decl-model-only", id => $"{id}");
+        };
+
+        model.Should().NotThrow();
+        new Func<object>(() => new Source<string>("decl-model-only")).Should().NotThrow();
+        new Func<object>(() => ModelSource.Create<int>(" ", id => $"{id}"))
+            .Should()
+            .Throw<ArgumentException>();
     }
 
     [Theory]
