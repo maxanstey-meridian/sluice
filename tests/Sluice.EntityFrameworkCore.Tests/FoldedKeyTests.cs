@@ -197,6 +197,19 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         dependencies.Should().NotThrow();
     }
 
+    // A provider maps some types with a mapping EF shares between providers (SQLite's TimeSpan), whose assembly is EF's,
+    // so the check takes the provider from the context, which UseSluice names on the model.
+    [Fact]
+    public async Task A_UseSluice_model_names_its_provider_for_the_date_and_time_check()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+
+        db.Model.FindAnnotation(ProviderNameConvention.Annotation)
+            ?.Value.Should()
+            .Be(db.Database.ProviderName);
+    }
+
     // Each provider's own mapping of the column, built without a server: PostgreSQL's timestamp, interval and time keep
     // microseconds with or without a size; MySQL's datetime, timestamp and time keep whole seconds without one. Each
     // row names every column it refuses.

@@ -922,9 +922,10 @@ internal static class ModelSources
     // reader asks by, so the two give the row different key text and an eviction is missed.
     private static void EnsurePrecise(IModel model)
     {
+        var provider = model.FindAnnotation(ProviderNameConvention.Annotation)?.Value as string;
         var refused = Keying(model)
             .Select(property => (Property: property, Mapping: property.FindRelationalTypeMapping()))
-            .Where(mapped => mapped.Mapping is { } mapping && Imprecise(mapping))
+            .Where(mapped => mapped.Mapping is { } mapping && Imprecise(mapping, provider))
             .Select(mapped =>
                 $"{mapped.Property.DeclaringType.DisplayName()}.{mapped.Property.Name} ({mapped.Mapping!.StoreType})"
             )
@@ -954,11 +955,13 @@ internal static class ModelSources
                 property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
             );
 
-    private static bool Imprecise(RelationalTypeMapping mapping)
+    // The provider is the one UseSluice names on the model; a model built without it, the mapping's assembly, which is
+    // the provider's own for every mapping but those EF shares between providers.
+    private static bool Imprecise(RelationalTypeMapping mapping, string? modelProvider)
     {
         var providerType = mapping.Converter?.ProviderClrType ?? mapping.ClrType;
         var stored = Nullable.GetUnderlyingType(providerType) ?? providerType;
-        var provider = mapping.GetType().Assembly.GetName().Name ?? "";
+        var provider = modelProvider ?? mapping.GetType().Assembly.GetName().Name ?? "";
         var size = SizeIn(mapping.StoreType, mapping.StoreTypeNameBase);
         if (stored == typeof(DateTime) || stored == typeof(DateTimeOffset))
         {
@@ -1000,8 +1003,8 @@ internal static class ModelSources
             : null;
     }
 
-    // Judged by the store type and the provider that maps it, the mapping's assembly, which is the name EF's own
-    // provider checks (IsSqlServer, IsNpgsql) compare. A date column and a time-of-day one drop part of the value, and
+    // Judged by the store type and the provider, by the name EF's own provider checks (IsSqlServer, IsNpgsql)
+    // compare. A date column and a time-of-day one drop part of the value, and
     // smalldatetime rounds to the minute; SQL Server's datetime rounds to about 3 ms whatever size the model gives it,
     // though EF writes that size into the store type ("datetime(6)"). Otherwise as BelowMicroseconds.
     internal static bool ImpreciseDate(string provider, string storeTypeNameBase, int? size) =>
