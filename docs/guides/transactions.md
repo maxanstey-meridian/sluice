@@ -44,10 +44,10 @@ any flow, and every second, until it has ended), or its connection beginning ano
 closing (even when you close it yourself) or being disposed, whichever comes first. Until then,
 a read can cache the old value again. A transaction disposed without commit or rollback looks the same to
 Sluice as one committed outside EF, so it's invalidated too, which only evicts more than it
-needs to. Npgsql hands the same `DbTransaction` object to the next transaction on a connection,
-so a context joining one with `UseTransaction` publishes what the object already holds, and
-again when it ends: for contexts sharing one transaction, that too only evicts more than it
-needs to. Commit and roll back through EF (`transaction.Commit()` on the
+needs to. A context joining a transaction with `UseTransaction` invalidates what the transaction
+already holds, and again when it ends, since you may have committed it and begun another outside
+EF, which Npgsql hands the same `DbTransaction` object: for contexts sharing one transaction,
+that too only evicts more than it needs to. Commit and roll back through EF (`transaction.Commit()` on the
 `IDbContextTransaction`) and none of this applies.
 
 ### `TransactionScope` with async code
@@ -99,7 +99,9 @@ Several contexts can share one transaction. Every context that saves must use `U
 the same `SluiceCache`, so its saves are captured. Then:
 
 - **`UseTransaction`**: the context that calls `Commit` or `Rollback` needn't use `UseSluice`;
-  the commit or rollback invalidates what every `UseSluice` context saved in it.
+  the commit or rollback invalidates what every `UseSluice` context saved in it. Each context
+  joining also invalidates what earlier ones saved (see
+  [Committing outside EF](#committing-outside-ef)).
 - **One `TransactionScope`**: no context commits. Each saving context invalidates its own saves
   when the scope completes.
 

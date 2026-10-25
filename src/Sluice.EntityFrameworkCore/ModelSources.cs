@@ -916,7 +916,8 @@ internal static class ModelSources
         );
 
     // A date stored less precisely than the microsecond Sluice folds dates to (SQL Server's datetime, about 3 ms, and
-    // smalldatetime, a minute; a date column; a precision under 6) holds a value other than the one a save reports for
+    // smalldatetime, a minute; MySQL's datetime or timestamp without a size, whole seconds; a date column; a precision
+    // under 6) holds a value other than the one a save reports for
     // a new row, or a reader asks by, so the two give the row different key text and an eviction is missed.
     private static void EnsurePrecise(IModel model)
     {
@@ -955,35 +956,44 @@ internal static class ModelSources
         var stored = Nullable.GetUnderlyingType(provider) ?? provider;
         return (stored == typeof(DateTime) || stored == typeof(DateTimeOffset))
             && ImpreciseDate(
-                mapping.GetType().Name,
+                mapping.GetType().Assembly.GetName().Name ?? "",
                 mapping.StoreType,
                 mapping.StoreTypeNameBase,
                 property.GetPrecision() ?? mapping.Precision
             );
     }
 
-    // Judged by the store type and the provider's mapping, not the precision the model asks for alone: date and
+    // Judged by the store type and the provider that maps it, not the precision the model asks for alone. The provider
+    // is the mapping's assembly, the name EF's own provider checks (IsSqlServer, IsNpgsql) compare. date and
     // smalldatetime always round; SQL Server's datetime rounds to about 3 ms whatever size the model gives it, though
-    // EF writes that size into the store type ("datetime(6)"), so it's told from MySQL's precise datetime(6) by its
-    // mapping class; MySQL's datetime and timestamp without a size keep whole seconds, as does another provider's
-    // datetime (PostgreSQL's timestamp without one is precise); any type, below a size of 6.
+    // EF writes that size into the store type ("datetime(6)"); MySQL's date and time types without a size keep whole
+    // seconds, though PostgreSQL's timestamp without one is precise; another provider's datetime without a size
+    // rounds; any type, below a size of 6.
     internal static bool ImpreciseDate(
-        string mappingType,
+        string provider,
         string storeType,
         string storeTypeNameBase,
         int? precision
-    ) =>
-        storeTypeNameBase.Equals("date", StringComparison.OrdinalIgnoreCase)
-        || storeTypeNameBase.Equals("smalldatetime", StringComparison.OrdinalIgnoreCase)
-        || (
-            storeTypeNameBase.Equals("datetime", StringComparison.OrdinalIgnoreCase)
-            && (mappingType == "SqlServerDateTimeTypeMapping" || !storeType.Contains('('))
-        )
-        || (
-            mappingType is "MySqlDateTimeTypeMapping" or "MySqlDateTimeOffsetTypeMapping"
-            && !storeType.Contains('(')
-        )
-        || precision is < 6;
+    )
+    {
+        var sized = storeType.Contains('(');
+        return Is("date")
+            || Is("smalldatetime")
+            || (Is("datetime") && (provider == SqlServerProvider || !sized))
+            || (_mySqlProviders.Contains(provider) && !sized)
+            || precision is < 6;
+
+        bool Is(string name) => storeTypeNameBase.Equals(name, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private const string SqlServerProvider = "Microsoft.EntityFrameworkCore.SqlServer";
+
+    // Oracle's, the one that runs on EF 10, and Pomelo's.
+    private static readonly HashSet<string> _mySqlProviders =
+    [
+        "MySql.EntityFrameworkCore",
+        "Pomelo.EntityFrameworkCore.MySql",
+    ];
 
     // EF's built-ins that give back every value they can load. An enum or number cast into a type that holds every
     // value the column can (int into long, float into double, any integer into decimal), and DateTime ticks and Guid

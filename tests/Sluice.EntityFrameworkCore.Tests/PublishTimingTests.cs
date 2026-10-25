@@ -955,7 +955,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await guest.Database.UseTransactionAsync(transaction.GetDbTransaction());
         (await adaRead.WasEvicted())
             .Should()
-            .Be(ownerUsesSluice, "the join published the owner's write");
+            .Be(ownerUsesSluice, "the join publishes what the owner wrote, if anything");
 
         await guest.Rename(bob, "Bob Babbage");
         (await bobRead.WasEvicted()).Should().BeFalse("the transaction hasn't committed");

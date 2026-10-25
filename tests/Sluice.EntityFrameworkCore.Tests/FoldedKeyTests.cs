@@ -197,68 +197,77 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         dependencies.Should().NotThrow();
     }
 
-    public static TheoryData<string, Func<DbContextOptions, DbContext>> PreciseDates =>
+    // Each provider's own mapping of the column, built without a server: PostgreSQL's timestamp keeps microseconds with
+    // or without a size, MySQL's datetime and timestamp keep whole seconds without one.
+    public static TheoryData<string, Func<DbContext>, bool> DateColumns =>
         new()
         {
-            { "the provider's default precision", options => new DefaultDateDb(options) },
-            { "a precision of 6", options => new MicrosecondDateDb(options) },
+            { "PostgreSQL's default", () => new DefaultDateDb(Npgsql()), false },
+            { "PostgreSQL with a precision of 6", () => new MicrosecondDateDb(Npgsql()), false },
+            { "PostgreSQL's timestamp without a size", () => new TimestampDateDb(Npgsql()), false },
+            { "MySQL's default", () => new DefaultDateDb(MySql()), false },
+            { "MySQL with a precision of 6", () => new MicrosecondDateDb(MySql()), false },
+            { "MySQL's timestamp without a size", () => new TimestampDateDb(MySql()), true },
+            { "MySQL's datetime without a size", () => new DatetimeDateDb(MySql()), true },
         };
 
     [Theory]
-    [MemberData(nameof(PreciseDates))]
-    public void A_unique_date_stored_to_the_microsecond_is_trusted(
-        string precision,
-        Func<DbContextOptions, DbContext> create
+    [MemberData(nameof(DateColumns))]
+    public void A_unique_date_is_refused_where_its_provider_stores_it_to_less_than_the_microsecond(
+        string column,
+        Func<DbContext> create,
+        bool refused
     )
     {
-        using var db = create(
-            new DbContextOptionsBuilder().UseNpgsql(postgres.ConnectionString).Options
-        );
+        using var db = create();
 
         var dependencies = () => db.Set<Gadget>().AllDependencies();
 
-        dependencies.Should().NotThrow(precision);
+        if (refused)
+        {
+            dependencies
+                .Should()
+                .Throw<InvalidOperationException>(column)
+                .WithMessage("*Gadget.Made*microsecond*");
+        }
+        else
+        {
+            dependencies.Should().NotThrow(column);
+        }
     }
 
-    // Other providers' mappings, which the suite has no database for: SQL Server's datetime takes no size, though EF
-    // writes the one the model asks for into its store type, so its mapping class tells it from MySQL's datetime(6).
-    // MySQL's timestamp without a size keeps whole seconds; PostgreSQL's is precise.
+    private static DbContextOptions Npgsql() =>
+        new DbContextOptionsBuilder().UseNpgsql("Host=none").Options;
+
+    private static DbContextOptions MySql() =>
+        new DbContextOptionsBuilder().UseMySQL("Server=none").Options;
+
+    // Providers the suite can't build a model for, by the name EF's provider checks compare: SQL Server's datetime
+    // takes no size, though EF writes the one the model asks for into its store type.
     [Theory]
-    [InlineData("SqlServerDateTimeTypeMapping", "datetime", "datetime", null, true)]
-    [InlineData("SqlServerDateTimeTypeMapping", "datetime(7)", "datetime", 7, true)]
-    [InlineData("SqlServerDateTimeTypeMapping", "smalldatetime", "smalldatetime", null, true)]
-    [InlineData("SqlServerDateTimeTypeMapping", "datetime2", "datetime2", null, false)]
-    [InlineData("SqlServerDateTimeTypeMapping", "datetime2(3)", "datetime2", 3, true)]
-    [InlineData("MySqlDateTimeTypeMapping", "datetime(6)", "datetime", 6, false)]
-    [InlineData("MySqlDateTimeTypeMapping", "datetime(3)", "datetime", 3, true)]
-    [InlineData("MySqlDateTimeTypeMapping", "datetime", "datetime", null, true)]
-    [InlineData("MySqlDateTimeTypeMapping", "timestamp", "timestamp", null, true)]
-    [InlineData("MySqlDateTimeOffsetTypeMapping", "timestamp", "timestamp", null, true)]
-    [InlineData("MySqlDateTimeTypeMapping", "timestamp(6)", "timestamp", 6, false)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime", "datetime", null, true)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime(7)", "datetime", 7, true)]
     [InlineData(
-        "NpgsqlTimestampTypeMapping",
-        "timestamp without time zone",
-        "timestamp without time zone",
+        "Microsoft.EntityFrameworkCore.SqlServer",
+        "smalldatetime",
+        "smalldatetime",
         null,
-        false
+        true
     )]
-    [InlineData("NpgsqlDateTimeDateTypeMapping", "date", "date", null, true)]
-    [InlineData(
-        "NpgsqlTimestampTzTypeMapping",
-        "timestamp with time zone",
-        "timestamp with time zone",
-        null,
-        false
-    )]
-    public void A_date_store_type_is_imprecise_when_it_rounds_below_the_microsecond(
-        string mappingType,
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime2", "datetime2", null, false)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime2(3)", "datetime2", 3, true)]
+    [InlineData("Pomelo.EntityFrameworkCore.MySql", "timestamp", "timestamp", null, true)]
+    [InlineData("Pomelo.EntityFrameworkCore.MySql", "datetime(6)", "datetime", 6, false)]
+    [InlineData("Another.Provider", "datetime", "datetime", null, true)]
+    public void A_date_store_type_is_imprecise_when_its_provider_rounds_it_below_the_microsecond(
+        string provider,
         string storeType,
         string storeTypeNameBase,
         int? precision,
         bool imprecise
     ) =>
         ModelSources
-            .ImpreciseDate(mappingType, storeType, storeTypeNameBase, precision)
+            .ImpreciseDate(provider, storeType, storeTypeNameBase, precision)
             .Should()
             .Be(imprecise);
 
@@ -379,6 +388,18 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     private sealed class DefaultDateDb(DbContextOptions options) : DatedDb(options)
     {
         protected override void Made(PropertyBuilder<DateTime> made) { }
+    }
+
+    private sealed class TimestampDateDb(DbContextOptions options) : DatedDb(options)
+    {
+        protected override void Made(PropertyBuilder<DateTime> made) =>
+            made.HasColumnType("timestamp");
+    }
+
+    private sealed class DatetimeDateDb(DbContextOptions options) : DatedDb(options)
+    {
+        protected override void Made(PropertyBuilder<DateTime> made) =>
+            made.HasColumnType("datetime");
     }
 
     // A typed id marked by its author; an enum stored as its number; a long key stored in an int column, which holds

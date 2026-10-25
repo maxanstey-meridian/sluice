@@ -489,7 +489,7 @@ internal sealed partial class SluiceInterceptor
             [
                 .. _efPending.TakeOn(connection, keep: other => other == transaction),
                 .. _efPending.TakeUnlessOn(transaction, connection),
-                .. _efPending.CopyMadeOn(transaction, connection),
+                .. _efPending.Find(transaction)?.All() ?? [],
             ]
             : [];
 
@@ -1521,17 +1521,6 @@ internal sealed partial class SluiceInterceptor
             lock (_lock)
             {
                 return UnlessOn(transaction, connection);
-            }
-        }
-
-        // What the transaction has pending from this connection, copied: the record keeps it.
-        public List<Dependency> CopyMadeOn(DbTransaction transaction, DbConnection connection)
-        {
-            lock (_lock)
-            {
-                return Find(transaction) is { } pending && pending.Connection == connection
-                    ? pending.All()
-                    : [];
             }
         }
 

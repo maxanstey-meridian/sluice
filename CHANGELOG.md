@@ -175,9 +175,10 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   reads of its own doesn't leave the others serving the old value) and invalidates then, a pooled context's
   or a connection you opened yourself included. A transaction disposed without commit or rollback looks the same, so it now
   invalidates what it wrote, at its disposal if EF began it, which only evicts more than needed.
-  A context joining a transaction with `UseTransaction` invalidates what it already holds, and
-  again when it ends, since Npgsql hands the same object to the next transaction on a
-  connection; for contexts sharing one transaction that also only evicts more than needed.
+  A context joining a transaction with `UseTransaction` invalidates what the transaction already
+  holds, and again when it ends, since you may have committed it and begun another outside EF,
+  which Npgsql hands the same object; for contexts sharing one transaction that also only evicts
+  more than needed.
   A write on a context whose connection you closed and opened again yourself, which runs
   outside the transaction the context still holds, is invalidated at once rather than with
   that transaction.
