@@ -474,12 +474,15 @@ Folding follows PostgreSQL's rules. The test suite runs on PostgreSQL, and other
 untested. A key, foreign key or unique column holding a date the database stores less precisely
 than to the microsecond, such as SQL Server's `datetime` (about 3 ms) or `smalldatetime`,
 MySQL's `datetime` or `timestamp` without a size (whole seconds), a `DateTime` in a `date`
-column, or a precision under 6, is refused at first use, as an unmarked
-converter is, below, and `[SluiceRoundTrips]` doesn't lift it: the database rounds what a save
-writes, so a new row's key and a key a read asks by wouldn't match what the row holds. Store
+column, a date in a time-of-day column (`time`, `time with time zone`), or a precision under
+6, is refused at first use, as an unmarked converter is, below, and `[SluiceRoundTrips]` doesn't
+lift it: the database rounds what a save writes, so a new row's key and a key a read asks by
+wouldn't match what the row holds. A date type without a precision is trusted only from a
+provider known to keep microseconds without one (PostgreSQL's timestamps, SQL Server's
+`datetime2` and `datetimeoffset`); on any other provider, set `HasPrecision(6)` or more. Store
 such a date in SQL Server's `datetime2`, MySQL's `datetime(6)` or a PostgreSQL `timestamp` of
-precision 6 (the default), map a date-only value as `DateOnly`, or key the type by another
-column.
+precision 6 (the default), map a date-only value as `DateOnly` and a time of day as `TimeOnly`,
+or key the type by another column.
 
 A value converter on a key, foreign key or unique column must round-trip: converting a stored
 value to .NET and back must give the stored value. A save reports what it would write back for

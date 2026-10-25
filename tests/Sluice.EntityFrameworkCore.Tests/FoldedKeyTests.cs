@@ -209,6 +209,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             { "MySQL with a precision of 6", () => new MicrosecondDateDb(MySql()), false },
             { "MySQL's timestamp without a size", () => new TimestampDateDb(MySql()), true },
             { "MySQL's datetime without a size", () => new DatetimeDateDb(MySql()), true },
+            { "PostgreSQL's time with time zone", () => new TimeOfDayDb(Npgsql()), true },
         };
 
     [Theory]
@@ -228,7 +229,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             dependencies
                 .Should()
                 .Throw<InvalidOperationException>(column)
-                .WithMessage("*Gadget.Made*microsecond*");
+                .WithMessage("*Gadget.*microsecond*");
         }
         else
         {
@@ -243,33 +244,26 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         new DbContextOptionsBuilder().UseMySQL("Server=none").Options;
 
     // Providers the suite can't build a model for, by the name EF's provider checks compare: SQL Server's datetime
-    // takes no size, though EF writes the one the model asks for into its store type.
+    // takes no size, though EF writes the one the model asks for into its store type; a provider Sluice doesn't know
+    // is trusted only with a size of 6 or more.
     [Theory]
-    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime", "datetime", null, true)]
-    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime(7)", "datetime", 7, true)]
-    [InlineData(
-        "Microsoft.EntityFrameworkCore.SqlServer",
-        "smalldatetime",
-        "smalldatetime",
-        null,
-        true
-    )]
-    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime2", "datetime2", null, false)]
-    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime2(3)", "datetime2", 3, true)]
-    [InlineData("Pomelo.EntityFrameworkCore.MySql", "timestamp", "timestamp", null, true)]
-    [InlineData("Pomelo.EntityFrameworkCore.MySql", "datetime(6)", "datetime", 6, false)]
-    [InlineData("Another.Provider", "datetime", "datetime", null, true)]
-    public void A_date_store_type_is_imprecise_when_its_provider_rounds_it_below_the_microsecond(
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime", null, true)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime", 7, true)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "smalldatetime", null, true)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime2", null, false)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetimeoffset", null, false)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime2", 3, true)]
+    [InlineData("Pomelo.EntityFrameworkCore.MySql", "timestamp", null, true)]
+    [InlineData("Pomelo.EntityFrameworkCore.MySql", "datetime", 6, false)]
+    [InlineData("Another.Provider", "datetime", null, true)]
+    [InlineData("Another.Provider", "timestamp", null, true)]
+    [InlineData("Another.Provider", "timestamp", 6, false)]
+    public void A_date_store_type_is_imprecise_unless_its_provider_keeps_microseconds(
         string provider,
-        string storeType,
         string storeTypeNameBase,
         int? precision,
         bool imprecise
-    ) =>
-        ModelSources
-            .ImpreciseDate(provider, storeType, storeTypeNameBase, precision)
-            .Should()
-            .Be(imprecise);
+    ) => ModelSources.ImpreciseDate(provider, storeTypeNameBase, precision).Should().Be(imprecise);
 
     public readonly record struct GadgetNo(int Value);
 
@@ -286,6 +280,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         public Colour Colour { get; set; }
         public long ShelfId { get; set; }
         public DateTime Made { get; set; }
+        public DateTimeOffset Stamped { get; set; }
         public Guid Tag { get; set; }
     }
 
@@ -302,7 +297,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     {
         var gadget = model.Entity<Gadget>();
         gadget.ToTable("gadgets_that_do_not_exist");
-        gadget.Ignore(g => g.ShelfId).Ignore(g => g.Made).Ignore(g => g.Tag);
+        gadget.Ignore(g => g.ShelfId).Ignore(g => g.Made).Ignore(g => g.Stamped).Ignore(g => g.Tag);
         map(gadget);
     }
 
@@ -388,6 +383,21 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     private sealed class DefaultDateDb(DbContextOptions options) : DatedDb(options)
     {
         protected override void Made(PropertyBuilder<DateTime> made) { }
+    }
+
+    // A DateTimeOffset's date dropped by a time-of-day column.
+    private sealed class TimeOfDayDb(DbContextOptions options) : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder model) =>
+            Gadgets(
+                model,
+                gadget =>
+                {
+                    gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter());
+                    gadget.Property(g => g.Stamped).HasColumnType("time with time zone");
+                    gadget.HasIndex(g => g.Stamped).IsUnique();
+                }
+            );
     }
 
     private sealed class TimestampDateDb(DbContextOptions options) : DatedDb(options)

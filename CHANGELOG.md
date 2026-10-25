@@ -81,9 +81,11 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   `ValueConverter<TModel, TProvider>` first. Enum-to-string and the other string-parsing
   built-ins need it too, since they accept more than one spelling of a value. A key, foreign key
   or unique column whose date the database rounds (SQL Server's `datetime` or `smalldatetime`,
-  MySQL's `datetime` or `timestamp` without a size, a `DateTime` in a `date` column, a precision
-  under 6) is refused at first use too, and the mark
-  doesn't lift that: its new rows' keys missed readers.
+  MySQL's `datetime` or `timestamp` without a size, a `DateTime` in a `date` column, a date in a
+  time-of-day column, a precision under 6) is refused at first use too, and the mark
+  doesn't lift that: its new rows' keys missed readers. A date type without a precision is
+  trusted only from PostgreSQL and SQL Server's `datetime2` and `datetimeoffset`; on another
+  provider, set `HasPrecision(6)` or more.
 - **Breaking: a context without `UseSluice`, or an EF command with no context, throws inside a
   compute.** Its commands used to go
   unseen, so a compute that read through one cached a value nothing evicted. Sluice now watches
