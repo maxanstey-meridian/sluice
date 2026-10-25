@@ -24,9 +24,8 @@
     </ItemGroup>
 
     <!--
-        Pack the core dependency as exactly this version ([0.3.0]) rather than NuGet's default of >= 0.3.0: this package
-        calls core members outside its supported API (Sluice.Infrastructure), so it only works with the core it was built
-        against. NuGet has no version range for a ProjectReference (NuGet/Home#5556); this rewrites the version its pack
+        Pack the core dependency as exactly this version rather than NuGet's default of at least it: this package calls
+        the core's internals, so it only works with the core it was built against. NuGet has no version range for a ProjectReference (NuGet/Home#5556); this rewrites the version its pack
         targets read, as the MCP C# SDK does.
     -->
     <Target Name="PinCoreToExactVersion" AfterTargets="_GetProjectReferenceVersions">

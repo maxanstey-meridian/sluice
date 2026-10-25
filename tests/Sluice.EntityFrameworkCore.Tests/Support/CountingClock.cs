@@ -4,7 +4,8 @@ namespace Sluice.EntityFrameworkCore.Tests.Support;
 
 /// <summary>
 /// A <see cref="FakeTimeProvider"/> that counts the recurring timers made on it and not yet disposed: the EF package's
-/// sweep of joined transactions is the only one, since the core's re-publish timers fire once.
+/// sweep of joined transactions is the only one, since the core's re-publish timers fire once. Each timer runs on the
+/// flow it was made on, as the system's do.
 /// </summary>
 public sealed class CountingClock : TimeProvider
 {
@@ -30,7 +31,16 @@ public sealed class CountingClock : TimeProvider
         TimeSpan period
     )
     {
-        var timer = _inner.CreateTimer(callback, state, dueTime, period);
+        // As System.Threading.Timer does; FakeTimeProvider's own run on the flow of whatever advances the clock.
+        var flow = ExecutionContext.Capture();
+        var timer = _inner.CreateTimer(
+            flow is null
+                ? callback
+                : value => ExecutionContext.Run(flow, new ContextCallback(callback), value),
+            state,
+            dueTime,
+            period
+        );
         if (period == Timeout.InfiniteTimeSpan)
         {
             return timer;

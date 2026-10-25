@@ -244,8 +244,9 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
     }
 
     // Without SluiceFlow.Begin, an EF transaction is never seen, so the read returns what's committed; so is an
-    // enlisted transaction outside a scope, which isn't Transaction.Current. Sluice warns once per cache, and not for
-    // the transaction EF begins for a save of its own, which commits before the save returns.
+    // enlisted transaction outside a scope, which isn't Transaction.Current. Sluice warns once per cache, at the first
+    // write in one, and not for the transaction EF begins for a save of its own, which commits before the save
+    // returns, nor for one that writes nothing.
     [Theory]
     [InlineData(Kind.EfTransaction)]
     [InlineData(Kind.UsedTransaction)]
@@ -257,13 +258,29 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(enlist: false);
         var (ada, bob) = await reader.AddCustomers();
-        var adaRead = await CachedRead.Customer(node.Cache, ada);
         await using (var plain = postgres.CreateDb(node))
         {
-            await plain.Rename(bob, "Bob Babbage");
+            // Two rows, so EF begins a transaction of its own for the save.
+            foreach (
+                var customer in await plain
+                    .Customers.Where(c => c.Id == ada || c.Id == bob)
+                    .ToListAsync()
+            )
+            {
+                customer.Name += " Senior";
+            }
+
+            await plain.SaveChangesAsync();
+            await using var readOnly = await plain.Database.BeginTransactionAsync();
+            await plain.NameOf(ada);
         }
 
-        NoFlowWarnings(node).Should().BeEmpty("a save's own transaction commits before it returns");
+        NoFlowWarnings(node)
+            .Should()
+            .BeEmpty(
+                "a save's own transaction commits before it returns, and the other wrote nothing"
+            );
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         await using var transaction = await Begin(node, kind);
 
         await transaction.Db.Rename(ada, "Ada Lovelace");

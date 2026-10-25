@@ -430,7 +430,7 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .Should()
             .ContainSingle()
             .Which.Should()
-            .Contain("read.Entity of it by a unique column")
+            .Contain("read.EntityAsync of it by a unique column")
             .And.Contain("Warehouse has no concurrency token");
     }
 

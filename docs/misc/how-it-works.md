@@ -159,7 +159,7 @@ ignoring query filters, for the keys of the rows holding the value, and records 
 dependency, or the whole type past 100 rows, before it returns the query. First, because a row
 deleted by key between the compute's query and a later lookup reports only its key, which that
 lookup would no longer find; any row the query finds after the lookup either was looked up or got
-the value afterwards, which reports the value. A lookup that throws fails the compute.
+the value afterwards, which reports the value. A lookup that throws makes `EntityAsync` throw.
 
 ## EF Core writes
 

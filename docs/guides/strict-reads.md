@@ -244,9 +244,9 @@ covered. Dispose it on the flow that began it.
 ### What the check misses
 
 - **An EF transaction on a flow without `SluiceFlow.Begin()`.** Its writes aren't seen as
-  pending, so a cached read returns the committed value. Sluice logs a `Warning` (event 7) the
-  first time it sees one, once per cache, but not for the transaction EF begins for a save of
-  its own, which commits before the save returns.
+  pending, so a cached read returns the committed value. Sluice logs a `Warning` (event 7) at
+  the first write it sees in one, once per cache, but not for the transaction EF begins for a
+  save of its own, which commits before the save returns.
 - **A transaction the flow wrote in only before `SluiceFlow.Begin()` ran**, such as one opened
   and written in earlier in the pipeline than the middleware. A cached read has no context to
   look at, so nothing tells Sluice of those writes. Call `SluiceFlow.Begin()` before opening the

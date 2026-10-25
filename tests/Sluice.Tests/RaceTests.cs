@@ -332,14 +332,11 @@ public sealed class RaceTests
             return release.Task;
         };
 
-        // The asynchronous dispose has returned its task by the time its re-publish waits at the gate, so this proves it
-        // waits. The synchronous one blocks its thread, so it runs on another, and is the asynchronous one waited on.
+        // The synchronous dispose blocks its thread, so it runs on another. Either is still waiting while its
+        // re-publish is held at the gate.
         var disposing = asynchronously ? a.DisposeAsync().AsTask() : Task.Run(a.Dispose);
         await writing.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        if (asynchronously)
-        {
-            disposing.IsCompleted.Should().BeFalse("the re-publish is still writing");
-        }
+        disposing.IsCompleted.Should().BeFalse("the re-publish is still writing");
 
         release.SetResult();
 

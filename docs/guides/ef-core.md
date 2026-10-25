@@ -257,8 +257,8 @@ key in between, and the cached value would keep a row that's gone. A write that 
 after the lookup still evicts the entry, as any write during a compute does.
 
 That's one more round trip per call, on the column's index; a cache hit runs neither query. If
-the lookup fails, `EntityAsync` throws, so the compute fails: nothing is cached and the caller
-gets the exception.
+the lookup fails, `EntityAsync` throws, and unless the compute catches it, nothing is cached and
+the caller gets the exception.
 
 `set.Dependency(key)` reaches only readers that found that row. A reader whose value no row
 held, a cached "not found", depends on the value alone, so after a write Sluice can't see that
@@ -382,7 +382,7 @@ So for a type without a row version, Sluice doesn't trust the parent EF loaded: 
 deleting one of its rows evicts every `Children` list of that foreign key, under every parent.
 Editing one order evicts every customer's cached order list. The same goes for unique columns:
 the slug a row had when it was loaded may not be the one it has, so updating or deleting a row
-evicts every `read.Entity` by that column, whatever the value. Inserts stay exact, and Sluice
+evicts every `read.EntityAsync` by that column, whatever the value. Inserts stay exact, and Sluice
 logs once per type and cache (event 3, at Information) when this happens.
 
 A row version is a concurrency token the database changes on every write. With one, EF fails the
@@ -528,7 +528,7 @@ An object you built of a type without a row version is updated or deleted like a
 one: every `Children` reader of each foreign key. So the only miss is an object you built, with
 a row version that matches the database's, whose foreign key differs from what the database
 holds: the list under its real old parent isn't evicted. Unique columns follow the same rules,
-with `read.Entity` readers by that column in place of `Children` lists: the miss is a built
+with `read.EntityAsync` readers by that column in place of `Children` lists: the miss is a built
 object whose unique column differs from the stored value, whose readers by the stored value
 aren't evicted. Load a row before changing it, or invalidate `set.AllDependencies()` after the
 save.

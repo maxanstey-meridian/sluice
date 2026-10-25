@@ -346,7 +346,6 @@ internal sealed class CapturedSave
         }
     }
 
-    // The modified properties, and those of the complex properties, at any depth, each stored in a column of the row.
     // The properties modified, or all of them, complex properties' included.
     private static IEnumerable<IProperty> Written(
         IEnumerable<PropertyEntry> properties,

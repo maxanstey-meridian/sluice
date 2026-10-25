@@ -28,7 +28,7 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
 - **New: `SluiceFlow.Begin()`.** `using var _ = SluiceFlow.Begin();` once per entry point (HTTP
   middleware, the message pipeline) lets Sluice see the EF transactions the flow opens, however
   deep. A nested call does nothing. Without it, EF transactions aren't checked, and the first
-  one Sluice sees logs a `Warning` (event 7), once per cache; with it, a flow with a
+  write Sluice sees in one logs a `Warning` (event 7), once per cache; with it, a flow with a
   transaction open but nothing pending makes one check per cached read.
 - **New: `.ForKey(id)` and `.ForKeys(ids)` for `ExecuteUpdate` and `ExecuteDelete`.**
   `db.Set<FormEntity>().Where(…).ForKey(id).ExecuteUpdateAsync(…)` adds the key condition to the
@@ -47,12 +47,12 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
 - **Breaking: a read by a unique column is `await read.EntityAsync(set, column, value, ct)`, and
   records the row it found.** It replaces `read.Entity(set, column, value)`. Before it returns the
   query, it runs one more query, an indexed lookup of the keys of the rows holding the value,
-  ignoring query filters, and records each by its key (the whole type past 100 rows). It looks up
-  first because a lookup after your query missed a row deleted by key in between (a keyed delete
-  reports the row's key, not its value), so the value kept a row that was gone until it expired.
-  Inside a fused fetch it now looks up too, on the fetch's context, instead of depending on every
-  row of the type. That's one more round trip per cache miss; hits are unchanged. If the lookup
-  fails, `EntityAsync` throws, the compute fails and nothing is cached. Naming the primary key runs
+  ignoring query filters, and records each by its key (the whole type past 100 rows), so a keyed
+  write or `set.Dependency(key)` evicts it. It looks up before your query, so a row deleted by key
+  in between is still recorded (a keyed delete reports the row's key, not its value), and inside a
+  fused fetch too, on the fetch's context. That's one more round trip per cache miss; hits are
+  unchanged. If the lookup fails, `EntityAsync` throws, and unless the compute catches it, nothing
+  is cached. Naming the primary key runs
   no lookup. SQL snapshot or query-count tests will see the extra query, before the compute's own.
 - **Changed: `set.Dependency(key)` evicts readers by a unique column that found that row,** and
   so does a keyed bulk write. A cached "not found" by a unique column still needs

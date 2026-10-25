@@ -39,6 +39,11 @@ internal sealed partial class SluiceInterceptor
     // has been initialised. Weak, so a context that's dropped mid-save leaves nothing behind.
     private readonly ConditionalWeakTable<DbContext, SaveInProgress> _saves = new();
 
+    // The EF id of the transaction EF last began for a save of the context's own. It commits before the save returns,
+    // so only a read from inside the save could see its writes pending, and a write in it on a flow without a box
+    // isn't logged (event 7). By id, since EF begins a new one for each such save.
+    private readonly ConditionalWeakTable<DbContext, StrongBox<Guid>> _saveTransaction = new();
+
     // What a bulk write (ExecuteUpdate, ExecuteDelete) took when EF initialised its command, held against the command
     // until it ends: the keys a keyed one (ForKey, ForKeys) pinned, and the ambient transaction it ran in. Weak, so a
     // command EF drops leaves nothing behind.
@@ -62,7 +67,7 @@ internal sealed partial class SluiceInterceptor
 
     // Each connection a write in an EF transaction ran on, whose closing this watches (StateChange): the app closes a
     // connection it owns without an EF event, and closing ends the transaction on it. Weak, as the others are.
-    private readonly ConditionalWeakTable<DbConnection, object> _watched = new();
+    private readonly ConditionalWeakTable<DbConnection, object> _closeHooked = new();
 
     // How the core reads an ambient transaction's pending writes, made once so registering it again is the same value.
     private readonly Func<Transaction, IReadOnlyCollection<Dependency>> _ambientWrites;
@@ -70,10 +75,11 @@ internal sealed partial class SluiceInterceptor
     // What every read on the cache runs first, made once like _ambientWrites.
     private readonly Func<ValueTask> _beforeRead;
 
-    // The EF transaction id each DbTransaction object was last joined as (UseTransaction): a transaction the app
-    // begun and ends itself, on the DbTransaction, which raises no EF event, and which EF doesn't dispose with the
-    // context. By id, since a provider hands the object out again for another transaction (Npgsql does).
-    private readonly ConditionalWeakTable<DbTransaction, StrongBox<Guid>> _joinedAs = new();
+    // Each DbTransaction object a context has joined (UseTransaction) since EF last began it: a transaction the app
+    // began and ends itself, on the DbTransaction, which raises no EF event, and which EF doesn't dispose with the
+    // context. Every context joining it gets its own EF id, so it's the object that's marked. EF beginning it clears
+    // the mark, since a provider hands the object out again for another transaction (Npgsql does).
+    private readonly ConditionalWeakTable<DbTransaction, object> _joined = new();
 
     // Each entity type that has logged invalidating its foreign keys and unique columns whole, so each logs once per
     // cache.
@@ -439,10 +445,16 @@ internal sealed partial class SluiceInterceptor
     // EF checks that the transaction is on the context's connection only after its started and used events, and
     // refuses one that isn't: one a TransactionStarting interceptor took from another connection, or the app passed to
     // UseTransaction, which is live there, and leaves the context's own as it was. So none of it publishes.
-    private List<Dependency> Starting(DbConnection connection, DbTransaction transaction) =>
-        ContextTransaction.On(transaction, connection)
-            ? [.. _efPending.TakeOn(connection), .. _efPending.TakeAll(transaction)]
-            : [];
+    private List<Dependency> Starting(DbConnection connection, DbTransaction transaction)
+    {
+        if (!ContextTransaction.On(transaction, connection))
+        {
+            return [];
+        }
+
+        _joined.Remove(transaction);
+        return [.. _efPending.TakeOn(connection), .. _efPending.TakeAll(transaction)];
+    }
 
     // A context joining a transaction (UseTransaction) on the connection that has it shares what it has pending, so it
     // keeps it, and publishes what any other on the connection has pending, as starting one does. What the
@@ -456,7 +468,7 @@ internal sealed partial class SluiceInterceptor
     )
     {
         Publish(() => Joining(connection, result));
-        Joined(result, eventData);
+        Joined(result);
         AddProbe(eventData);
         return result;
     }
@@ -469,7 +481,7 @@ internal sealed partial class SluiceInterceptor
     )
     {
         await PublishAsync(() => Joining(connection, result)).ConfigureAwait(false);
-        Joined(result, eventData);
+        Joined(result);
         AddProbe(eventData);
         return result;
     }
@@ -483,8 +495,7 @@ internal sealed partial class SluiceInterceptor
             ]
             : [];
 
-    private void Joined(DbTransaction transaction, TransactionEventData eventData) =>
-        _joinedAs.AddOrUpdate(transaction, new(eventData.TransactionId));
+    private void Joined(DbTransaction transaction) => _joined.AddOrUpdate(transaction, transaction);
 
     // Every second while a joined transaction is watched: one the app ends on the DbTransaction, on a connection it
     // keeps open, raises nothing Sluice sees, and the next read may be on another server, which would serve the old
@@ -973,27 +984,27 @@ internal sealed partial class SluiceInterceptor
         var connection = ContextTransaction.Connection(context);
         var db = connection.DbConnection;
         _wroteOn.AddOrUpdate(connection, db);
-        if (_watched.TryAdd(db, db))
+        if (_closeHooked.TryAdd(db, db))
         {
             db.StateChange += Closed;
         }
 
         var pending = _efPending.For(transaction.Ef!, db, out var ended);
         pending.Add(dependencies, undone);
-        if (
-            _joinedAs.TryGetValue(transaction.Ef!, out var joined)
-            && joined.Value == transaction.EfId
-        )
+        if (_joined.TryGetValue(transaction.Ef!, out _))
         {
             _efPending.Watch(transaction.Ef!, pending);
         }
 
-        AddProbe(connection, transaction.EfId!.Value);
+        var id = transaction.EfId!.Value;
+        AddProbe(
+            connection,
+            id,
+            quiet: _saveTransaction.TryGetValue(context, out var own) && own.Value == id
+        );
         return ended;
     }
 
-    // One EF begins for a save of its own commits before the save returns, so only a read from inside the save could
-    // see its writes pending, and a flow without a box isn't logged for it.
     // A connection that closes, or breaks, holds no transaction, so what its ended one holds publishes, however it
     // closed: EF raises an event only when it closes the connection itself. Synchronously, as Close and Dispose raise
     // it.
@@ -1005,15 +1016,18 @@ internal sealed partial class SluiceInterceptor
         }
     }
 
+    // Nothing is logged yet on a flow without a box: a transaction that writes nothing (a migration's, or a read-only
+    // one) leaves a cached read nothing to miss, so the first write in it is logged (Defer).
     private void AddProbe(TransactionEventData eventData)
     {
         if (eventData.Context is { } context)
         {
-            AddProbe(
-                ContextTransaction.Connection(context),
-                eventData.TransactionId,
-                quiet: _saves.TryGetValue(context, out _)
-            );
+            if (_saves.TryGetValue(context, out _))
+            {
+                _saveTransaction.AddOrUpdate(context, new(eventData.TransactionId));
+            }
+
+            AddProbe(ContextTransaction.Connection(context), eventData.TransactionId, quiet: true);
         }
     }
 
@@ -1258,14 +1272,14 @@ internal sealed partial class SluiceInterceptor
     [LoggerMessage(
         EventId = 3,
         Level = LogLevel.Information,
-        Message = "Sluice evicts every read.Children list under {EntityType}'s foreign keys and every read.Entity of it by a unique column, whichever of those it has, whatever the parent or value, each time it saves a change to one other than an insert, because {EntityType} has no concurrency token the database changes on every write: the parent or value a row had when it was loaded may not be the one it leaves. To evict only the lists and values it leaves, map one (on PostgreSQL, xmin as a row version; on SQL Server, a rowversion column), or make each such foreign key and unique column a concurrency token."
+        Message = "Sluice evicts every read.Children list under {EntityType}'s foreign keys and every read.EntityAsync of it by a unique column, whichever of those it has, whatever the parent or value, each time it saves a change to one other than an insert, because {EntityType} has no concurrency token the database changes on every write: the parent or value a row had when it was loaded may not be the one it leaves. To evict only the lists and values it leaves, map one (on PostgreSQL, xmin as a row version; on SQL Server, a rowversion column), or make each such foreign key and unique column a concurrency token."
     )]
     private partial void LogUnversioned(string entityType);
 
     [LoggerMessage(
         EventId = 4,
         Level = LogLevel.Information,
-        Message = "Sluice evicts every read.Children list under {EntityType}'s foreign keys and every read.Entity of it by a unique column, whichever of those it has, whatever the parent or value, each time it saves a change to one other than an insert, because {EntityType} is stored across several tables (table-per-type or entity splitting), so no concurrency token covers every column EF writes: the parent or value a row had when it was loaded may not be the one it leaves."
+        Message = "Sluice evicts every read.Children list under {EntityType}'s foreign keys and every read.EntityAsync of it by a unique column, whichever of those it has, whatever the parent or value, each time it saves a change to one other than an insert, because {EntityType} is stored across several tables (table-per-type or entity splitting), so no concurrency token covers every column EF writes: the parent or value a row had when it was loaded may not be the one it leaves."
     )]
     private partial void LogSplitAcrossTables(string entityType);
 
@@ -1288,7 +1302,7 @@ internal sealed partial class SluiceInterceptor
     [LoggerMessage(
         EventId = 7,
         Level = LogLevel.Warning,
-        Message = "Sluice saw an EF transaction, or a connection enlisted in a TransactionScope, begin or write on a flow without SluiceFlow.Begin(), so a cached read on that flow can't see what the transaction has written and not committed: it returns the committed value instead of throwing. Call SluiceFlow.Begin() where each request, message or job starts (see Strict reads in the docs). Logged once."
+        Message = "Sluice saw a write in an EF transaction, or in a System.Transactions transaction that isn't Transaction.Current (Database.EnlistTransaction, or a TransactionScope that doesn't flow into async code), on a flow without SluiceFlow.Begin(), so a cached read on that flow can't see what the transaction has written and not committed: it returns the committed value instead of throwing. Call SluiceFlow.Begin() where each request, message or job starts (see Strict reads in the docs). Logged once."
     )]
     private partial void LogNoFlow();
 
@@ -1321,7 +1335,8 @@ internal sealed partial class SluiceInterceptor
     // object out again on another (Npgsql does, through its pool), so the object's next writes there take the old record
     // and start one of their own, and a connection's set holds exactly the objects whose records were made on it. One
     // lock for both tables, so a record can't be taken through one while it's added to through the other. Weak by
-    // connection, so a connection dropped without any of those leaves nothing behind.
+    // connection, so a connection dropped without any of those leaves nothing behind. A joined transaction's record is
+    // also watched, and checked before every read and every second, since the app ends one without an EF event.
     private sealed class EfPending
     {
         private readonly Lock _lock = new();
@@ -1385,13 +1400,15 @@ internal sealed partial class SluiceInterceptor
         {
             if (ExecutionContext.IsFlowSuppressed())
             {
-                return _time.CreateTimer(_ => _sweep(), null, SweepInterval, SweepInterval);
+                return Create();
             }
 
             using (ExecutionContext.SuppressFlow())
             {
-                return _time.CreateTimer(_ => _sweep(), null, SweepInterval, SweepInterval);
+                return Create();
             }
+
+            ITimer Create() => _time.CreateTimer(_ => _sweep(), null, SweepInterval, SweepInterval);
         }
 
         // Under the lock.

@@ -66,7 +66,7 @@ internal static class ModelSources
 
     /// <summary>
     /// The source of the rows of <paramref name="property"/>'s type by that property's value, which
-    /// <c>read.Entity</c> by a unique column reads, named <c>{source}({column})</c>. Only for a
+    /// <c>read.EntityAsync</c> by a unique column reads, named <c>{source}({column})</c>. Only for a
     /// <see cref="UniqueColumns"/> property: a save publishes for no other.
     /// </summary>
     internal static Source<object> Unique(IProperty property) =>
@@ -122,7 +122,7 @@ internal static class ModelSources
     /// <summary>
     /// The properties of <paramref name="entityType"/> and its base types that a single-column unique index (filtered
     /// or not) or alternate key covers, other than a single-column primary key and any whose value converter stores
-    /// null as a value, whose rows <c>read.Entity</c> by a unique column can read. The model's unique columns bound
+    /// null as a value, whose rows <c>read.EntityAsync</c> by a unique column can read. The model's unique columns bound
     /// what a save publishes; uniqueness itself isn't needed for correctness. Built once per type.
     /// </summary>
     internal static IProperty[] UniqueColumns(IEntityType entityType) =>
@@ -509,7 +509,7 @@ internal static class ModelSources
     /// have, whole, since the rows may have moved between parents nobody knows; and every unique column a row may have
     /// whose column <paramref name="sql"/> names, as the provider delimits it, whole, since a reader by a value no row
     /// held recorded no key. A reader by a unique column that found one of the rows recorded its key
-    /// (<c>read.Entity</c>). A statement that names the primary key's column more than once, beyond the key condition
+    /// (<c>read.EntityAsync</c>). A statement that names the primary key's column more than once, beyond the key condition
     /// Sluice added, may set it, moving a row to a key whose readers found nothing, so it publishes
     /// <see cref="UpdateDependencies"/> instead. Unchecked, like <see cref="Entity"/>.
     /// </summary>
@@ -885,12 +885,7 @@ internal static class ModelSources
             RoundTripsAnnotation,
             static model =>
             {
-                var refused = model!
-                    .GetEntityTypes()
-                    .SelectMany(entityType => entityType.GetDeclaredProperties())
-                    .Where(property =>
-                        property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
-                    )
+                var refused = Keying(model!)
                     .Select(property => (Property: property, property.GetTypeMapping().Converter))
                     .Where(mapped => mapped.Converter is { } converter && !RoundTrips(converter))
                     .Select(mapped =>
@@ -900,7 +895,7 @@ internal static class ModelSources
                     .ToList();
                 if (refused.Count == 0)
                 {
-                    EnsurePrecise(model);
+                    EnsurePrecise(model!);
                     return true;
                 }
 
@@ -925,12 +920,7 @@ internal static class ModelSources
     // a new row, or a reader asks by, so the two give the row different key text and an eviction is missed.
     private static void EnsurePrecise(IModel model)
     {
-        var refused = model
-            .GetEntityTypes()
-            .SelectMany(entityType => entityType.GetDeclaredProperties())
-            .Where(property =>
-                property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
-            )
+        var refused = Keying(model)
             .Select(property => (Property: property, Mapping: property.FindRelationalTypeMapping()))
             .Where(mapped => mapped.Mapping is { } mapping && Imprecise(mapped.Property, mapping))
             .Select(mapped =>
@@ -943,27 +933,42 @@ internal static class ModelSources
                 $"Sluice can't key {string.Join(", ", refused)}: a key, foreign key or unique column whose date is "
                     + "stored less precisely than to the microsecond. The database rounds what a save writes, so a new "
                     + "row's key, and a key a read asks by, isn't the value the row holds, and an eviction is missed. "
-                    + "Store it to the microsecond or better (on SQL Server datetime2, on PostgreSQL timestamp without "
-                    + "a precision under 6), or key the type by another column."
+                    + "Store it to the microsecond or better (on SQL Server datetime2, on MySQL datetime(6), on "
+                    + "PostgreSQL timestamp with a precision of 6 or none set), map a date-only value as DateOnly, or "
+                    + "key the type by another column. [SluiceRoundTrips] doesn't lift this."
             );
         }
     }
 
-    private static readonly HashSet<string> _impreciseDates = new(StringComparer.OrdinalIgnoreCase)
+    // The properties whose values a save publishes and a read asks by: keys, foreign keys and unique columns.
+    private static IEnumerable<IProperty> Keying(IModel model) =>
+        model
+            .GetEntityTypes()
+            .SelectMany(entityType => entityType.GetDeclaredProperties())
+            .Where(property =>
+                property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
+            );
+
+    // Store types that round a date unless given a precision: SQL Server's, which take none, and MySQL's datetime(6)
+    // is precise.
+    private static readonly HashSet<string> _impreciseUnsized = new(
+        StringComparer.OrdinalIgnoreCase
+    )
     {
         "datetime",
         "smalldatetime",
-        "date",
     };
 
     private static bool Imprecise(IProperty property, RelationalTypeMapping mapping)
     {
         var provider = mapping.Converter?.ProviderClrType ?? mapping.ClrType;
         var stored = Nullable.GetUnderlyingType(provider) ?? provider;
+        var precision = property.GetPrecision() ?? mapping.Precision;
         return (stored == typeof(DateTime) || stored == typeof(DateTimeOffset))
             && (
-                _impreciseDates.Contains(mapping.StoreTypeNameBase)
-                || (property.GetPrecision() ?? mapping.Precision) is < 6
+                string.Equals(mapping.StoreTypeNameBase, "date", StringComparison.OrdinalIgnoreCase)
+                || precision is < 6
+                || (precision is null && _impreciseUnsized.Contains(mapping.StoreTypeNameBase))
             );
     }
 

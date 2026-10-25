@@ -197,6 +197,29 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         dependencies.Should().NotThrow();
     }
 
+    public static TheoryData<string, Func<DbContextOptions, DbContext>> PreciseDates =>
+        new()
+        {
+            { "the provider's default precision", options => new DefaultDateDb(options) },
+            { "a precision of 6", options => new MicrosecondDateDb(options) },
+        };
+
+    [Theory]
+    [MemberData(nameof(PreciseDates))]
+    public void A_unique_date_stored_to_the_microsecond_is_trusted(
+        string precision,
+        Func<DbContextOptions, DbContext> create
+    )
+    {
+        using var db = create(
+            new DbContextOptionsBuilder().UseNpgsql(postgres.ConnectionString).Options
+        );
+
+        var dependencies = () => db.Set<Gadget>().AllDependencies();
+
+        dependencies.Should().NotThrow(precision);
+    }
+
     public readonly record struct GadgetNo(int Value);
 
     public enum Colour
@@ -278,9 +301,9 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     }
 
     // The database rounds what a save writes to the column's precision (SQL Server's datetime and smalldatetime, which
-    // the model check refuses by name the same way as a date column, too). One type each, since EF caches a model per
-    // context type.
-    private abstract class ImpreciseDateDb(DbContextOptions options) : DbContext(options)
+    // the model check refuses by name when no precision is given, too, and a date column whatever its precision). One
+    // type each, since EF caches a model per context type.
+    private abstract class DatedDb(DbContextOptions options) : DbContext(options)
     {
         protected abstract void Made(PropertyBuilder<DateTime> made);
 
@@ -296,14 +319,24 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             );
     }
 
-    private sealed class MillisecondDateDb(DbContextOptions options) : ImpreciseDateDb(options)
+    private sealed class MillisecondDateDb(DbContextOptions options) : DatedDb(options)
     {
         protected override void Made(PropertyBuilder<DateTime> made) => made.HasPrecision(3);
     }
 
-    private sealed class DateColumnDb(DbContextOptions options) : ImpreciseDateDb(options)
+    private sealed class DateColumnDb(DbContextOptions options) : DatedDb(options)
     {
         protected override void Made(PropertyBuilder<DateTime> made) => made.HasColumnType("date");
+    }
+
+    private sealed class MicrosecondDateDb(DbContextOptions options) : DatedDb(options)
+    {
+        protected override void Made(PropertyBuilder<DateTime> made) => made.HasPrecision(6);
+    }
+
+    private sealed class DefaultDateDb(DbContextOptions options) : DatedDb(options)
+    {
+        protected override void Made(PropertyBuilder<DateTime> made) { }
     }
 
     // A typed id marked by its author; an enum stored as its number; a long key stored in an int column, which holds

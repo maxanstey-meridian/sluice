@@ -1678,24 +1678,55 @@ public sealed class WriteDerivationTests : IAsyncLifetime
             .BeTrue("the door took the keycard, which the locker writes through an owned type");
     }
 
-    // Only the owned type changed: EF writes the locker's row for it, though nothing of the locker's own changed.
-    [Fact]
-    public async Task A_unique_column_in_a_shared_column_evicts_every_reader_of_it_when_the_other_type_s_owned_type_saves()
+    public enum OwnedChange
+    {
+        Added,
+        Modified,
+        Removed,
+    }
+
+    // Only the owned type changed: EF writes the locker's row for it, though nothing of the locker's own changed. An
+    // added or removed owned row writes every column it has; a modified one, those it changes.
+    [Theory]
+    [InlineData(OwnedChange.Added)]
+    [InlineData(OwnedChange.Modified)]
+    [InlineData(OwnedChange.Removed)]
+    public async Task A_unique_column_in_a_shared_column_evicts_every_reader_of_it_when_the_other_type_s_owned_type_saves(
+        OwnedChange change
+    )
     {
         var ada = await AddCustomer("Ada");
         var locker = await AddLocker(ada);
-        _db.ChangeTracker.Clear();
         var keycard = $"card-{Guid.NewGuid():N}";
+        if (change is not OwnedChange.Added)
+        {
+            locker.Card = new() { Number = keycard };
+            await _db.SaveChangesAsync();
+        }
+
+        _db.ChangeTracker.Clear();
         var byKeycard = await DoorByKeycard(keycard);
         var loaded = await _db.Lockers.SingleAsync(l => l.Id == locker.Id);
 
-        loaded.Card = new() { Number = keycard };
+        switch (change)
+        {
+            case OwnedChange.Added:
+                loaded.Card = new() { Number = keycard };
+                break;
+            case OwnedChange.Modified:
+                loaded.Card!.Number = $"card-{Guid.NewGuid():N}";
+                break;
+            case OwnedChange.Removed:
+                loaded.Card = null;
+                break;
+        }
+
         await _db.SaveChangesAsync();
 
         (await _reader.LockerDoors.SingleAsync(d => d.Id == locker.Id))
             .Keycard.Should()
-            .Be(keycard);
-        (await byKeycard.WasEvicted()).Should().BeTrue("the door took the keycard");
+            .Be(change is OwnedChange.Added ? keycard : loaded.Card?.Number);
+        (await byKeycard.WasEvicted()).Should().BeTrue("the door took or gave up the keycard");
     }
 
     private Task<CachedRead> DoorByKeycard(string keycard) =>

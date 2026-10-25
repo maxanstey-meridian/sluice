@@ -126,9 +126,10 @@ Three more, under the same category, mean something to fix:
   couldn't tell what it wrote and invalidated every cached read of every entity type in the
   context's model. Sluice reads what a save writes at its first command, so a provider or
   interceptor that writes without one isn't supported.
-- event id 7, at `Warning`, once per cache: an EF transaction, or a connection enlisted in a
-  `TransactionScope`, began or wrote on a flow without `SluiceFlow.Begin()`, so a cached read
-  there can't see its uncommitted writes. See
+- event id 7, at `Warning`, once per cache: something was written in an EF transaction, or in a
+  `System.Transactions` transaction the flow can't see (`Database.EnlistTransaction`, or a
+  `TransactionScope` that doesn't flow into async code), on a flow without `SluiceFlow.Begin()`,
+  so a cached read there can't see its uncommitted writes. See
   [Strict reads](/guides/strict-reads#what-the-check-misses).
 
 FusionCache logs several lines at `Information` for every cache call. To keep them out of your

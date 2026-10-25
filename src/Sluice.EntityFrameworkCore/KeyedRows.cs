@@ -14,7 +14,7 @@ namespace Sluice;
 /// every read of the type. It only executes, so it can't end up inside another query.
 /// </summary>
 /// <remarks>
-/// Either also evicts every <c>read.Children</c> list of the type's foreign keys; an update, every <c>read.Entity</c>
+/// Either also evicts every <c>read.Children</c> list of the type's foreign keys; an update, every <c>read.EntityAsync</c>
 /// reader by a unique column whose name appears in the statement; a delete, the lists under each deleted row and what
 /// the database cascades into. Other types the statement names are evicted whole, and so is this one past 100 keys, or
 /// when an update's statement names the key's column again (setting the key, or a join on another table's column of that

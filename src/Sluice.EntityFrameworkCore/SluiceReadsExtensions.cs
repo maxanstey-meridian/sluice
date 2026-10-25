@@ -11,13 +11,13 @@ namespace Sluice;
 /// <remarks>
 /// Every EF query on <see cref="Db{TContext}(SluiceReads)"/>'s context records each entity type it reads, so any
 /// write to one of them evicts the value. <see cref="Entity{T}(SluiceReads, DbSet{T}, object)"/>,
-/// <see cref="EntityAsync"/> and <see cref="Children"/> narrow that for their own rows: only a write to that row, or to the rows under
-/// that parent, evicts it. Inside a compute, EF commands on any
-/// other context throw, unless they run in the fetch of <c>read.From(dependency, fetch)</c>, and so do writes, reads
-/// inside a transaction, and reads Sluice can't track: raw SQL, database functions, views and keyless types, query
-/// filters that read shared state (a static property, the clock) or, unless the compute configured its context with
-/// <c>read.Db(configure)</c>, the context's own (a settable field or auto-property, or a property marked
-/// <see cref="SluiceContextStateAttribute"/>), and results holding entities that load lazily or hold their context.
+/// <see cref="EntityAsync"/> and <see cref="Children"/> narrow that for their own rows: only a write to that row, or to
+/// the rows under that parent, evicts it. Inside a compute, EF commands on any other context throw, unless they run in
+/// the fetch of <c>read.From(dependency, fetch)</c>, and so do writes, reads inside a transaction, and reads Sluice
+/// can't track: raw SQL, database functions, views and keyless types, query filters that read shared state (a static
+/// property, the clock) or, unless the compute configured its context with <c>read.Db(configure)</c>, the context's own
+/// (a settable field or auto-property, or a property marked <see cref="SluiceContextStateAttribute"/>), and results
+/// holding entities that load lazily or hold their context.
 /// A violation inside a compute also makes the call that ran it throw and cache nothing, even if the compute catches
 /// it. The rules in full:
 /// <see href="https://maxanstey-meridian.github.io/sluice/guides/ef-core">EF Core</see>.

@@ -621,6 +621,83 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         clock.LiveRecurringTimers.Should().Be(0, "nothing is watched any more");
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
         (await adaRead.WasEvicted()).Should().BeTrue();
+
+        published.Clear();
+        await using var next = await connection.BeginTransactionAsync();
+        await db.Database.UseTransactionAsync(next);
+        await db.Rename(ada, "Ada King");
+        clock
+            .LiveRecurringTimers.Should()
+            .Be(1, "the next joined transaction starts the sweep again");
+        await next.CommitAsync();
+        clock.Advance(TimeSpan.FromSeconds(1));
+        published.Should().NotBeEmpty();
+        clock.LiveRecurringTimers.Should().Be(0);
+    }
+
+    // Every context joining a transaction gets an EF id of its own, so a write is watched whichever of them made it.
+    [Fact]
+    public async Task A_write_by_the_first_of_two_contexts_joining_a_transaction_committed_outside_EF_is_evicted_within_a_second()
+    {
+        var clock = new CountingClock();
+        await using var node = Watched(
+            out var published,
+            services => services.AddSingleton<TimeProvider>(clock)
+        );
+        await using var reader = postgres.CreateDb();
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        await using var connection = new NpgsqlConnection(postgres.ConnectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var first = postgres.CreateDb(node, connection: connection);
+        await using var second = postgres.CreateDb(node, connection: connection);
+        await first.Database.UseTransactionAsync(transaction);
+        await second.Database.UseTransactionAsync(transaction);
+        await first.Rename(ada, "Ada Lovelace");
+
+        await transaction.CommitAsync();
+        clock.Advance(TimeSpan.FromSeconds(1));
+        published.Should().NotBeEmpty();
+        (await adaRead.WasEvicted()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task The_sweep_of_joined_transactions_holds_none_of_the_writer_s_async_state()
+    {
+        var clock = new CountingClock();
+        await using var node = Watched(
+            out _,
+            services => services.AddSingleton<TimeProvider>(clock)
+        );
+        var writerState = new AsyncLocal<string>();
+        var seen = new List<string?>();
+        node.Fusion.Events.RemoveByTag += (_, _) =>
+        {
+            lock (seen)
+            {
+                seen.Add(writerState.Value);
+            }
+        };
+        await using var reader = postgres.CreateDb();
+        var (ada, _) = await reader.AddCustomers();
+        await using var connection = new NpgsqlConnection(postgres.ConnectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var db = postgres.CreateDb(node, connection: connection);
+        await db.Database.UseTransactionAsync(transaction);
+        await WriteAsync();
+
+        await transaction.CommitAsync();
+        clock.Advance(TimeSpan.FromSeconds(1));
+        seen.Should().NotBeEmpty().And.AllSatisfy(state => state.Should().BeNull());
+
+        // Its own flow, so the value doesn't flow back to the one advancing the clock.
+        async Task WriteAsync()
+        {
+            writerState.Value = "the writer's";
+            await db.Rename(ada, "Ada Lovelace");
+        }
     }
 
     [Fact]

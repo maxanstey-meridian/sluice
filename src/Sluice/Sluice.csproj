@@ -23,7 +23,7 @@
         />
     </ItemGroup>
 
-    <!-- The hooks under Sluice.Infrastructure, which the EF package and the tests use. -->
+    <!-- Sluice's own EF package and the tests use its internals. -->
     <ItemGroup>
         <InternalsVisibleTo Include="Sluice.EntityFrameworkCore" />
         <InternalsVisibleTo Include="Sluice.Tests" />
