@@ -10,7 +10,8 @@ namespace Sluice.EntityFrameworkCore;
 /// (<c>IsSqlite()</c>, <c>IsNpgsql()</c>) compare, so the model check can tell whose column a mapping EF shares between
 /// providers maps (SQLite's <see cref="TimeSpan"/> is EF's own <c>TimeSpanTypeMapping</c>).
 /// </summary>
-internal sealed class ProviderNameConvention(IDatabaseProvider provider) : IConventionSetPlugin
+internal sealed class ProviderNameConventionSetPlugin(IDatabaseProvider provider)
+    : IConventionSetPlugin
 {
     internal const string Annotation = "Sluice:Provider";
 

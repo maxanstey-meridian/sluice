@@ -922,7 +922,8 @@ internal static class ModelSources
     // reader asks by, so the two give the row different key text and an eviction is missed.
     private static void EnsurePrecise(IModel model)
     {
-        var provider = model.FindAnnotation(ProviderNameConvention.Annotation)?.Value as string;
+        var provider =
+            model.FindAnnotation(ProviderNameConventionSetPlugin.Annotation)?.Value as string;
         var refused = Keying(model)
             .Select(property => (Property: property, Mapping: property.FindRelationalTypeMapping()))
             .Where(mapped => mapped.Mapping is { } mapping && Imprecise(mapping, provider))
@@ -1003,10 +1004,10 @@ internal static class ModelSources
             : null;
     }
 
-    // Judged by the store type and the provider, by the name EF's own provider checks (IsSqlServer, IsNpgsql)
-    // compare. A date column and a time-of-day one drop part of the value, and
-    // smalldatetime rounds to the minute; SQL Server's datetime rounds to about 3 ms whatever size the model gives it,
-    // though EF writes that size into the store type ("datetime(6)"). Otherwise as BelowMicroseconds.
+    // Judged by the store type and the provider, by the name EF's own provider checks (IsSqlServer, IsNpgsql) compare.
+    // A date column and a time-of-day one drop part of the value, and smalldatetime rounds to the minute; SQL Server's
+    // datetime rounds to about 3 ms whatever size the model gives it, though EF writes that size into the store type
+    // ("datetime(6)"). Otherwise as BelowMicroseconds.
     internal static bool ImpreciseDate(string provider, string storeTypeNameBase, int? size) =>
         _impreciseDates.Contains(storeTypeNameBase)
         || (

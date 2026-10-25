@@ -205,9 +205,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
 
-        db.Model.FindAnnotation(ProviderNameConvention.Annotation)
-            ?.Value.Should()
-            .Be(db.Database.ProviderName);
+        db.Model[ProviderNameConventionSetPlugin.Annotation].Should().Be(db.Database.ProviderName);
     }
 
     // Each provider's own mapping of the column, built without a server: PostgreSQL's timestamp, interval and time keep
@@ -219,6 +217,11 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             { "PostgreSQL's default", () => new DefaultDateDb(Npgsql()), null },
             { "PostgreSQL with a precision of 6", () => new MicrosecondDateDb(Npgsql()), null },
             { "PostgreSQL's timestamp without a size", () => new TimestampDateDb(Npgsql()), null },
+            {
+                "PostgreSQL's timestamp without a size, on a model naming another provider",
+                () => new ElsewhereTimestampDateDb(Npgsql()),
+                "Gadget.Made (timestamp)"
+            },
             { "MySQL's default", () => new DefaultDateDb(MySql()), null },
             { "MySQL with a precision of 6", () => new MicrosecondDateDb(MySql()), null },
             { "MySQL's datetime(6) by column type", () => new SizedDatetimeDateDb(MySql()), null },
@@ -544,6 +547,20 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     {
         protected override void Made(PropertyBuilder<DateTime> made) =>
             made.HasColumnType("timestamp");
+    }
+
+    // PostgreSQL's unsized timestamp, on a model that names a provider Sluice doesn't know: the provider named on the
+    // model, not the mapping's, decides, as UseSluice names the context's.
+    private sealed class ElsewhereTimestampDateDb(DbContextOptions options) : DatedDb(options)
+    {
+        protected override void Made(PropertyBuilder<DateTime> made) =>
+            made.HasColumnType("timestamp");
+
+        protected override void OnModelCreating(ModelBuilder model)
+        {
+            base.OnModelCreating(model);
+            model.HasAnnotation(ProviderNameConventionSetPlugin.Annotation, "Another.Provider");
+        }
     }
 
     // EF's own parser, which MySQL's provider uses, reads the 6 as a size, not a precision.
