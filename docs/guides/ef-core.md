@@ -179,7 +179,8 @@ Three helpers on `read` start a query that depends on fewer rows:
 ```csharp
 var customer = await read.Entity(computeDb.Customers, customerId).SingleOrDefaultAsync(ct);
 
-var form = await read.Entity(computeDb.Forms, form => form.Slug, slug).SingleOrDefaultAsync(ct);
+var forms = await read.EntityAsync(computeDb.Forms, form => form.Slug, slug, ct);
+var form = await forms.SingleOrDefaultAsync(ct);
 
 var orders = await read.Children(computeDb.Orders, order => order.CustomerId, customerId)
     .OrderByDescending(order => order.PlacedAt)
@@ -191,11 +192,12 @@ var orders = await read.Children(computeDb.Orders, order => order.CustomerId, cu
 |---|---|---|
 | `computeDb.Customers.Where(…)` | the rows its `Where` matches | any customer |
 | `read.Entity(computeDb.Customers, key)` | the row with that primary key | that row |
-| `read.Entity(computeDb.Forms, f => f.Slug, value)` | the row whose unique column holds `value` | that row, or a row taking or leaving `value` |
+| `await read.EntityAsync(computeDb.Forms, f => f.Slug, value, ct)` | the row whose unique column holds `value` | that row, or a row taking or leaving `value` |
 | `read.Children(computeDb.Orders, fk, key)` | the rows whose foreign key is `key` | any of those rows, or a row joining or leaving the set |
 
 Each returns an `IQueryable<T>` you can filter, order, page and project, on the context
-`read.Db` gave you. Only the helper's own type is narrowed: the `Coupon` navigation in the second
+`read.Db` gave you; `EntityAsync` returns it once it has looked up the rows holding the value
+([By a unique column](#by-a-unique-column)). Only the helper's own type is narrowed: the `Coupon` navigation in the second
 query still depends on every coupon. A read that finds nothing still depends on what it looked
 for, so inserting the row later evicts the cached "not found". The helpers don't track unless
 you call `AsTracking()`.
@@ -216,7 +218,7 @@ var ticket = await read.Entity(computeDb.Tickets, id)
 
 ### By a unique column
 
-`read.Entity(set, column, value)` reads one row by a column that isn't its key, such as a slug
+`await read.EntityAsync(set, column, value, ct)` reads one row by a column that isn't its key, such as a slug
 or an email, without depending on every row of the type. A save of another row doesn't evict it;
 a save that gives a row that value, changes the row holding it, or moves the value off it, does.
 So a cached "not found" for a slug is evicted once a row gets that slug.
@@ -226,7 +228,7 @@ The column must be covered by a single-column unique index or alternate key in t
 the rows that have one is fine. Sluice doesn't need the uniqueness to be right; it uses the
 model's unique columns to know which values a save must report. A column without one throws
 `ArgumentException`, and one unique only together with others (a composite index) throws
-`NotSupportedException`. Naming the primary key reads exactly as `read.Entity(set, key)`. The
+`NotSupportedException`. Naming the primary key reads as `read.Entity(set, key)` does. The
 value can't be null, nor one the column's value converter stores as null: no read by value
 finds a null, so both throw (`ArgumentNullException`, `ArgumentException`). A column whose
 converter stores null as a value (EF's internal `convertsNulls`) throws `NotSupportedException`:
@@ -237,23 +239,26 @@ the value the database holds when an update or delete runs may not be the one EF
 as with `Children` lists, such a save evicts every reader by that column; see
 [Row versions](#row-versions).
 
-Once the compute returns, before its value is stored, Sluice runs one more query on the
-compute's context: the keys of the rows holding the value
-(`SELECT id FROM forms WHERE slug = @value`), ignoring query filters. It records each row it
-finds by its key, so a write to that row by key evicts the reader too: `set.Dependency(key)`,
-and a [bulk write by key](#bulk-writes-by-key), even one that doesn't touch the column. Query
-filters are ignored so that a row they hide, such as a soft-deleted one, is recorded as well,
-and a write that brings it back evicts the reader. A filtered unique index lets rows outside its filter
-share a value: each is recorded, and past 100 rows the reader depends on every row of the type
-instead. Naming the primary key runs no lookup, and nor does a type with a composite primary
-key, which no write by key reaches. Inside a fused fetch (`read.From(dependency, fetch)`), whose
-context may be gone once the compute returns, the read depends on every row of the type instead
-of looking up.
+Before it returns your query, `EntityAsync` runs one more query on the context: the keys of
+the rows holding the value (`SELECT id FROM forms WHERE slug = @value`), ignoring query
+filters. It records each row it finds by its key, so a write to that row by key evicts the
+reader too: `set.Dependency(key)`, a [bulk write by key](#bulk-writes-by-key) even when it
+doesn't touch the column, and a keyed delete, which reports the row's key and not its value.
+Query filters are ignored so that a row they hide, such as a soft-deleted one, is recorded as
+well, and a write that brings it back evicts the reader. A filtered unique index lets rows
+outside its filter share a value: each is recorded, and past 100 rows the reader depends on
+every row of the type instead. Naming the primary key runs no lookup, and nor does a type with
+a composite primary key, which no write by key reaches. Inside a fused fetch
+(`read.From(dependency, fetch)`) it looks up on the fetch's context, like anywhere else.
 
-That's one more round trip per compute, on the column's index; a cache hit runs neither query.
-If the lookup fails, the compute fails: nothing is cached and the caller gets the exception. A
-write that moves the value between the two queries still evicts the entry, as any write during
-a compute does.
+It looks up first so that whatever row your query then finds was either looked up, or got the
+value afterwards, which reports the value. A lookup after the query could miss a row deleted by
+key in between, and the cached value would keep a row that's gone. A write that moves the value
+after the lookup still evicts the entry, as any write during a compute does.
+
+That's one more round trip per call, on the column's index; a cache hit runs neither query. If
+the lookup fails, `EntityAsync` throws, so the compute fails: nothing is cached and the caller
+gets the exception.
 
 `set.Dependency(key)` reaches only readers that found that row. A reader whose value no row
 held, a cached "not found", depends on the value alone, so after a write Sluice can't see that
@@ -460,14 +465,18 @@ they touch by hand.
 
 The database may treat two different .NET values as the same key: `1m` and `1.00m`, `"abc"` and
 `"ABC "` in a case-insensitive column. So Sluice normalises (folds) key values, and the values
-`read.Entity` reads a unique column by, before using them: `decimal`s lose trailing zeros, strings are upper-cased without trailing spaces (for
+`read.EntityAsync` reads a unique column by, before using them: `decimal`s lose trailing zeros, strings are upper-cased without trailing spaces (for
 `citext` and case-insensitive collations), and dates are cut to the microsecond. Folding can
 only make an eviction broader, never miss one. Accent- and culture-sensitive collations aren't
 folded.
 
 Folding follows PostgreSQL's rules. The test suite runs on PostgreSQL, and other providers are
-untested. One that stores dates less precisely, such as SQL Server's `datetime` (about 3 ms),
-could give the same row different key text on a read and a write, and miss an eviction.
+untested. A key, foreign key or unique column holding a date the database stores less precisely
+than to the microsecond, such as SQL Server's `datetime` (about 3 ms) or `smalldatetime`, a
+`DateTime` in a `date` column, or a precision under 6, is refused like an unmarked converter,
+below: the database rounds what a save writes, so a new row's key and a key a read asks by
+wouldn't match what the row holds. Store such a date in `datetime2`, or a PostgreSQL `timestamp`
+of precision 6 (the default), or key the type by another column.
 
 A value converter on a key, foreign key or unique column must round-trip: converting a stored
 value to .NET and back must give the stored value. A save reports what it would write back for

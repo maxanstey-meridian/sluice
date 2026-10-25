@@ -39,9 +39,10 @@ EF raises no event when you call `Commit()` or `Rollback()` on the `DbTransactio
 ended the next time it looks: at the flow's next cached read (on a flow that called
 `SluiceFlow.Begin()`), the context's next command, a write completing in it, the transaction
 being disposed, if EF began it (EF disposes it with the context, too; one you pass in with
-`UseTransaction` isn't seen being disposed), or its connection beginning another
-transaction, opening, closing or being disposed, whichever comes first. Until then, a read can
-cache the old value again. A transaction disposed without commit or rollback looks the same to
+`UseTransaction` isn't seen being disposed, so Sluice checks it before every cached read, on
+any flow, and every second, until it has ended), or its connection beginning another transaction, opening,
+closing (even when you close it yourself) or being disposed, whichever comes first. Until then,
+a read can cache the old value again. A transaction disposed without commit or rollback looks the same to
 Sluice as one committed outside EF, so it's invalidated too, which only evicts more than it
 needs to. Commit and roll back through EF (`transaction.Commit()` on the
 `IDbContextTransaction`) and none of this applies.

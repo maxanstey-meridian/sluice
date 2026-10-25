@@ -182,7 +182,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     }
 
     // EF creates a fresh command for every execution on every path (reader, scalar and non-query; sync and async),
-    // so this one hook sees each before it runs, and before the connection opens. Outside a compute it costs one
+    // so this one hook sees each before it runs (EF opens the connection first). Outside a compute it costs one
     // lookup.
     public DbCommand CommandInitialized(CommandEndEventData eventData, DbCommand result)
     {

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <!-- Run by FreshProcessTests in a process of its own, since what it proves happens once per process. -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <IsPackable>false</IsPackable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Sluice\Sluice.csproj" />
+        <ProjectReference Include="..\..\src\Sluice.EntityFrameworkCore\Sluice.EntityFrameworkCore.csproj" />
+    </ItemGroup>
+</Project>

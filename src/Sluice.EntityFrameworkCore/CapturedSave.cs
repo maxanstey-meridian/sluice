@@ -73,6 +73,12 @@ internal sealed class CapturedSave
             tracker.AutoDetectChangesEnabled = detect;
         }
 
+        // An owned row is part of its owner, and readers only see it through the owner, so what it writes counts as
+        // the owner's: an insert or delete every property, an update its modified ones. The tracker leaves the owner
+        // unchanged when nothing of its own changed, so it's captured as modified then; a changed owner is captured
+        // in its own right.
+        var changed = new List<(EntityEntry Entry, EntityState State)>();
+        var owned = new Dictionary<EntityEntry, List<IProperty>>();
         foreach (var entry in entries)
         {
             var state = StateOf(entry);
@@ -83,17 +89,33 @@ internal sealed class CapturedSave
 
             if (!entry.Metadata.IsOwned())
             {
-                save.Add(entry, state);
+                changed.Add((entry, state));
+                continue;
             }
-            // An owned row is part of its owner, and readers only see it through the owner, which the tracker leaves
-            // unchanged. A changed owner is captured in its own right.
-            else if (
-                OwnerOf(entry, entries) is var owner
-                && StateOf(owner) is EntityState.Unchanged
-            )
+
+            var owner = OwnerOf(entry, entries);
+            if (!owned.TryGetValue(owner, out var written))
             {
-                save.Add(owner, EntityState.Modified);
+                owned[owner] = written = [];
             }
+
+            written.AddRange(
+                Written(
+                    entry.Properties,
+                    entry.ComplexProperties,
+                    all: state is not EntityState.Modified
+                )
+            );
+        }
+
+        foreach (var (entry, state) in changed)
+        {
+            save.Add(entry, state, owned.Remove(entry, out var written) ? written : []);
+        }
+
+        foreach (var (owner, written) in owned)
+        {
+            save.Add(owner, EntityState.Modified, written);
         }
 
         return save;
@@ -252,14 +274,15 @@ internal sealed class CapturedSave
         ];
     }
 
-    private void Add(EntityEntry entry, EntityState state)
+    // Owned is what the entry's owned rows write.
+    private void Add(EntityEntry entry, EntityState state, IReadOnlyCollection<IProperty> owned)
     {
         _changes.Add(
             (
                 entry,
                 state,
                 state is EntityState.Modified && ModelSources.RowSharers(entry.Metadata).Length > 0
-                    ? [.. Modified(entry.Properties, entry.ComplexProperties)]
+                    ? [.. Written(entry.Properties, entry.ComplexProperties, all: false), .. owned]
                     : []
             )
         );
@@ -324,16 +347,18 @@ internal sealed class CapturedSave
     }
 
     // The modified properties, and those of the complex properties, at any depth, each stored in a column of the row.
-    private static IEnumerable<IProperty> Modified(
+    // The properties modified, or all of them, complex properties' included.
+    private static IEnumerable<IProperty> Written(
         IEnumerable<PropertyEntry> properties,
-        IEnumerable<ComplexPropertyEntry> complexProperties
+        IEnumerable<ComplexPropertyEntry> complexProperties,
+        bool all
     ) =>
         properties
-            .Where(property => property.IsModified)
+            .Where(property => all || property.IsModified)
             .Select(property => property.Metadata)
             .Concat(
                 complexProperties.SelectMany(complex =>
-                    Modified(complex.Properties, complex.ComplexProperties)
+                    Written(complex.Properties, complex.ComplexProperties, all)
                 )
             );
 

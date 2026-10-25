@@ -641,7 +641,8 @@ public sealed class Perch
 /// Shares its table with its door (table splitting): both map the label, only a locker its zone, and only a door its
 /// colour. A door's owner and code are a foreign key and a unique column, which a locker maps as plain columns. Its
 /// door goes with it, deleted by EF when it's loaded and with the row when it isn't. A smart locker is stored in the
-/// same table (table-per-hierarchy). A door's serial, unique too, a locker maps through a complex property, its plate.
+/// same table (table-per-hierarchy). A door's serial, unique too, a locker maps through a complex property, its plate,
+/// and its keycard, unique too, through an owned type in the same row, its card.
 /// </summary>
 public class Locker
 {
@@ -651,7 +652,13 @@ public class Locker
     public int? OwnerId { get; set; }
     public string? Code { get; set; }
     public Plate Plate { get; set; } = new();
+    public LockerCard? Card { get; set; }
     public LockerDoor? Door { get; set; }
+}
+
+public sealed class LockerCard
+{
+    public string? Number { get; set; }
 }
 
 public sealed class Plate
@@ -672,6 +679,7 @@ public sealed class LockerDoor
     public int? OwnerId { get; set; }
     public string? Code { get; set; }
     public string? Serial { get; set; }
+    public string? Keycard { get; set; }
 }
 
 /// <summary>A tenant scope the context holds as a whole, so a configure sets it with a new one.</summary>
@@ -1045,6 +1053,14 @@ public sealed class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options
         model.Entity<LockerDoor>().HasIndex(door => door.Code).IsUnique();
         model.Entity<LockerDoor>().HasIndex(door => door.Serial).IsUnique();
         model.Entity<LockerDoor>().Property(door => door.Serial).HasColumnName("Serial");
+        model.Entity<LockerDoor>().HasIndex(door => door.Keycard).IsUnique();
+        model.Entity<LockerDoor>().Property(door => door.Keycard).HasColumnName("Keycard");
+        model
+            .Entity<Locker>()
+            .OwnsOne(
+                locker => locker.Card,
+                card => card.Property(c => c.Number).HasColumnName("Keycard")
+            );
         model
             .Entity<Locker>()
             .ComplexProperty(

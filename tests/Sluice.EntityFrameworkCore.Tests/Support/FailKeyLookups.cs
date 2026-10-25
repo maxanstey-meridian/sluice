@@ -5,7 +5,7 @@ namespace Sluice.EntityFrameworkCore.Tests.Support;
 
 /// <summary>
 /// While <see cref="Fail"/>, fails every async query that selects only a page's key, before it runs: the lookup a read
-/// by a unique column runs once its compute returns, failing as a dropped connection would.
+/// by a unique column runs before its query, failing as a dropped connection would.
 /// </summary>
 public sealed class FailKeyLookups : DbCommandInterceptor
 {

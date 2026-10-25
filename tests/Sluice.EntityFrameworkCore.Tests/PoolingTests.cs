@@ -1,4 +1,6 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using Sluice.EntityFrameworkCore.Tests.Support;
@@ -104,9 +106,10 @@ public sealed class PoolingTests(PostgresFixture postgres)
     }
 
     // EF resets a returned context without closing a connection the app owns, so a transaction passed to
-    // UseTransaction on it is still live, and the reset publishes nothing of it.
+    // UseTransaction on it is still live, and the reset publishes nothing of it. The app's commit on the DbTransaction
+    // raises no event, and the next read publishes it.
     [Fact]
-    public async Task Returning_a_pooled_context_publishes_nothing_of_a_transaction_still_live_on_the_app_s_connection()
+    public async Task Returning_a_pooled_context_publishes_nothing_of_a_transaction_still_live_on_the_app_s_connection_and_a_read_after_its_commit_does()
     {
         await using var connection = new NpgsqlConnection(postgres.ConnectionString);
         await using var node = new SluiceNode(services: services =>
@@ -121,13 +124,57 @@ public sealed class PoolingTests(PostgresFixture postgres)
         var pool = node.Services.GetRequiredService<IDbContextFactory<ShopDb>>();
         await connection.OpenAsync();
 
+        await using var transaction = await connection.BeginTransactionAsync();
         await using (var db = await pool.CreateDbContextAsync())
         {
-            await db.Database.UseTransactionAsync(await connection.BeginTransactionAsync());
+            await db.Database.UseTransactionAsync(transaction);
             await db.Rename(ada, "Ada Lovelace");
         }
 
         (await adaRead.WasEvicted()).Should().BeFalse("the transaction is still live");
         (await reader.NameOf(ada)).Should().Be("Ada", "the transaction hasn't committed");
+
+        await transaction.CommitAsync();
+        (await adaRead.WasEvicted()).Should().BeTrue("the read found the transaction had ended");
+    }
+
+    // EF makes a context's DbConnection the first time anything asks for it, so a reset that asked would make one for a
+    // lease that never ran a command, outside any lease, and fail where the options give no connection string yet.
+    [Fact]
+    public async Task Returning_a_pooled_context_that_ran_no_command_makes_no_connection()
+    {
+        var created = new CountConnections();
+        await using var node = new SluiceNode(services: services =>
+            services.AddPooledDbContextFactory<ShopDb>(
+                (sp, options) =>
+                    options
+                        .UseNpgsql(postgres.ConnectionString)
+                        .UseSluice(sp)
+                        .AddInterceptors(created),
+                poolSize: 1
+            )
+        );
+        var pool = node.Services.GetRequiredService<IDbContextFactory<ShopDb>>();
+
+        await using (var db = await pool.CreateDbContextAsync())
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        created.Count.Should().Be(0, "the lease ran no command");
+    }
+
+    private sealed class CountConnections : DbConnectionInterceptor
+    {
+        public int Count { get; private set; }
+
+        public override DbConnection ConnectionCreated(
+            ConnectionCreatedEventData eventData,
+            DbConnection result
+        )
+        {
+            Count++;
+            return result;
+        }
     }
 }

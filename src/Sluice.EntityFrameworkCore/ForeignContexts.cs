@@ -22,8 +22,9 @@ namespace Sluice.EntityFrameworkCore;
 /// those made before it included. It asks for EF's command-initialised event whether or not a compute is running: a
 /// context that finds nobody listening stops raising its command events for a second, so a command right after one
 /// outside a compute would go unseen. Listening to that event alone keeps them coming, since EF clears the pause when
-/// anyone does. Throwing from it reaches the caller before the connection opens. Outside a compute each command costs
-/// EF one event object and this one lookup, and each transaction's commit, rollback, failure and dispose one more.
+/// anyone does. Throwing from it reaches the caller before the command runs (EF opens the connection first). Outside
+/// a compute each command costs EF one event object and this one lookup, and each transaction's commit, rollback,
+/// failure and dispose one more.
 /// </remarks>
 internal sealed class ForeignContexts
     : IObserver<DiagnosticListener>,

@@ -390,7 +390,10 @@ internal static class ModelSources
         foreach (var mapping in entityType.GetTableMappings().Where(m => m.Table.IsShared))
         {
             var table = mapping.Table;
-            var own = mapping.ColumnMappings.Concat(ComplexColumns(entityType, table)).ToList();
+            var own = mapping
+                .ColumnMappings.Concat(ComplexColumns(entityType, table))
+                .Concat(OwnedColumns(entityType, table))
+                .ToList();
             IReadOnlyList<IProperty> Writing(IEnumerable<IColumn?> columns) =>
                 [.. own.Where(c => columns.Contains(c.Column)).Select(c => c.Property)];
 
@@ -449,6 +452,22 @@ internal static class ModelSources
 
         return [.. sharers];
     }
+
+    // The columns of the types a type owns stored in the table's own columns (in its row), at any depth, with their
+    // complex properties': each owned type maps them apart from its owner, and a save writes them as its owner's row.
+    private static IEnumerable<IColumnMapping> OwnedColumns(IEntityType entityType, ITable table) =>
+        entityType
+            .GetReferencingForeignKeys()
+            .Where(foreignKey => foreignKey.IsOwnership)
+            .Select(ownership => ownership.DeclaringEntityType)
+            .SelectMany(owned =>
+                owned
+                    .GetTableMappings()
+                    .Where(mapping => mapping.Table == table)
+                    .SelectMany(mapping => mapping.ColumnMappings)
+                    .Concat(ComplexColumns(owned, table))
+                    .Concat(OwnedColumns(owned, table))
+            );
 
     // The columns of a type's complex properties stored in the table's own columns, at any depth, which EF maps apart
     // from the type's other columns. A complex collection is stored as JSON, in a column of its own.
@@ -854,10 +873,13 @@ internal static class ModelSources
     /// Refuses a model with a key, foreign key or unique column (<see cref="UniqueColumns"/>) whose value converter
     /// isn't known to round-trip: neither marked <see cref="SluiceRoundTripsAttribute"/> nor one of EF's built-ins that
     /// gives back every value it can load. A save reports the value it would write for what EF loaded, so a converter
-    /// that loads a stored value and writes back another misses the readers of the stored value. Checked once per model,
-    /// before any of its sources is built, and before a save or bulk write on it runs.
+    /// that loads a stored value and writes back another misses the readers of the stored value. Then refuses one whose
+    /// date the database stores less precisely than to the microsecond, which rounds what a save writes. Checked once
+    /// per model, before any of its sources is built, and before a save or bulk write on it runs.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The model has such a converter; the message names each.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The model has such a converter or such a date column; the message names each.
+    /// </exception>
     internal static void EnsureRoundTrips(IModel model) =>
         model.GetOrAddRuntimeAnnotationValue(
             RoundTripsAnnotation,
@@ -876,23 +898,74 @@ internal static class ModelSources
                         + $"({DisplayName(mapped.Converter!.GetType())})"
                     )
                     .ToList();
-                return refused.Count == 0
-                    ? true
-                    : throw new InvalidOperationException(
-                        $"Sluice can't trust the value converter of {string.Join(", ", refused)}: a key, foreign key "
-                            + "or unique column. A save invalidates the value it would write back for what EF loaded, so a "
-                            + "converter that loads a stored value and writes back another (\"01\" loaded as 1 and written as "
-                            + "\"1\", a GUID stored with braces written without them, \" Active\" parsed as an enum) "
-                            + "leaves the readers of what the database held serving stale data. If converting every "
-                            + "stored value to .NET and back gives that same value, mark the converter's class "
-                            + "[SluiceRoundTrips]; one from HasConversion(toProvider, fromProvider) has no class, so move "
-                            + "its two conversions into a class deriving from ValueConverter<TModel, TProvider> and mark "
-                            + "that, and to vouch for one you don't own, derive from it and mark the derived class. If it "
-                            + "doesn't, make it round-trip, or store the value without a converter."
-                    );
+                if (refused.Count == 0)
+                {
+                    EnsurePrecise(model);
+                    return true;
+                }
+
+                throw new InvalidOperationException(
+                    $"Sluice can't trust the value converter of {string.Join(", ", refused)}: a key, foreign key "
+                        + "or unique column. A save invalidates the value it would write back for what EF loaded, so a "
+                        + "converter that loads a stored value and writes back another (\"01\" loaded as 1 and written as "
+                        + "\"1\", a GUID stored with braces written without them, \" Active\" parsed as an enum) "
+                        + "leaves the readers of what the database held serving stale data. If converting every "
+                        + "stored value to .NET and back gives that same value, mark the converter's class "
+                        + "[SluiceRoundTrips]; one from HasConversion(toProvider, fromProvider) has no class, so move "
+                        + "its two conversions into a class deriving from ValueConverter<TModel, TProvider> and mark "
+                        + "that, and to vouch for one you don't own, derive from it and mark the derived class. If it "
+                        + "doesn't, make it round-trip, or store the value without a converter."
+                );
             },
             model
         );
+
+    // A date stored less precisely than the microsecond Sluice folds dates to (SQL Server's datetime, about 3 ms, and
+    // smalldatetime, a minute; a date column; a precision under 6) holds a value other than the one a save reports for
+    // a new row, or a reader asks by, so the two give the row different key text and an eviction is missed.
+    private static void EnsurePrecise(IModel model)
+    {
+        var refused = model
+            .GetEntityTypes()
+            .SelectMany(entityType => entityType.GetDeclaredProperties())
+            .Where(property =>
+                property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
+            )
+            .Select(property => (Property: property, Mapping: property.FindRelationalTypeMapping()))
+            .Where(mapped => mapped.Mapping is { } mapping && Imprecise(mapped.Property, mapping))
+            .Select(mapped =>
+                $"{mapped.Property.DeclaringType.DisplayName()}.{mapped.Property.Name} ({mapped.Mapping!.StoreType})"
+            )
+            .ToList();
+        if (refused.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Sluice can't key {string.Join(", ", refused)}: a key, foreign key or unique column whose date is "
+                    + "stored less precisely than to the microsecond. The database rounds what a save writes, so a new "
+                    + "row's key, and a key a read asks by, isn't the value the row holds, and an eviction is missed. "
+                    + "Store it to the microsecond or better (on SQL Server datetime2, on PostgreSQL timestamp without "
+                    + "a precision under 6), or key the type by another column."
+            );
+        }
+    }
+
+    private static readonly HashSet<string> _impreciseDates = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "datetime",
+        "smalldatetime",
+        "date",
+    };
+
+    private static bool Imprecise(IProperty property, RelationalTypeMapping mapping)
+    {
+        var provider = mapping.Converter?.ProviderClrType ?? mapping.ClrType;
+        var stored = Nullable.GetUnderlyingType(provider) ?? provider;
+        return (stored == typeof(DateTime) || stored == typeof(DateTimeOffset))
+            && (
+                _impreciseDates.Contains(mapping.StoreTypeNameBase)
+                || (property.GetPrecision() ?? mapping.Precision) is < 6
+            );
+    }
 
     // EF's built-ins that give back every value they can load. An enum or number cast into a type that holds every
     // value the column can (int into long, float into double, any integer into decimal), and DateTime ticks and Guid

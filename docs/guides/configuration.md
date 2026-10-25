@@ -116,15 +116,20 @@ under every parent, not just the parent the row had (see
 when it's stored across several tables. Those are under the category
 `Sluice.EntityFrameworkCore.SluiceInterceptor`, so raise that one to hide them.
 
-Two more, under the same category, mean something to fix:
+Three more, under the same category, mean something to fix:
 
 - event id 5, at `Warning`, once per cache: a save or bulk write inside a `TransactionScope` created without
   `TransactionScopeAsyncFlowOption.Enabled` couldn't see the scope where it completed, so Sluice
   invalidated at once and will again when the scope completes. See
   [TransactionScope with async code](/guides/transactions#transactionscope-with-async-code).
-- event id 6, at `Error`: a save reported rows written but ran no command Sluice saw, so nothing
-  was invalidated for it. Sluice reads what a save writes at its first command, so a provider
-  or interceptor that writes without one isn't supported.
+- event id 6, at `Error`: a save reported rows written but ran no command Sluice saw, so Sluice
+  couldn't tell what it wrote and invalidated every cached read of every entity type in the
+  context's model. Sluice reads what a save writes at its first command, so a provider or
+  interceptor that writes without one isn't supported.
+- event id 7, at `Warning`, once per cache: an EF transaction, or a connection enlisted in a
+  `TransactionScope`, began or wrote on a flow without `SluiceFlow.Begin()`, so a cached read
+  there can't see its uncommitted writes. See
+  [Strict reads](/guides/strict-reads#what-the-check-misses).
 
 FusionCache logs several lines at `Information` for every cache call. To keep them out of your
 logs, raise its category in `appsettings.json`:

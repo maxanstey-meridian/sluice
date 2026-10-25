@@ -7,8 +7,8 @@ using ZiggyCreatures.Caching.Fusion;
 namespace Sluice.Tests;
 
 /// <summary>
-/// What a compute runs inside: no ambient transaction, resources it holds until it ends, and steps it runs before its
-/// value is stored.
+/// What a compute runs inside: no ambient transaction, resources it holds until it ends, and the checks its value
+/// passes before it's stored.
 /// </summary>
 public sealed class ComputeScopeTests
 {
@@ -92,15 +92,13 @@ public sealed class ComputeScopeTests
     }
 
     // A cached value can keep the compute's async state, as a task or a token's registration does, and so the compute's
-    // read, which is on it. What the compute held, the steps it added and the caller's token mustn't stay reachable
-    // through that once it's disposed. Nothing but the read references them, so a full collection takes them unless the
-    // read still does.
+    // read, which is on it. What the compute held and the caller's token mustn't stay reachable through that once it's
+    // disposed. Nothing but the read references them, so a full collection takes them unless the read still does.
     [Fact]
     public async Task What_a_compute_held_is_not_kept_by_a_value_that_keeps_the_compute_s_async_state()
     {
         await using var node = new SluiceNode();
         WeakReference? held = null;
-        WeakReference? step = null;
 
         var flow = await GetOrSetWithAToken(
             node,
@@ -108,16 +106,6 @@ public sealed class ComputeScopeTests
             {
                 read.From(_rows.For(1));
                 held = new WeakReference(ActiveCompute.Hold(read, _ => new Held()));
-
-                // It captures what it needs, as a step does, so it isn't a cached static delegate.
-                var captured = new object();
-                Func<CancellationToken, Task> added = _ =>
-                {
-                    GC.KeepAlive(captured);
-                    return Task.CompletedTask;
-                };
-                step = new WeakReference(added);
-                ActiveCompute.BeforeStore(read, added);
                 return Task.FromResult(ExecutionContext.Capture());
             },
             out var token
@@ -131,7 +119,6 @@ public sealed class ComputeScopeTests
         held!
             .IsAlive.Should()
             .BeFalse("the compute's read dropped what it held once it was disposed");
-        step!.IsAlive.Should().BeFalse("and the steps it added");
         token.IsAlive.Should().BeFalse("and the caller's token");
         GC.KeepAlive(flow);
     }
@@ -449,245 +436,6 @@ public sealed class ComputeScopeTests
             .Which.Should()
             .BeSameAs(disposeFailure);
         (await node.Cache.GetOrSetAsync(_query, "fail-safe", Fresh)).Should().BeTrue();
-    }
-
-    [Fact]
-    public async Task Steps_run_in_order_after_the_compute_returns_and_before_its_value_is_stored()
-    {
-        await using var node = new SluiceNode();
-        using var caller = new CancellationTokenSource();
-        var log = new List<string>();
-        var runs = 0;
-
-        Task<bool> Get() =>
-            node
-                .Cache.GetOrSetAsync(
-                    _query,
-                    "steps",
-                    (read, _) =>
-                    {
-                        runs++;
-                        read.From(_rows.For(1));
-                        var held = ActiveCompute.Hold(read, _ => new Held());
-                        ActiveCompute.BeforeStore(
-                            read,
-                            ct =>
-                            {
-                                log.Add(
-                                    $"first: own compute {ActiveCompute.Reads == read}, held {!held.Disposed}, "
-                                        + $"caller's token {ct == caller.Token}"
-                                );
-                                read.From(_rows.For(2));
-                                return Task.CompletedTask;
-                            }
-                        );
-                        ActiveCompute.BeforeStore(
-                            read,
-                            async _ =>
-                            {
-                                await Task.Yield();
-                                log.Add("second");
-                            }
-                        );
-                        log.Add("compute returns");
-                        return Task.FromResult(true);
-                    },
-                    caller.Token
-                )
-                .AsTask();
-
-        await Get();
-
-        log.Should()
-            .Equal(
-                "compute returns",
-                "first: own compute True, held True, caller's token True",
-                "second"
-            );
-        await node.Cache.InvalidateAsync(_rows.For(2));
-        await Get();
-        runs.Should().Be(2, "the step's read was recorded with the value");
-    }
-
-    // Steps run inside the compute's ambient-suppressing scope, so a step's query reads what's committed too.
-    [Fact]
-    public async Task A_step_runs_outside_the_caller_s_ambient_transaction()
-    {
-        await using var node = new SluiceNode();
-        var ran = false;
-        Transaction? seen = null;
-        using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
-
-        await node.Cache.GetOrSetAsync(
-            _query,
-            "step-suppressed",
-            (read, _) =>
-            {
-                read.From(_rows.For(1));
-                ActiveCompute.BeforeStore(
-                    read,
-                    _ =>
-                    {
-                        ran = true;
-                        seen = Transaction.Current;
-                        return Task.CompletedTask;
-                    }
-                );
-                return Task.FromResult(true);
-            }
-        );
-
-        ran.Should().BeTrue();
-        seen.Should().BeNull();
-        Transaction.Current.Should().NotBeNull("the caller has its transaction back");
-    }
-
-    [Fact]
-    public async Task A_step_added_by_a_step_runs_too()
-    {
-        await using var node = new SluiceNode();
-        var log = new List<string>();
-
-        await node.Cache.GetOrSetAsync(
-            _query,
-            "step-adds-step",
-            (read, _) =>
-            {
-                read.From(_rows.For(1));
-                ActiveCompute.BeforeStore(
-                    read,
-                    _ =>
-                    {
-                        log.Add("first");
-                        ActiveCompute.BeforeStore(
-                            read,
-                            _ =>
-                            {
-                                log.Add("added by first");
-                                return Task.CompletedTask;
-                            }
-                        );
-                        return Task.CompletedTask;
-                    }
-                );
-                ActiveCompute.BeforeStore(
-                    read,
-                    _ =>
-                    {
-                        log.Add("second");
-                        return Task.CompletedTask;
-                    }
-                );
-                return Task.FromResult(true);
-            }
-        );
-
-        log.Should().Equal("first", "second", "added by first");
-    }
-
-    [Fact]
-    public async Task A_step_that_throws_fails_the_call_and_caches_nothing()
-    {
-        await using var node = new SluiceNode();
-        var failure = new InvalidOperationException("step failed");
-        Held? held = null;
-
-        var call = async () =>
-            await node.Cache.GetOrSetAsync(
-                _query,
-                "step-throws",
-                (read, _) =>
-                {
-                    read.From(_rows.For(1));
-                    held = ActiveCompute.Hold(read, _ => new Held());
-                    ActiveCompute.BeforeStore(read, _ => Task.FromException(failure));
-                    return Task.FromResult(false);
-                }
-            );
-
-        (await call.Should().ThrowAsync<InvalidOperationException>())
-            .Which.Should()
-            .BeSameAs(failure);
-        held!.Disposed.Should().BeTrue();
-        (await node.Cache.GetOrSetAsync(_query, "step-throws", Fresh)).Should().BeTrue();
-    }
-
-    [Theory]
-    [InlineData("throws")]
-    [InlineData("records a violation")]
-    [InlineData("leaves uncached")]
-    public async Task Steps_do_not_run_when_nothing_will_be_stored(string ending)
-    {
-        await using var node = new SluiceNode();
-        var ran = false;
-
-        var call = async () =>
-            await node.Cache.GetOrSetAsync(
-                _query,
-                ending,
-                (read, ct) =>
-                {
-                    read.From(_rows.For(1));
-                    ActiveCompute.BeforeStore(
-                        read,
-                        _ =>
-                        {
-                            ran = true;
-                            return Task.CompletedTask;
-                        }
-                    );
-                    switch (ending)
-                    {
-                        case "throws":
-                            throw new InvalidOperationException("compute failed");
-                        case "records a violation":
-                            _ = ActiveCompute.Violate(
-                                read,
-                                new InvalidOperationException("guard violated")
-                            );
-                            break;
-                        default:
-                            read.DoNotCache();
-                            break;
-                    }
-
-                    return Task.FromResult(false);
-                }
-            );
-
-        if (ending == "leaves uncached")
-        {
-            (await call()).Should().BeFalse();
-        }
-        else
-        {
-            await call.Should().ThrowAsync<InvalidOperationException>();
-        }
-
-        ran.Should().BeFalse();
-    }
-
-    [Fact]
-    public async Task Adding_a_step_after_the_compute_returned_throws()
-    {
-        await using var node = new SluiceNode();
-        SluiceReads? escaped = null;
-
-        await node.Cache.GetOrSetAsync(
-            _query,
-            "late-step",
-            (read, _) =>
-            {
-                read.From(_rows.For(1));
-                escaped = read;
-                return Task.FromResult(true);
-            }
-        );
-
-        var late = () => ActiveCompute.BeforeStore(escaped!, _ => Task.CompletedTask);
-        late.Should()
-            .Throw<InvalidOperationException>()
-            .WithMessage("*already returned, so nothing more can run before its value is stored*");
     }
 
     [Fact]

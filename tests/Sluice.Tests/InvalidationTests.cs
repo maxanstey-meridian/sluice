@@ -1,3 +1,4 @@
+using Sluice.Infrastructure;
 using Sluice.Tests.Support;
 
 namespace Sluice.Tests;
@@ -120,5 +121,40 @@ public sealed class InvalidationTests
 
         reader.Runs("invoice").Should().Be(2);
         reader.Runs("order").Should().Be(2);
+    }
+
+    // A package publishes, before the read, what a transaction that ended without telling it wrote, so the read
+    // doesn't serve what that transaction changed. A later registration replaces the first.
+    [Fact]
+    public async Task A_before_read_step_runs_before_every_read_so_what_it_invalidates_is_computed_fresh()
+    {
+        await using var node = new SluiceNode();
+        var reader = new CountingReader(node.Cache, _summary);
+        await reader.GetAsync("one", _invoices.For(1));
+        var ended = false;
+        var steps = 0;
+        FlowWrites.BeforeRead(node.Cache, () => new ValueTask(Fail()));
+        FlowWrites.BeforeRead(
+            node.Cache,
+            async () =>
+            {
+                steps++;
+                if (ended)
+                {
+                    ended = false;
+                    await node.Cache.InvalidateAsync(_invoices.For(1));
+                }
+            }
+        );
+
+        (await reader.GetAsync("one", _invoices.For(1))).Should().Be("one#1");
+        ended = true;
+        (await reader.GetAsync("one", _invoices.For(1)))
+            .Should()
+            .Be("one#2", "the step evicted it first");
+        (await reader.GetAsync("one", _invoices.For(1))).Should().Be("one#2");
+        steps.Should().Be(3);
+
+        static Task Fail() => throw new InvalidOperationException("replaced");
     }
 }

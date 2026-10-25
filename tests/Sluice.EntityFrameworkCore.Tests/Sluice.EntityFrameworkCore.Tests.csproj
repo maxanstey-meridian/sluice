@@ -28,5 +28,7 @@
     <ItemGroup>
         <ProjectReference Include="..\..\src\Sluice\Sluice.csproj" />
         <ProjectReference Include="..\..\src\Sluice.EntityFrameworkCore\Sluice.EntityFrameworkCore.csproj" />
+        <!-- Built beside the tests, which run it in a process of its own (FreshProcessTests). -->
+        <ProjectReference Include="..\Sluice.EntityFrameworkCore.FreshProcess\Sluice.EntityFrameworkCore.FreshProcess.csproj" />
     </ItemGroup>
 </Project>

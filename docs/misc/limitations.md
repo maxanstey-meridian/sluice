@@ -124,8 +124,11 @@ no longer than the entry's duration.
   [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes) and
   [Bulk writes by key](/guides/ef-core#bulk-writes-by-key).
 - **A `DbTransaction` committed or rolled back outside EF is invalidated late**: when Sluice
-  next looks, such as the flow's next cached read, the context's next command or, for a
-  transaction EF began, its disposal, since EF raises no event for it. A read in between can cache the old value. Commit through EF. See
+  next looks, such as the flow's next cached read, the context's next command, its connection
+  closing or, for a transaction EF began, its disposal, since EF raises no event for it. One you
+  passed in with `UseTransaction` is checked before every cached read on that server, and every
+  second, so other servers stop serving the old value at most a second after it ended. A read in
+  between can cache the old value. Commit through EF. See
   [Committing outside EF](/guides/transactions#committing-outside-ef).
 - **A cached read of your own uncommitted writes is caught only where Sluice sees the
   transaction**: a `TransactionScope` by itself, and an EF or enlisted transaction once the

@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Transactions;
 
 namespace Sluice.Infrastructure;
@@ -6,10 +5,9 @@ namespace Sluice.Infrastructure;
 /// <summary>
 /// How a package tells <see cref="SluiceCache"/> what the caller's own transactions have written and not yet
 /// committed, so a cached read inside them computes fresh, and throws if it depends on those writes (see
-/// <see cref="SluiceFlow"/>). For Sluice's own packages; it isn't a supported API, and may change in any release.
+/// <see cref="SluiceFlow"/>). Internal, for Sluice's own packages (InternalsVisibleTo).
 /// </summary>
-[EditorBrowsable(EditorBrowsableState.Never)]
-public static class FlowWrites
+internal static class FlowWrites
 {
     /// <summary>
     /// Adds a probe to the current flow's <see cref="SluiceFlow"/> box, which every
@@ -59,5 +57,22 @@ public static class FlowWrites
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(pending);
         cache.OnAmbient(pending);
+    }
+
+    /// <summary>
+    /// Registers a step every <see cref="SluiceCache.GetOrSetAsync{TKey, TValue}"/> on <paramref name="cache"/> awaits
+    /// first, before it reads anything: for a package to publish what a transaction wrote that ended without telling
+    /// it, before the read could serve what that transaction changed. A cache has one; a later call replaces it.
+    /// </summary>
+    /// <param name="cache">The cache whose reads it runs before.</param>
+    /// <param name="step">
+    /// Must not throw, and should complete synchronously when there's nothing to publish: it runs on every read. It may
+    /// be called from concurrent tasks.
+    /// </param>
+    public static void BeforeRead(SluiceCache cache, Func<ValueTask> step)
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentNullException.ThrowIfNull(step);
+        cache.BeforeRead(step);
     }
 }

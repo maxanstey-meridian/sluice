@@ -149,18 +149,17 @@ inside a compute, a command on such a context throws when it's initialised: a wr
 a read outside a fused fetch, and a read in one inside a transaction. A command with no context
 at all (a provider's own, such as a sequence generator's) throws anywhere inside a compute.
 
-`read.Entity` and `read.Children` record a narrower dependency, one row (by key, or by a unique
+`read.Entity`, `read.EntityAsync` and `read.Children` record a narrower dependency, one row (by key, or by a unique
 column's value) or one parent's rows, then return the set as a no-tracking query with
 auto-includes off, filtered to the key or value (`Entity`) or foreign key value (`Children`). The query is marked, so its tag leaves its own type out unless it
 reaches that type again.
 
-A read by a unique column also registers a step to run once the compute returns, before its
-value is stored, on its flow while `read` still records: a marked query on the compute's
-context, ignoring query filters, for the keys of the rows holding the value. It records each
-key's dependency, or the whole type past 100 rows. A step that throws fails the compute, and
-steps are skipped after a violation. They're skipped after `read.DoNotCache()` too, unless the
-caller's transaction has uncommitted writes: then what they record is checked against those
-writes, as the compute's own reads are.
+A read by a unique column (`read.EntityAsync`) first runs a marked query on the same context,
+ignoring query filters, for the keys of the rows holding the value, and records each key's
+dependency, or the whole type past 100 rows, before it returns the query. First, because a row
+deleted by key between the compute's query and a later lookup reports only its key, which that
+lookup would no longer find; any row the query finds after the lookup either was looked up or got
+the value afterwards, which reports the value. A lookup that throws fails the compute.
 
 ## EF Core writes
 

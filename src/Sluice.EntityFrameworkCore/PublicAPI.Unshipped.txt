@@ -1,6 +1,6 @@
 #nullable enable
 static Sluice.SluiceReadsExtensions.Db<TContext>(this Sluice.SluiceReads! read, System.Action<TContext!, System.IServiceProvider!>! configure) -> TContext!
-static Sluice.SluiceReadsExtensions.Entity<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, System.Linq.Expressions.Expression<System.Func<T!, object?>!>! uniqueColumn, object! value) -> System.Linq.IQueryable<T!>!
+static Sluice.SluiceReadsExtensions.EntityAsync<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, System.Linq.Expressions.Expression<System.Func<T!, object?>!>! uniqueColumn, object! value, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Linq.IQueryable<T!>!>!
 Sluice.SluiceContextStateAttribute
 Sluice.SluiceContextStateAttribute.SluiceContextStateAttribute() -> void
 Sluice.KeyedRows<T>

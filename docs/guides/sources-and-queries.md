@@ -169,7 +169,8 @@ cache.GetOrSetAsync(
     async Task<PublicForm?> (read, ct) =>
     {
         var db = read.Db<AppDb>();
-        var form = await read.Entity(db.Forms, f => f.Slug, slug)
+        var forms = await read.EntityAsync(db.Forms, f => f.Slug, slug, ct);
+        var form = await forms
             .Select(f => new PublicForm(f.Id, f.Title))
             .SingleOrDefaultAsync(ct);
         if (form is null)

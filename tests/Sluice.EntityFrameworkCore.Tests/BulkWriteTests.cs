@@ -79,8 +79,10 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
         Task<CachedRead> BySlug(string slug) =>
             CachedRead.Of(
                 node.Cache,
-                (read, ct) =>
-                    read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct)
+                async (read, ct) =>
+                    await (
+                        await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, slug, ct)
+                    ).SingleOrDefaultAsync(ct)
             );
         var oldReaders = await BySlug(before);
         var newReaders = await BySlug(after);
@@ -429,9 +431,10 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
         );
         var byCode = await CachedRead.Of(
             node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().LockerDoors, d => d.Code, code)
-                    .SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().LockerDoors, d => d.Code, code, ct)
+                ).SingleOrDefaultAsync(ct)
         );
 
         await db
@@ -1083,8 +1086,10 @@ public sealed class BulkWriteTests(PostgresFixture postgres)
     private static Task<CachedRead> PageBySlug(SluiceCache cache, string slug) =>
         CachedRead.Of(
             cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, slug, ct)
+                ).SingleOrDefaultAsync(ct)
         );
 
     private static Task<CachedRead> OrderByKey(SluiceCache cache, int id) =>

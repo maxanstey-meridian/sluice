@@ -283,8 +283,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
     private static Task<CachedRead> PageBySlug(SluiceCache cache, string slug) =>
         CachedRead.Of(
             cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, slug, ct)
+                ).SingleOrDefaultAsync(ct)
         );
 
     private static async Task<Page> AddPage(ShopDb db, string? slug, string title = "Draft")
@@ -313,8 +315,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         var read = await node.Cache.GetOrSetAsync(
             query,
             slug,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, slug, ct)
+                ).SingleOrDefaultAsync(ct)
         );
         read!.Title.Should().Be("Welcome");
         var cached = await PageBySlug(node.Cache, slug);
@@ -407,8 +411,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await db.SaveChangesAsync();
         var cached = await CachedRead.Of(
             node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().Warehouses, w => w.Code, mine).SingleAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Warehouses, w => w.Code, mine, ct)
+                ).SingleAsync(ct)
         );
 
         db.Warehouses.Add(new Warehouse { Code = Fresh("WH") });
@@ -438,10 +444,14 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         var (slug, missing) = (Fresh("raw"), Fresh("missing"));
         var page = await AddPage(db, slug);
         var other = await AddPage(db, Fresh("other"));
-        Task ReadIt(SluiceReads read, CancellationToken ct) =>
-            read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleAsync(ct);
-        Task ReadMissing(SluiceReads read, CancellationToken ct) =>
-            read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, missing).SingleOrDefaultAsync(ct);
+        async Task ReadIt(SluiceReads read, CancellationToken ct) =>
+            await (
+                await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, slug, ct)
+            ).SingleAsync(ct);
+        async Task ReadMissing(SluiceReads read, CancellationToken ct) =>
+            await (
+                await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, missing, ct)
+            ).SingleOrDefaultAsync(ct);
 
         (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(page.Id))).Should().BeTrue();
         (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(other.Id))).Should().BeFalse();
@@ -452,27 +462,29 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         (await CachedRead.IsEvictedBy(ReadMissing, db.Pages.AllDependencies())).Should().BeTrue();
     }
 
-    // A fused fetch may read on a context of its own, gone once the compute returns, so there the read depends on the
-    // whole type rather than looking up the rows it found.
+    // The lookup runs before the fetch's query, while the fetch's own context is open, so a fused fetch records the
+    // row it found as any compute does.
     [Fact]
-    public async Task A_unique_column_read_in_a_fused_fetch_on_its_own_context_depends_on_the_whole_type()
+    public async Task A_unique_column_read_in_a_fused_fetch_on_its_own_context_records_the_key_of_the_row_it_found()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
         var slug = Fresh("fetched");
         var other = await AddPage(db, Fresh("other"));
-        await AddPage(db, slug);
+        var page = await AddPage(db, slug);
         Task ReadIt(SluiceReads read, CancellationToken ct) =>
             read.From(
                 _fetched.All,
                 async fetchCt =>
                 {
                     await using var own = postgres.CreateDb(node);
-                    return await read.Entity(own.Pages, p => p.Slug, slug).SingleAsync(fetchCt);
+                    var pages = await read.EntityAsync(own.Pages, p => p.Slug, slug, fetchCt);
+                    return await pages.SingleAsync(fetchCt);
                 }
             );
 
-        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(other.Id))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(page.Id))).Should().BeTrue();
+        (await CachedRead.IsEvictedBy(ReadIt, db.Pages.Dependency(other.Id))).Should().BeFalse();
     }
 
     // The lookup ignores query filters, so a row they hide is recorded too: a write that brings it back reaches the
@@ -488,8 +500,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await db.SaveChangesAsync();
         var cached = await CachedRead.Of(
             node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().Forms, f => f.Slug, slug).SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Forms, f => f.Slug, slug, ct)
+                ).SingleOrDefaultAsync(ct)
         );
 
         await db
@@ -500,10 +514,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         (await cached.WasEvicted()).Should().BeTrue("the form it couldn't see came back");
     }
 
-    // The lookup runs once the compute returns, so the value can move to another row in between. That write publishes
-    // the value after the compute started, which evicts the entry whatever the lookup found.
+    // The value can move to another row once the lookup and the read have found it, while the compute runs. That write
+    // publishes the value after the compute started, which evicts the entry whatever the lookup found.
     [Fact]
-    public async Task A_value_that_moves_between_the_read_and_its_key_lookup_still_evicts()
+    public async Task A_value_that_moves_after_the_read_found_it_still_evicts()
     {
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
@@ -515,7 +529,9 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             node.Cache,
             async (read, ct) =>
             {
-                await read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug).SingleAsync(ct);
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, slug, ct)
+                ).SingleAsync(ct);
                 if (!moved)
                 {
                     moved = true;
@@ -536,6 +552,39 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         (await cached.WasEvicted()).Should().BeFalse("the second compute cached as usual");
         await node.Cache.InvalidateAsync(db.Pages.Dependency(to.Id));
         (await cached.WasEvicted()).Should().BeTrue("it found the row that holds the slug now");
+    }
+
+    // A keyed delete publishes the row's key and not its slug, so a row deleted by key once the read has found it must
+    // still evict the value: the lookup ran before the read, and recorded the key.
+    [Fact]
+    public async Task A_row_deleted_by_key_after_the_read_found_it_still_evicts()
+    {
+        await using var node = new SluiceNode();
+        await using var db = postgres.CreateDb(node);
+        var slug = Fresh("deleted");
+        var page = await AddPage(db, slug);
+        var deleted = false;
+
+        var cached = await CachedRead.Of(
+            node.Cache,
+            async (read, ct) =>
+            {
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, slug, ct)
+                ).SingleOrDefaultAsync(ct);
+                if (!deleted)
+                {
+                    deleted = true;
+                    await AsAnotherRequest(async () =>
+                        await db.Pages.ForKey(page.Id).ExecuteDeleteAsync()
+                    );
+                }
+            }
+        );
+
+        (await cached.WasEvicted())
+            .Should()
+            .BeTrue("the delete took the row the compute found, after the compute started");
     }
 
     [Fact]
@@ -563,8 +612,9 @@ public sealed class EntityReadTests(PostgresFixture postgres)
                     slug,
                     async (read, ct) =>
                     {
-                        await read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, slug)
-                            .SingleAsync(ct);
+                        await (
+                            await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, slug, ct)
+                        ).SingleAsync(ct);
                         return ++computes;
                     }
                 )
@@ -575,8 +625,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
             .ThrowAsync<InvalidOperationException>()
             .WithMessage("The key lookup failed.");
         failing.Fail = false;
-        (await Read()).Should().Be(2, "nothing was cached");
-        (await Read()).Should().Be(2);
+        (await Read())
+            .Should()
+            .Be(1, "the failed lookup ran before the compute's own query, and nothing was cached");
+        (await Read()).Should().Be(1);
     }
 
     // Rows outside a filtered unique index can share its column's value; each is recorded, and past 100 of them the
@@ -593,8 +645,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         var bystander = new Form { Slug = Fresh("bystander") };
         db.Forms.Add(bystander);
         await db.SaveChangesAsync();
-        Task ReadBy(string slug, SluiceReads read, CancellationToken ct) =>
-            read.Entity(read.Db<ShopDb>().Forms, f => f.Slug, slug).ToListAsync(ct);
+        async Task ReadBy(string slug, SluiceReads read, CancellationToken ct) =>
+            await (
+                await read.EntityAsync(read.Db<ShopDb>().Forms, f => f.Slug, slug, ct)
+            ).ToListAsync(ct);
 
         foreach (var draft in drafts)
         {
@@ -640,8 +694,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         db.ChangeTracker.Clear();
         var cached = await CachedRead.Of(
             node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().Bins, b => b.Label, label).SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Bins, b => b.Label, label, ct)
+                ).SingleOrDefaultAsync(ct)
         );
 
         db.Warehouses.Remove(await db.Warehouses.SingleAsync(w => w.Id == warehouse.Id));
@@ -664,9 +720,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         db.ChangeTracker.Clear();
         var cached = await CachedRead.Of(
             node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().Set<Truck>(), t => t.Vin, vin)
-                    .SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Set<Truck>(), t => t.Vin, vin, ct)
+                ).SingleOrDefaultAsync(ct)
         );
 
         db.Vehicles.Remove(new Vehicle { Id = truck.Id });
@@ -689,7 +746,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         var refused = () =>
             CachedRead.Of(
                 node.Cache,
-                (read, ct) => read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, "").SingleAsync(ct)
+                async (read, ct) =>
+                    await (
+                        await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, "", ct)
+                    ).SingleAsync(ct)
             );
         await refused
             .Should()
@@ -749,8 +809,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await using var db = postgres.CreateDb(node);
         var page = await AddPage(db, Fresh("keyed"));
 
-        Task ReadById(SluiceReads read, CancellationToken ct) =>
-            read.Entity(read.Db<ShopDb>().Pages, p => p.Id, page.Id).SingleAsync(ct);
+        async Task ReadById(SluiceReads read, CancellationToken ct) =>
+            await (
+                await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Id, page.Id, ct)
+            ).SingleAsync(ct);
 
         (await CachedRead.IsEvictedBy(ReadById, db.Pages.Dependency(page.Id))).Should().BeTrue();
         (await CachedRead.IsEvictedBy(ReadById, db.Pages.Dependency(page.Id + 1)))
@@ -767,9 +829,10 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         var read = () =>
             CachedRead.Of(
                 node.Cache,
-                (read, ct) =>
-                    read.Entity(read.Db<ShopDb>().Warehouses, w => w.Region, "")
-                        .SingleOrDefaultAsync(ct)
+                async (read, ct) =>
+                    await (
+                        await read.EntityAsync(read.Db<ShopDb>().Warehouses, w => w.Region, "", ct)
+                    ).SingleOrDefaultAsync(ct)
             );
 
         await read.Should()
@@ -801,34 +864,53 @@ public sealed class EntityReadTests(PostgresFixture postgres)
         await using var node = new SluiceNode();
         await using var db = postgres.CreateDb(node);
 
-        Task<Page?> Read(Func<SluiceReads, IQueryable<Page>> query) =>
+        Task<Page?> Read(Func<SluiceReads, CancellationToken, Task<IQueryable<Page>>> query) =>
             node
                 .Cache.GetOrSetAsync(
                     new Query<string, Page?>(Fresh("ef-reads-refused")),
                     "k",
-                    (read, ct) => query(read).SingleOrDefaultAsync(ct)
+                    async (read, ct) => await (await query(read, ct)).SingleOrDefaultAsync(ct)
                 )
                 .AsTask();
 
-        await ((Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Title, "x"))))
+        await (
+            (Func<Task>)(
+                () => Read((r, ct) => r.EntityAsync(r.Db<ShopDb>().Pages, p => p.Title, "x", ct))
+            )
+        )
             .Should()
             .ThrowAsync<ArgumentException>()
             .WithMessage(
                 "*Page.Title isn't covered by a single-column unique index or alternate key*"
             );
-        await ((Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Section, "x"))))
+        await (
+            (Func<Task>)(
+                () => Read((r, ct) => r.EntityAsync(r.Db<ShopDb>().Pages, p => p.Section, "x", ct))
+            )
+        )
             .Should()
             .ThrowAsync<NotSupportedException>()
             .WithMessage("*Page.Section is unique only together with other columns*");
-        await ((Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Slug, 7))))
+        await (
+            (Func<Task>)(
+                () => Read((r, ct) => r.EntityAsync(r.Db<ShopDb>().Pages, p => p.Slug, 7, ct))
+            )
+        )
             .Should()
             .ThrowAsync<ArgumentException>()
             .WithMessage("*must be of type String*");
-        await ((Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Slug, null!))))
+        await (
+            (Func<Task>)(
+                () => Read((r, ct) => r.EntityAsync(r.Db<ShopDb>().Pages, p => p.Slug, null!, ct))
+            )
+        )
             .Should()
             .ThrowAsync<ArgumentNullException>();
         await (
-            (Func<Task>)(() => Read(r => r.Entity(r.Db<ShopDb>().Pages, p => p.Title.Length, 1)))
+            (Func<Task>)(
+                () =>
+                    Read((r, ct) => r.EntityAsync(r.Db<ShopDb>().Pages, p => p.Title.Length, 1, ct))
+            )
         )
             .Should()
             .ThrowAsync<ArgumentException>()

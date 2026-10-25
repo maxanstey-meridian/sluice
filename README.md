@@ -187,7 +187,8 @@ var user = await read.Entity(computeDb.Users, userId).SingleAsync(ct);
 var orders = await read.Children(computeDb.Orders, o => o.UserId, userId).ToListAsync(ct);
 
 // One row, by a column with a unique index, such as a slug or an email.
-var page = await read.Entity(computeDb.Pages, p => p.Slug, slug).SingleOrDefaultAsync(ct);
+var pages = await read.EntityAsync(computeDb.Pages, p => p.Slug, slug, ct);
+var page = await pages.SingleOrDefaultAsync(ct);
 ```
 
 `read.Entity` depends on one row, so renaming Bob leaves Alice's dashboard cached.

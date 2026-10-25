@@ -27,9 +27,9 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   Saves without a transaction of yours have committed by the time they return, and never count.
 - **New: `SluiceFlow.Begin()`.** `using var _ = SluiceFlow.Begin();` once per entry point (HTTP
   middleware, the message pipeline) lets Sluice see the EF transactions the flow opens, however
-  deep. A nested call does nothing. Without it, EF transactions aren't checked, which costs
-  nothing; with it, a flow with a transaction open but nothing pending makes one check per
-  cached read.
+  deep. A nested call does nothing. Without it, EF transactions aren't checked, and the first
+  one Sluice sees logs a `Warning` (event 7), once per cache; with it, a flow with a
+  transaction open but nothing pending makes one check per cached read.
 - **New: `.ForKey(id)` and `.ForKeys(ids)` for `ExecuteUpdate` and `ExecuteDelete`.**
   `db.Set<FormEntity>().Where(…).ForKey(id).ExecuteUpdateAsync(…)` adds the key condition to the
   statement itself, alongside your `Where`, so a conditional write stays conditional, and evicts
@@ -44,12 +44,16 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   runs. Sluice doesn't recognise a key condition in your own `Where`: move `f.Id == id` into
   `ForKey`, rather than keep it in both, which, for an update, names the key column twice and
   evicts whole.
-- **Breaking: a read by a unique column runs one more query, and records the row it found.** `read.Entity(set, column,
-  value)` runs one more query once the compute returns, an indexed lookup of the keys of the rows
-  holding the value, ignoring query filters, and records each by its key (the whole type past
-  100 rows). That's one more round trip per cache miss; hits are unchanged. If the lookup fails,
-  the compute fails and nothing is cached. Naming the primary key runs no lookup. SQL snapshot
-  or query-count tests will see the extra query.
+- **Breaking: a read by a unique column is `await read.EntityAsync(set, column, value, ct)`, and
+  records the row it found.** It replaces `read.Entity(set, column, value)`. Before it returns the
+  query, it runs one more query, an indexed lookup of the keys of the rows holding the value,
+  ignoring query filters, and records each by its key (the whole type past 100 rows). It looks up
+  first because a lookup after your query missed a row deleted by key in between (a keyed delete
+  reports the row's key, not its value), so the value kept a row that was gone until it expired.
+  Inside a fused fetch it now looks up too, on the fetch's context, instead of depending on every
+  row of the type. That's one more round trip per cache miss; hits are unchanged. If the lookup
+  fails, `EntityAsync` throws, the compute fails and nothing is cached. Naming the primary key runs
+  no lookup. SQL snapshot or query-count tests will see the extra query, before the compute's own.
 - **Changed: `set.Dependency(key)` evicts readers by a unique column that found that row,** and
   so does a keyed bulk write. A cached "not found" by a unique column still needs
   `AllDependencies()` after a write Sluice can't see.
@@ -75,7 +79,10 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   and `GuidToBytesConverter`. Every typed-id converter needs the mark, and one written as
   `HasConversion(id => id.Value, value => new UserId(value))` moves into a class deriving from
   `ValueConverter<TModel, TProvider>` first. Enum-to-string and the other string-parsing
-  built-ins need it too, since they accept more than one spelling of a value.
+  built-ins need it too, since they accept more than one spelling of a value. A key, foreign key
+  or unique column whose date the database rounds (SQL Server's `datetime` or `smalldatetime`, a
+  `DateTime` in a `date` column, a precision under 6) is refused the same way: its new rows' keys
+  missed readers.
 - **Breaking: a context without `UseSluice`, or an EF command with no context, throws inside a
   compute.** Its commands used to go
   unseen, so a compute that read through one cached a value nothing evicted. Sluice now watches
@@ -125,6 +132,10 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   marker and never invalidated, or when `ClearRemoveTag` or `ClearExpireTag` has a `:` with a
   name before it, which a dependency's tag could equal. `SetToSafeStrings()` with its defaults
   is fine.
+- **Breaking: `Sluice.Infrastructure.ActiveCompute` is internal.** It was a hidden public hook
+  for the EF package, and the hooks 0.5.0 adds beside it are internal too, so only Sluice's own
+  packages can reach them: an app can't build a source with an EF dependency's name, or mark a
+  compute itself.
 - **Breaking: `SluiceCache` is `IAsyncDisposable` and `IDisposable`.** Every invalidation and
   clear is now published again 5 to 6 s later (below), and disposing the cache, which the service
   provider does at shutdown, publishes whatever is still waiting at once and waits for it. A
@@ -141,7 +152,8 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   auditing), EF's change detection and its cascades, instead of in its own `SavingChanges`.
   Changes an interceptor after `UseSluice` made used to be missed. The tracker is read once per
   save, and Sluice never detects changes itself. A save that reports rows written but ran no
-  command Sluice saw logs an `Error` (event 6). `UseSluice` adds its reads interceptor first,
+  command Sluice saw logs an `Error` (event 6) and invalidates every entity type in the model,
+  since what it wrote can't be known. `UseSluice` adds its reads interceptor first,
   so a save refused inside a compute invalidates nothing.
 - **Fixed: client cascades with mismatched cascade timings.** With `CascadeDeleteTiming` and
   `DeleteOrphansTiming` set differently, a row EF deleted or set to null through
@@ -157,8 +169,10 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   invalidated. Sluice now sees that it
   ended the next time it looks (the flow's next cached read, the context's next command, the
   transaction's disposal if EF began it, its connection beginning another transaction, opening,
-  closing or being disposed) and invalidates then, a pooled context's or a connection you opened yourself
-  included. A transaction disposed without commit or rollback looks the same, so it now
+  closing, even when you close it yourself, or being disposed, and for one you passed in with
+  `UseTransaction`, the next cached read on any flow, or within a second, so a server with no
+  reads of its own doesn't leave the others serving the old value) and invalidates then, a pooled context's
+  or a connection you opened yourself included. A transaction disposed without commit or rollback looks the same, so it now
   invalidates what it wrote, at its disposal if EF began it, which only evicts more than needed.
   A write on a context whose connection you closed and opened again yourself, which runs
   outside the transaction the context still holds, is invalidated at once rather than with

@@ -1524,9 +1524,10 @@ public sealed class WriteDerivationTests : IAsyncLifetime
     private Task<CachedRead> DoorBy(string code) =>
         CachedRead.Of(
             _node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().LockerDoors, d => d.Code, code)
-                    .SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().LockerDoors, d => d.Code, code, ct)
+                ).SingleOrDefaultAsync(ct)
         );
 
     private sealed record DoorReads(CachedRead Row, CachedRead OwnersDoors, CachedRead ByCode);
@@ -1641,15 +1642,19 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         var serial = $"serial-{Guid.NewGuid():N}";
         var bySerial = await CachedRead.Of(
             _node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().LockerDoors, d => d.Serial, serial)
-                    .SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().LockerDoors, d => d.Serial, serial, ct)
+                ).SingleOrDefaultAsync(ct)
         );
+        var keycard = $"card-{Guid.NewGuid():N}";
+        var byKeycard = await DoorByKeycard(keycard);
         var loaded = await _db.Lockers.SingleAsync(l => l.Id == locker.Id);
 
         loaded.OwnerId = bob.Id;
         loaded.Code = newCode;
         loaded.Plate.Serial = serial;
+        loaded.Card = new() { Number = keycard };
         await _db.SaveChangesAsync();
 
         (
@@ -1668,7 +1673,44 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         (await bySerial.WasEvicted())
             .Should()
             .BeTrue("the door took the serial, which the locker writes through a complex property");
+        (await byKeycard.WasEvicted())
+            .Should()
+            .BeTrue("the door took the keycard, which the locker writes through an owned type");
     }
+
+    // Only the owned type changed: EF writes the locker's row for it, though nothing of the locker's own changed.
+    [Fact]
+    public async Task A_unique_column_in_a_shared_column_evicts_every_reader_of_it_when_the_other_type_s_owned_type_saves()
+    {
+        var ada = await AddCustomer("Ada");
+        var locker = await AddLocker(ada);
+        _db.ChangeTracker.Clear();
+        var keycard = $"card-{Guid.NewGuid():N}";
+        var byKeycard = await DoorByKeycard(keycard);
+        var loaded = await _db.Lockers.SingleAsync(l => l.Id == locker.Id);
+
+        loaded.Card = new() { Number = keycard };
+        await _db.SaveChangesAsync();
+
+        (await _reader.LockerDoors.SingleAsync(d => d.Id == locker.Id))
+            .Keycard.Should()
+            .Be(keycard);
+        (await byKeycard.WasEvicted()).Should().BeTrue("the door took the keycard");
+    }
+
+    private Task<CachedRead> DoorByKeycard(string keycard) =>
+        CachedRead.Of(
+            _node.Cache,
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(
+                        read.Db<ShopDb>().LockerDoors,
+                        d => d.Keycard,
+                        keycard,
+                        ct
+                    )
+                ).SingleOrDefaultAsync(ct)
+        );
 
     // Sources are named after tables, so another context's class over the same tables, keyed by the same columns,
     // reads the same sources: neither context's writes go unseen by the other's readers.
@@ -1705,9 +1747,10 @@ public sealed class WriteDerivationTests : IAsyncLifetime
         );
         var viewByNewSlug = await CachedRead.Of(
             node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopView>().Pages, p => p.Slug, newSlug)
-                    .SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopView>().Pages, p => p.Slug, newSlug, ct)
+                ).SingleOrDefaultAsync(ct)
         );
         var shopBob = await CachedRead.Customer(node.Cache, bob);
         var shopBobOrders = await CachedRead.OrdersOf(node.Cache, bob);

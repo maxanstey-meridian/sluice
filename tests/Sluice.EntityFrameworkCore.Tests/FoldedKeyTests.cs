@@ -87,6 +87,16 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
                 options => new UntrustedUniqueDb(options.Options),
                 "*Gadget.Colour (EnumToStringConverter<Colour>)*"
             },
+            {
+                "a unique date stored to the millisecond",
+                options => new MillisecondDateDb(options.Options),
+                "*Gadget.Made (timestamp(3) with time zone)*microsecond*"
+            },
+            {
+                "a unique DateTime stored as a date",
+                options => new DateColumnDb(options.Options),
+                "*Gadget.Made (date)*microsecond*"
+            },
         };
 
     [Theory]
@@ -265,6 +275,35 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
                     gadget.HasIndex(g => g.Colour).IsUnique();
                 }
             );
+    }
+
+    // The database rounds what a save writes to the column's precision (SQL Server's datetime and smalldatetime, which
+    // the model check refuses by name the same way as a date column, too). One type each, since EF caches a model per
+    // context type.
+    private abstract class ImpreciseDateDb(DbContextOptions options) : DbContext(options)
+    {
+        protected abstract void Made(PropertyBuilder<DateTime> made);
+
+        protected override void OnModelCreating(ModelBuilder model) =>
+            Gadgets(
+                model,
+                gadget =>
+                {
+                    gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter());
+                    Made(gadget.Property(g => g.Made));
+                    gadget.HasIndex(g => g.Made).IsUnique();
+                }
+            );
+    }
+
+    private sealed class MillisecondDateDb(DbContextOptions options) : ImpreciseDateDb(options)
+    {
+        protected override void Made(PropertyBuilder<DateTime> made) => made.HasPrecision(3);
+    }
+
+    private sealed class DateColumnDb(DbContextOptions options) : ImpreciseDateDb(options)
+    {
+        protected override void Made(PropertyBuilder<DateTime> made) => made.HasColumnType("date");
     }
 
     // A typed id marked by its author; an enum stored as its number; a long key stored in an int column, which holds

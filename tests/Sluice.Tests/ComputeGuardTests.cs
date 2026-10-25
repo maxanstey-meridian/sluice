@@ -221,7 +221,6 @@ public sealed class ComputeGuardTests
     [InlineData("fetches")]
     [InlineData("holds")]
     [InlineData("leaves uncached")]
-    [InlineData("adds a step before the store")]
     public async Task Using_another_running_compute_s_read_throws_and_caches_nothing(string use)
     {
         await using var node = new SluiceNode();
@@ -271,9 +270,6 @@ public sealed class ComputeGuardTests
                                     break;
                                 case "leaves uncached":
                                     captured!.DoNotCache();
-                                    break;
-                                case "adds a step before the store":
-                                    ActiveCompute.BeforeStore(captured!, _ => Task.CompletedTask);
                                     break;
                                 default:
                                     ActiveCompute.Hold(captured!, _ => new Resource());
@@ -453,14 +449,12 @@ public sealed class ComputeGuardTests
         (await node.Cache.GetOrSetAsync(_outer, "k", Good)).Should().Be("good#1");
     }
 
-    // The fresh compute runs as a miss does: a step that records the written row is checked like the compute's own
-    // reads.
+    // The fresh compute runs as a miss does, and leaving its value uncached doesn't skip the check against the writes.
     [Theory]
     [InlineData("records no dependencies")]
     [InlineData("leaves uncached")]
-    [InlineData("records the written row in a step")]
-    [InlineData("leaves uncached and records the written row in a step")]
-    public async Task With_uncommitted_writes_a_read_keeps_its_guards_and_steps(string compute)
+    [InlineData("leaves uncached and records the written row")]
+    public async Task With_uncommitted_writes_a_read_keeps_its_guards(string compute)
     {
         await using var node = new SluiceNode();
         using var flow = SluiceFlow.Begin();
@@ -478,19 +472,9 @@ public sealed class ComputeGuardTests
                             case "leaves uncached":
                                 read.DoNotCache();
                                 break;
-                            case "leaves uncached and records the written row in a step":
+                            case "leaves uncached and records the written row":
                                 read.DoNotCache();
-                                goto case "records the written row in a step";
-                            case "records the written row in a step":
-                                read.From(_rows.For(1));
-                                ActiveCompute.BeforeStore(
-                                    read,
-                                    _ =>
-                                    {
-                                        read.From(_rows.For(2));
-                                        return Task.CompletedTask;
-                                    }
-                                );
+                                read.From(_rows.For(1), _rows.For(2));
                                 break;
                         }
 

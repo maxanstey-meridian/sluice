@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
+using System.Data;
 using System.Data.Common;
 using System.Runtime.CompilerServices;
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -43,7 +45,7 @@ internal sealed partial class SluiceInterceptor
     private readonly ConditionalWeakTable<DbCommand, BulkCommand> _bulk = new();
 
     // What saves and bulk writes inside an EF transaction wrote, published when the transaction ends.
-    private readonly EfPending _efPending = new();
+    private readonly EfPending _efPending;
 
     // What saves and bulk writes inside an enlisted or ambient transaction wrote, until it completes: each publishes from
     // its own TransactionCompleted handler, so this is only for the uncommitted-write guard to read (SLUICE-EF-025).
@@ -54,8 +56,24 @@ internal sealed partial class SluiceInterceptor
     // and on a cold connection pool not even at its first command. Weak, so a dropped connection leaves nothing behind.
     private readonly ConditionalWeakTable<DbConnection, Transaction> _openedIn = new();
 
+    // The DbConnection each context's connection last wrote in an EF transaction on, so a pool reset finds what it
+    // holds without making one (EF's DbConnection getter creates it): one Sluice never saw write holds nothing.
+    private readonly ConditionalWeakTable<IRelationalConnection, DbConnection> _wroteOn = new();
+
+    // Each connection a write in an EF transaction ran on, whose closing this watches (StateChange): the app closes a
+    // connection it owns without an EF event, and closing ends the transaction on it. Weak, as the others are.
+    private readonly ConditionalWeakTable<DbConnection, object> _watched = new();
+
     // How the core reads an ambient transaction's pending writes, made once so registering it again is the same value.
     private readonly Func<Transaction, IReadOnlyCollection<Dependency>> _ambientWrites;
+
+    // What every read on the cache runs first, made once like _ambientWrites.
+    private readonly Func<ValueTask> _beforeRead;
+
+    // The EF transaction id each DbTransaction object was last joined as (UseTransaction): a transaction the app
+    // begun and ends itself, on the DbTransaction, which raises no EF event, and which EF doesn't dispose with the
+    // context. By id, since a provider hands the object out again for another transaction (Npgsql does).
+    private readonly ConditionalWeakTable<DbTransaction, StrongBox<Guid>> _joinedAs = new();
 
     // Each entity type that has logged invalidating its foreign keys and unique columns whole, so each logs once per
     // cache.
@@ -63,6 +81,9 @@ internal sealed partial class SluiceInterceptor
 
     // Whether a write has logged that its TransactionScope didn't flow to where it completed, so it logs once per cache.
     private int _loggedHiddenScope;
+
+    // Whether a transaction has logged running on a flow without SluiceFlow.Begin(), so it logs once per cache.
+    private int _loggedNoFlow;
 
     // Whether this instance has registered its hooks with the cache, which For does once, under the lock.
     private volatile bool _registered;
@@ -72,8 +93,11 @@ internal sealed partial class SluiceInterceptor
     {
         _cache = cache;
         _logger = logger;
+        _efPending = new(cache.Time, Sweep);
         _ambientWrites = transaction =>
             _ambientPending.TryGetValue(transaction, out var pending) ? pending.Pending() : [];
+        _beforeRead = () =>
+            _efPending.AnyWatched ? new(PublishAsync(_efPending.TakeEndedWatched)) : default;
     }
 
     /// <summary>The interceptor for the <see cref="SluiceCache"/> registered in <paramref name="services"/>.</summary>
@@ -177,6 +201,7 @@ internal sealed partial class SluiceInterceptor
             if (!_registered)
             {
                 FlowWrites.OnAmbient(_cache, _ambientWrites);
+                FlowWrites.BeforeRead(_cache, _beforeRead);
                 _registered = true;
             }
         }
@@ -431,6 +456,7 @@ internal sealed partial class SluiceInterceptor
     )
     {
         Publish(() => Joining(connection, result));
+        Joined(result, eventData);
         AddProbe(eventData);
         return result;
     }
@@ -443,6 +469,7 @@ internal sealed partial class SluiceInterceptor
     )
     {
         await PublishAsync(() => Joining(connection, result)).ConfigureAwait(false);
+        Joined(result, eventData);
         AddProbe(eventData);
         return result;
     }
@@ -455,6 +482,23 @@ internal sealed partial class SluiceInterceptor
                 .. _efPending.TakeUnlessOn(transaction, connection),
             ]
             : [];
+
+    private void Joined(DbTransaction transaction, TransactionEventData eventData) =>
+        _joinedAs.AddOrUpdate(transaction, new(eventData.TransactionId));
+
+    // Every second while a joined transaction is watched: one the app ends on the DbTransaction, on a connection it
+    // keeps open, raises nothing Sluice sees, and the next read may be on another server, which would serve the old
+    // value until this server's next read. Synchronously, on the timer's thread. A cache being disposed stops it.
+    private void Sweep()
+    {
+        if (_cache.IsDisposed)
+        {
+            _efPending.StopWatching();
+            return;
+        }
+
+        Publish(_efPending.TakeEndedWatched);
+    }
 
     public void TransactionCommitted(
         DbTransaction transaction,
@@ -668,7 +712,11 @@ internal sealed partial class SluiceInterceptor
 
     private List<Dependency> EndedOn(IRelationalConnection connection)
     {
-        var db = connection.DbConnection;
+        if (!_wroteOn.TryGetValue(connection, out var db))
+        {
+            return [];
+        }
+
         return _efPending.TakeOn(
             db,
             keep: transaction =>
@@ -749,7 +797,8 @@ internal sealed partial class SluiceInterceptor
     }
 
     // The save the context has in progress, if it wrote anything, taken unless kept. A save that reports rows written
-    // without a command Sluice saw invalidated nothing, which is logged.
+    // without a command Sluice saw wrote what Sluice can't know, and EF has accepted its changes by now, so it publishes
+    // every type in the model whole, and is logged.
     private Write? Save(DbContext? context, bool keep, int rows = 0)
     {
         if (context is null || Take(_saves, context, keep) is not { } save)
@@ -759,16 +808,31 @@ internal sealed partial class SluiceInterceptor
 
         if (save.Capture is not { } capture)
         {
-            if (rows > 0)
+            if (rows == 0)
             {
-                LogNothingCaptured(rows, context.GetType().Name);
+                return null;
             }
 
-            return null;
+            LogNothingCaptured(rows, context.GetType().Name);
+            var model = context.Model;
+            return new(context, () => EveryType(model), save.RolledBack, Recorded: null);
         }
 
         return new(context, capture.Dependencies, save.RolledBack, capture.Transaction.Ambient);
     }
+
+    private static List<Dependency> EveryType(IModel model) =>
+        [
+            .. model
+                .GetEntityTypes()
+                .Where(entityType =>
+                    !entityType.IsOwned() && entityType.FindPrimaryKey() is not null
+                )
+                .Select(entityType => entityType.GetRootType())
+                .Distinct()
+                .SelectMany(root => ModelSources.AllDependencies(root, sharers: false))
+                .Distinct(),
+        ];
 
     // Which rows a bulk write changed is unknown, so every read of the types it may have written is evicted. EF 10
     // reports ExecuteDelete as ExecuteUpdate (both pass CommandSource.BulkUpdate, its old name), so the statement says
@@ -907,18 +971,49 @@ internal sealed partial class SluiceInterceptor
     )
     {
         var connection = ContextTransaction.Connection(context);
-        _efPending
-            .For(transaction.Ef!, connection.DbConnection, out var ended)
-            .Add(dependencies, undone);
+        var db = connection.DbConnection;
+        _wroteOn.AddOrUpdate(connection, db);
+        if (_watched.TryAdd(db, db))
+        {
+            db.StateChange += Closed;
+        }
+
+        var pending = _efPending.For(transaction.Ef!, db, out var ended);
+        pending.Add(dependencies, undone);
+        if (
+            _joinedAs.TryGetValue(transaction.Ef!, out var joined)
+            && joined.Value == transaction.EfId
+        )
+        {
+            _efPending.Watch(transaction.Ef!, pending);
+        }
+
         AddProbe(connection, transaction.EfId!.Value);
         return ended;
+    }
+
+    // One EF begins for a save of its own commits before the save returns, so only a read from inside the save could
+    // see its writes pending, and a flow without a box isn't logged for it.
+    // A connection that closes, or breaks, holds no transaction, so what its ended one holds publishes, however it
+    // closed: EF raises an event only when it closes the connection itself. Synchronously, as Close and Dispose raise
+    // it.
+    private void Closed(object? sender, StateChangeEventArgs change)
+    {
+        if (sender is DbConnection connection && (change.CurrentState & ConnectionState.Open) == 0)
+        {
+            Publish(() => _efPending.TakeOn(connection));
+        }
     }
 
     private void AddProbe(TransactionEventData eventData)
     {
         if (eventData.Context is { } context)
         {
-            AddProbe(ContextTransaction.Connection(context), eventData.TransactionId);
+            AddProbe(
+                ContextTransaction.Connection(context),
+                eventData.TransactionId,
+                quiet: _saves.TryGetValue(context, out _)
+            );
         }
     }
 
@@ -927,10 +1022,28 @@ internal sealed partial class SluiceInterceptor
     // checked by EF's id for the transaction, not the DbTransaction object, which may be handed out again for another
     // flow's transaction (Npgsql reuses it), and it reports only while the context's connection is still in that
     // transaction. It holds the connection weakly, so the box keeps neither the context nor the transaction alive.
-    private void AddProbe(IRelationalConnection connection, Guid transactionId)
+    private void AddProbe(IRelationalConnection connection, Guid transactionId, bool quiet = false)
     {
         var held = new WeakReference<IRelationalConnection>(connection);
-        FlowWrites.AddProbe(_cache, transactionId, () => PendingIn(held, transactionId));
+        AddFlowProbe(transactionId, () => PendingIn(held, transactionId), quiet);
+    }
+
+    // A flow without a box can't keep the probe, so its cached reads can't see the transaction's writes: logged once
+    // per cache, since the remedy is one call in the app's entry point.
+    private void AddFlowProbe(
+        object key,
+        Func<IReadOnlyCollection<Dependency>> pending,
+        bool quiet = false
+    )
+    {
+        if (
+            !FlowWrites.AddProbe(_cache, key, pending)
+            && !quiet
+            && Interlocked.Exchange(ref _loggedNoFlow, 1) == 0
+        )
+        {
+            LogNoFlow();
+        }
     }
 
     // A transaction committed or rolled back outside EF has ended though EF still holds it: what it held publishes now,
@@ -1001,8 +1114,7 @@ internal sealed partial class SluiceInterceptor
     private void AddProbe(Transaction ambient)
     {
         var held = new WeakReference<Transaction>(ambient);
-        FlowWrites.AddProbe(
-            _cache,
+        AddFlowProbe(
             ambient.TransactionInformation.LocalIdentifier,
             () =>
                 held.TryGetTarget(out var live)
@@ -1168,9 +1280,17 @@ internal sealed partial class SluiceInterceptor
     [LoggerMessage(
         EventId = 6,
         Level = LogLevel.Error,
-        Message = "Sluice saw no command for a save on {Context} that reported {Rows} rows written, so it invalidated nothing for it, and what depends on those rows stays cached until its duration ends. Sluice reads what a save writes from the save's first command (CommandSource.SaveChanges), so a provider or interceptor that writes without one isn't supported."
+        Message = "Sluice saw no command for a save on {Context} that reported {Rows} rows written, so it can't tell what the save wrote, and invalidates every cached read of every entity type in {Context}'s model. Sluice reads what a save writes from the save's first command (CommandSource.SaveChanges), so a provider or interceptor that writes without one isn't supported."
     )]
     private partial void LogNothingCaptured(int rows, string context);
+
+    // Once per cache, like event 5.
+    [LoggerMessage(
+        EventId = 7,
+        Level = LogLevel.Warning,
+        Message = "Sluice saw an EF transaction, or a connection enlisted in a TransactionScope, begin or write on a flow without SluiceFlow.Begin(), so a cached read on that flow can't see what the transaction has written and not committed: it returns the committed value instead of throwing. Call SluiceFlow.Begin() where each request, message or job starts (see Strict reads in the docs). Logged once."
+    )]
+    private partial void LogNoFlow();
 
     // A write that ended on a context, with how to derive what it may have changed, whether a rollback to a savepoint
     // undid it, and the ambient transaction it ran in when its context may not see it where it completes.
@@ -1208,6 +1328,117 @@ internal sealed partial class SluiceInterceptor
         private readonly ConditionalWeakTable<DbTransaction, PendingWrites> _byTransaction = new();
         private readonly ConditionalWeakTable<DbConnection, HashSet<DbTransaction>> _byConnection =
             new();
+
+        // How often the sweep checks the watched records while there are any.
+        public static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(1);
+
+        private readonly TimeProvider _time;
+        private readonly Action _sweep;
+
+        // The records of joined transactions (UseTransaction), which the app ends itself without an EF event, so
+        // every read, and the sweep every second, check whether they've ended (TakeEndedWatched), until they publish.
+        // Their count, read without the lock, so a read with none to check takes no lock. The sweep's timer exists
+        // only while there are any.
+        private readonly List<(
+            WeakReference<DbTransaction> Transaction,
+            PendingWrites Pending
+        )> _watched = [];
+        private volatile int _watchedCount;
+        private ITimer? _sweeping;
+
+        public EfPending(TimeProvider time, Action sweep)
+        {
+            _time = time;
+            _sweep = sweep;
+        }
+
+        public bool AnyWatched => _watchedCount > 0;
+
+        public void Watch(DbTransaction transaction, PendingWrites pending)
+        {
+            lock (_lock)
+            {
+                if (!_watched.Exists(watched => watched.Pending == pending))
+                {
+                    _watched.Add((new(transaction), pending));
+                    _watchedCount = _watched.Count;
+                    _sweeping ??= StartSweeping();
+                }
+            }
+        }
+
+        // Stops watching, for a cache being disposed: what the records hold publishes as the transactions' other
+        // events find them, or not at all once nothing reads the cache.
+        public void StopWatching()
+        {
+            lock (_lock)
+            {
+                _watched.Clear();
+                _watchedCount = 0;
+                StopSweeping();
+            }
+        }
+
+        // The timer outlives the write that started it, so it holds none of that caller's async state (its request,
+        // transaction or trace), as the core's re-publish timers don't. Under the lock.
+        private ITimer StartSweeping()
+        {
+            if (ExecutionContext.IsFlowSuppressed())
+            {
+                return _time.CreateTimer(_ => _sweep(), null, SweepInterval, SweepInterval);
+            }
+
+            using (ExecutionContext.SuppressFlow())
+            {
+                return _time.CreateTimer(_ => _sweep(), null, SweepInterval, SweepInterval);
+            }
+        }
+
+        // Under the lock.
+        private void StopSweeping()
+        {
+            _sweeping?.Dispose();
+            _sweeping = null;
+        }
+
+        // What each watched transaction that has ended holds, taken: committed or rolled back on the DbTransaction, or
+        // its object handed to another connection, since a transaction runs on one. One whose record another caller
+        // took, or that's gone, is no longer watched.
+        public List<Dependency> TakeEndedWatched()
+        {
+            lock (_lock)
+            {
+                var taken = new List<Dependency>();
+                _watched.RemoveAll(watched =>
+                {
+                    if (
+                        !watched.Transaction.TryGetTarget(out var transaction)
+                        || Find(transaction) != watched.Pending
+                    )
+                    {
+                        return true;
+                    }
+
+                    if (
+                        !ContextTransaction.Ended(transaction)
+                        && ContextTransaction.On(transaction, watched.Pending.Connection!)
+                    )
+                    {
+                        return false;
+                    }
+
+                    taken.AddRange(Remove(transaction)!.All());
+                    return true;
+                });
+                _watchedCount = _watched.Count;
+                if (_watchedCount == 0)
+                {
+                    StopSweeping();
+                }
+
+                return taken;
+            }
+        }
 
         // The record for the transaction's writes on the connection, and in ended what the object held from another
         // connection, taken: a transaction that has ended, since one runs on one connection.

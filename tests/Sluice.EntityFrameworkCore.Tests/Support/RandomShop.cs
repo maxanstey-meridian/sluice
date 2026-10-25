@@ -562,7 +562,7 @@ public static class ShopViews
                 new(
                     $"page {slug}",
                     async (db, read, ct) =>
-                        await read.Entity(db.Pages, p => p.Slug, slug)
+                        await (await read.EntityAsync(db.Pages, p => p.Slug, slug, ct))
                             .Select(p => $"{p.Id} {p.Title}")
                             .SingleOrDefaultAsync(ct)
                         ?? "none"

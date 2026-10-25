@@ -32,6 +32,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     private readonly FusionCacheEntryOptions _tagOptions;
     private readonly TimeProvider _time;
     private volatile Func<Transaction, IReadOnlyCollection<Dependency>>? _ambientWrites;
+    private volatile Func<ValueTask>? _beforeRead;
     private readonly Func<object, Exception?>[] _storeChecks;
 
     // Each re-publish window waiting or publishing, removed once it has published, so dispose can fire them and wait
@@ -79,6 +80,24 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     // Transaction.Current for nothing.
     internal void OnAmbient(Func<Transaction, IReadOnlyCollection<Dependency>> pending) =>
         _ambientWrites = pending;
+
+    // What a package runs before every read: publishing writes whose transaction ended without telling it.
+    internal void BeforeRead(Func<ValueTask> step) => _beforeRead = step;
+
+    // The clock the cache times its re-publishes on, for a package's own timers, so a test's fake clock drives both.
+    internal TimeProvider Time => _time;
+
+    // Whether dispose has begun, for a package's timer to stop publishing to a cache that's going away.
+    internal bool IsDisposed
+    {
+        get
+        {
+            lock (_republishing)
+            {
+                return _disposed;
+            }
+        }
+    }
 
     /// <summary>
     /// Returns the cached value for <paramref name="key"/>, or runs <paramref name="compute"/> and caches
@@ -179,6 +198,10 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     {
         // An already-cancelled caller gets neither a hit nor a compute.
         ct.ThrowIfCancellationRequested();
+        if (_beforeRead is { } beforeRead)
+        {
+            await beforeRead().ConfigureAwait(false);
+        }
 
         var options = OptionsFor(name, duration, size);
         var reads = new SluiceReads(name, _services, ct);
@@ -233,13 +256,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         CancellationToken ct
     )
     {
-        var (value, tags, _) = await ComputeAsync(
-                reads,
-                compute,
-                checkedAgainstWrites: true,
-                storeChecks: [],
-                ct
-            )
+        var (value, tags, _) = await ComputeAsync(reads, compute, storeChecks: [], ct)
             .ConfigureAwait(false);
 
         var read = tags.ToHashSet(StringComparer.Ordinal);
@@ -554,13 +571,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         CancellationToken ct
     )
     {
-        var (value, tags, uncached) = await ComputeAsync(
-                reads,
-                compute,
-                checkedAgainstWrites: false,
-                storeChecks,
-                ct
-            )
+        var (value, tags, uncached) = await ComputeAsync(reads, compute, storeChecks, ct)
             .ConfigureAwait(false);
 
         var violated = reads.HasViolation;
@@ -581,15 +592,12 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     }
 
     // Runs the compute, whether its value is to be stored or not: as the flow's compute, outside the caller's ambient
-    // transaction, then the steps it added to run before the store, then closes it and disposes what it held. Returns
-    // the value, the tags it recorded and whether it asked not to be cached; a guard violation is left on reads, for
-    // the caller to check. The compute's own exception is rethrown. When its tags are checked against the flow's
-    // uncommitted writes, the steps run even if it asked not to be cached: what they record is checked too. The store
-    // checks (none when nothing will be stored) run last, on a value that will be stored.
+    // transaction, then closes it and disposes what it held. Returns the value, the tags it recorded and whether it
+    // asked not to be cached; a guard violation is left on reads, for the caller to check. The compute's own exception
+    // is rethrown. The store checks (none when nothing will be stored) run last, on a value that will be stored.
     private static async Task<(TValue Value, string[] Tags, bool Uncached)> ComputeAsync<TValue>(
         SluiceReads reads,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,
-        bool checkedAgainstWrites,
         Func<object, Exception?>[] storeChecks,
         CancellationToken ct
     )
@@ -616,7 +624,6 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
             try
             {
                 value = await compute(reads, ct).ConfigureAwait(false);
-                await reads.RunBeforeStoreAsync(checkedAgainstWrites).ConfigureAwait(false);
 
                 // On the compute's flow, before what it holds is disposed. A value that won't be stored isn't
                 // served to anyone else, so it isn't checked.

@@ -2,7 +2,6 @@ using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Sluice.EntityFrameworkCore;
-using Sluice.Infrastructure;
 
 namespace Sluice;
 
@@ -11,8 +10,8 @@ namespace Sluice;
 /// </summary>
 /// <remarks>
 /// Every EF query on <see cref="Db{TContext}(SluiceReads)"/>'s context records each entity type it reads, so any
-/// write to one of them evicts the value. <see cref="Entity{T}(SluiceReads, DbSet{T}, object)"/>, its unique-column
-/// overload and <see cref="Children"/> narrow that for their own rows: only a write to that row, or to the rows under
+/// write to one of them evicts the value. <see cref="Entity{T}(SluiceReads, DbSet{T}, object)"/>,
+/// <see cref="EntityAsync"/> and <see cref="Children"/> narrow that for their own rows: only a write to that row, or to the rows under
 /// that parent, evicts it. Inside a compute, EF commands on any
 /// other context throw, unless they run in the fetch of <c>read.From(dependency, fetch)</c>, and so do writes, reads
 /// inside a transaction, and reads Sluice can't track: raw SQL, database functions, views and keyless types, query
@@ -180,14 +179,14 @@ public static class SluiceReadsExtensions
     /// table, a save that updates or deletes a <typeparamref name="T"/> can't know the value the database holds, so it
     /// evicts every such reader of <typeparamref name="T"/>, as it does <see cref="Children"/> lists.
     /// <para>
-    /// Once the compute returns, before its value is stored, Sluice also looks up the keys of the rows holding the
-    /// value, ignoring query filters, and records each, so a write by key reaches the reader too:
-    /// <c>set.Dependency(key)</c>, and a keyed bulk write (<c>ForKey</c>) that doesn't touch the column. That's one
-    /// more indexed query per compute; if it fails, the compute fails. Past 100 such rows (a filtered unique index lets
-    /// rows outside its filter share a value), the reader depends on every <typeparamref name="T"/> row instead. The
-    /// primary key, and a type with a composite primary key, run no lookup. Inside a fused fetch
-    /// (<c>read.From(dependency, fetch)</c>), whose context may be gone by then, the reader depends on every
-    /// <typeparamref name="T"/> row instead of looking up.
+    /// Before it returns the query, Sluice looks up the keys of the rows holding the value, ignoring query filters, and
+    /// records each, so a write by key reaches the reader too: <c>set.Dependency(key)</c>, a keyed bulk write
+    /// (<c>ForKey</c>) that doesn't touch the column, and a keyed delete, which publishes the row's key and not its
+    /// value. It looks up first so that whatever row your query then finds was either looked up or got the value
+    /// afterwards, which publishes the value. That's one more indexed query per call; if it fails, the call throws.
+    /// Past 100 such rows (a filtered unique index lets rows outside its filter share a value), the reader depends on
+    /// every <typeparamref name="T"/> row instead. The primary key, and a type with a composite primary key, run no
+    /// lookup.
     /// </para>
     /// </remarks>
     /// <param name="read">The compute's reads.</param>
@@ -198,6 +197,8 @@ public static class SluiceReadsExtensions
     /// alternate key covers in the EF model. The primary key reads as <see cref="Entity{T}(SluiceReads, DbSet{T}, object)"/>.
     /// </param>
     /// <param name="value">The value, of the column's CLR type in the EF model; not null.</param>
+    /// <param name="cancellationToken">Cancels the lookup.</param>
+    /// <returns>A no-tracking query for the rows holding <paramref name="value"/>, to run after the lookup.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="value"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="uniqueColumn"/> doesn't name a property, names it through <c>EF.Property</c> with a name that
@@ -213,11 +214,12 @@ public static class SluiceReadsExtensions
     /// The context isn't configured with <c>UseSluice</c>, or a compute is running and <paramref name="read"/> isn't
     /// the one it was given or the context isn't the one <see cref="Db{TContext}(SluiceReads)"/> returned.
     /// </exception>
-    public static IQueryable<T> Entity<T>(
+    public static async Task<IQueryable<T>> EntityAsync<T>(
         this SluiceReads read,
         DbSet<T> set,
         Expression<Func<T, object?>> uniqueColumn,
-        object value
+        object value,
+        CancellationToken cancellationToken = default
     )
         where T : class
     {
@@ -245,22 +247,11 @@ public static class SluiceReadsExtensions
         {
             read.From(ModelSources.Unique(property).For(value));
 
-            // A composite key isn't recorded: nothing invalidates one row of such a type by key alone. A fused fetch
-            // may query a context of its own and dispose it before the compute returns, when the lookup would run, so
-            // there the whole type stands in for the rows it would find.
+            // A composite key isn't recorded: nothing invalidates one row of such a type by key alone.
             if (entityType.FindPrimaryKey()!.Properties is [var key])
             {
-                if (ActiveCompute.InFetch(read))
-                {
-                    read.From(ModelSources.Entity(entityType).All);
-                }
-                else
-                {
-                    ActiveCompute.BeforeStore(
-                        read,
-                        ct => RecordFoundKeysAsync(read, set, property, key, value, ct)
-                    );
-                }
+                await RecordFoundKeysAsync(read, set, property, key, value, cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
 
@@ -333,8 +324,9 @@ public static class SluiceReadsExtensions
     // a keyed bulk write, which publish no unique column the statement doesn't name. Query filters are ignored, so a
     // row they hide (soft-deleted, say) is recorded too, and a write that brings it back evicts the reader. A filtered
     // unique index lets rows outside its filter share the value, so past the cap the reader depends on the whole type.
-    // It runs after the compute's own query, so the value may have moved in between; that write published the column
-    // after the compute started, which evicts the entry (SLUICE-CORE-003).
+    // It runs before the caller's query, never after: a row that gets the value in between publishes the value, but a
+    // row deleted by key in between publishes only its key, which a lookup after the query would no longer find. Inside
+    // a fused fetch too, while the fetch's context is still open.
     private static async Task RecordFoundKeysAsync<T>(
         SluiceReads read,
         DbSet<T> set,

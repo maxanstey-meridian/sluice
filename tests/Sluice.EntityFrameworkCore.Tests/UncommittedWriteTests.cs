@@ -1,6 +1,8 @@
 using System.Transactions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Npgsql;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
@@ -68,6 +70,9 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
             .Should()
             .BeFalse("the fresh read stored nothing, so what was cached before stayed");
         (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
+        NoFlowWarnings(node)
+            .Should()
+            .BeEmpty("the flow has a box, or the transaction is the ambient one, which needs none");
     }
 
     [Theory]
@@ -134,9 +139,10 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
         await db.SaveChangesAsync();
         var bySlug = await CachedRead.Of(
             node.Cache,
-            (read, ct) =>
-                read.Entity(read.Db<ShopDb>().Pages, p => p.Slug, page.Slug)
-                    .SingleOrDefaultAsync(ct)
+            async (read, ct) =>
+                await (
+                    await read.EntityAsync(read.Db<ShopDb>().Pages, p => p.Slug, page.Slug, ct)
+                ).SingleOrDefaultAsync(ct)
         );
         using var flow = SluiceFlow.Begin();
         await using var transaction = await db.Database.BeginTransactionAsync();
@@ -237,28 +243,50 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
             .WithMessage(Uncommitted);
     }
 
-    // Without SluiceFlow.Begin, an EF transaction is never seen, so the read returns what's committed (the documented
-    // gap); so is an enlisted transaction outside a scope, which isn't Transaction.Current.
+    // Without SluiceFlow.Begin, an EF transaction is never seen, so the read returns what's committed; so is an
+    // enlisted transaction outside a scope, which isn't Transaction.Current. Sluice warns once per cache, and not for
+    // the transaction EF begins for a save of its own, which commits before the save returns.
     [Theory]
     [InlineData(Kind.EfTransaction)]
     [InlineData(Kind.UsedTransaction)]
     [InlineData(Kind.EnlistedTransaction)]
-    public async Task Without_a_flow_box_a_transaction_that_is_not_the_ambient_one_is_not_checked(
+    public async Task Without_a_flow_box_a_transaction_that_is_not_the_ambient_one_is_not_checked_and_warns_once(
         Kind kind
     )
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb(enlist: false);
-        var (ada, _) = await reader.AddCustomers();
+        var (ada, bob) = await reader.AddCustomers();
         var adaRead = await CachedRead.Customer(node.Cache, ada);
+        await using (var plain = postgres.CreateDb(node))
+        {
+            await plain.Rename(bob, "Bob Babbage");
+        }
+
+        NoFlowWarnings(node).Should().BeEmpty("a save's own transaction commits before it returns");
         await using var transaction = await Begin(node, kind);
 
         await transaction.Db.Rename(ada, "Ada Lovelace");
+        await transaction.Db.Rename(bob, "Bob");
 
         (await adaRead.WasEvicted())
             .Should()
             .BeFalse("the cached value from before the save is served");
+        NoFlowWarnings(node)
+            .Should()
+            .ContainSingle()
+            .Which.Message.Should()
+            .Contain("SluiceFlow.Begin()");
     }
+
+    private static IEnumerable<FakeLogRecord> NoFlowWarnings(SluiceNode node) =>
+        node
+            .Logs.GetSnapshot()
+            .Where(record =>
+                record.Category == typeof(SluiceInterceptor).FullName
+                && record.Level == LogLevel.Warning
+                && record.Id.Id == 7
+            );
 
     // A transaction disposed without commit or rollback raises no event, and committed nothing; the provider may hand
     // its DbTransaction object out again for the next one. Disposing it closes the connection EF opened for it, which

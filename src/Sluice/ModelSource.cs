@@ -1,13 +1,10 @@
-using System.ComponentModel;
-
 namespace Sluice.Infrastructure;
 
 /// <summary>
-/// Builds the sources a package derives from a data model, such as the EF Core package's entity types. For Sluice's
-/// own packages; it isn't a supported API, and may change in any release.
+/// Builds the sources a package derives from a data model, such as the EF Core package's entity types. Internal, for
+/// Sluice's own packages (InternalsVisibleTo).
 /// </summary>
-[EditorBrowsable(EditorBrowsableState.Never)]
-public static class ModelSource
+internal static class ModelSource
 {
     /// <summary>
     /// A <see cref="Source{TKey}"/> whose name belongs to the model. It isn't checked against other model sources: a

@@ -4,15 +4,14 @@ Sluice.Query<TValue>.Size.init -> void
 Sluice.Query<TKey, TValue>.Size.get -> long?
 Sluice.Query<TKey, TValue>.Size.init -> void
 Sluice.SluiceReads.DoNotCache() -> void
-Sluice.Infrastructure.FlowWrites
 Sluice.SluiceFlow
-static Sluice.Infrastructure.ActiveCompute.BeforeStore(Sluice.SluiceReads! reads, System.Func<System.Threading.CancellationToken, System.Threading.Tasks.Task!>! step) -> void
-static Sluice.Infrastructure.FlowWrites.AddProbe(Sluice.SluiceCache! cache, object! key, System.Func<System.Collections.Generic.IReadOnlyCollection<Sluice.Dependency!>!>! pending) -> bool
-static Sluice.Infrastructure.FlowWrites.OnAmbient(Sluice.SluiceCache! cache, System.Func<System.Transactions.Transaction!, System.Collections.Generic.IReadOnlyCollection<Sluice.Dependency!>!>! pending) -> void
 static Sluice.SluiceFlow.Begin() -> System.IDisposable!
-Sluice.Infrastructure.ModelSource
-Sluice.Infrastructure.StoreChecks
 Sluice.SluiceCache.Dispose() -> void
 Sluice.SluiceCache.DisposeAsync() -> System.Threading.Tasks.ValueTask
-static Sluice.Infrastructure.ModelSource.Create<TKey>(string! name, System.Func<TKey, string!>! format) -> Sluice.Source<TKey>!
-static Sluice.Infrastructure.StoreChecks.Add(Microsoft.Extensions.DependencyInjection.IServiceCollection! services, System.Func<object!, System.Exception?>! check) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
+*REMOVED*Sluice.Infrastructure.ActiveCompute
+*REMOVED*static Sluice.Infrastructure.ActiveCompute.Hold<T>(Sluice.SluiceReads! reads, System.Func<System.IServiceProvider!, T!>! create) -> T!
+*REMOVED*static Sluice.Infrastructure.ActiveCompute.Held<T>(Sluice.SluiceReads! reads) -> T?
+*REMOVED*static Sluice.Infrastructure.ActiveCompute.InFetch(Sluice.SluiceReads! reads) -> bool
+*REMOVED*static Sluice.Infrastructure.ActiveCompute.QueryName(Sluice.SluiceReads! reads) -> string!
+*REMOVED*static Sluice.Infrastructure.ActiveCompute.Reads.get -> Sluice.SluiceReads?
+*REMOVED*static Sluice.Infrastructure.ActiveCompute.Violate(Sluice.SluiceReads! reads, System.Exception! violation) -> System.Exception!

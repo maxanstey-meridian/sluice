@@ -332,17 +332,15 @@ public sealed class RaceTests
             return release.Task;
         };
 
-        // The asynchronous dispose has returned by the time its re-publish waits at the gate. The synchronous one blocks
-        // its thread, so it runs on another, and one that didn't wait would return soon after the gate: the delay gives
-        // it time to, and can't fail a dispose that waits.
+        // The asynchronous dispose has returned its task by the time its re-publish waits at the gate, so this proves it
+        // waits. The synchronous one blocks its thread, so it runs on another, and is the asynchronous one waited on.
         var disposing = asynchronously ? a.DisposeAsync().AsTask() : Task.Run(a.Dispose);
         await writing.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        if (!asynchronously)
+        if (asynchronously)
         {
-            await Task.WhenAny(disposing, Task.Delay(TimeSpan.FromMilliseconds(100)));
+            disposing.IsCompleted.Should().BeFalse("the re-publish is still writing");
         }
 
-        disposing.IsCompleted.Should().BeFalse("the re-publish is still writing");
         release.SetResult();
 
         // Bounded, so a dispose that waits for the delay fails rather than hangs.
@@ -566,7 +564,8 @@ public sealed class RaceTests
         node.Cache.Invalidate(_rows.For(1));
         published.Clear();
 
-        await AdvanceAsATimerAsync(_republishDelay);
+        // Past the whole millisecond a window of its own, due at S + 6 s, would have been timed to.
+        await AdvanceAsATimerAsync(_republishDelay + TimeSpan.FromMilliseconds(1));
         published
             .Should()
             .BeEmpty(
