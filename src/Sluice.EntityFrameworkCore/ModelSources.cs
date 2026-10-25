@@ -962,7 +962,7 @@ internal static class ModelSources
             && ImpreciseDate(
                 mapping.GetType().Assembly.GetName().Name ?? "",
                 mapping.StoreTypeNameBase,
-                SizeIn(mapping)
+                SizeIn(mapping.StoreType, mapping.StoreTypeNameBase)
             );
     }
 
@@ -970,23 +970,25 @@ internal static class ModelSources
     // precision a provider leaves out of the column doesn't change what it stores, and providers disagree on whether
     // the size lands in the mapping's Precision or its Size. Only a date or time type's, so a character length
     // ("varchar(50)") isn't taken for fractional-second digits.
-    private static int? SizeIn(RelationalTypeMapping mapping)
+    internal static int? SizeIn(string storeType, string storeTypeNameBase)
     {
-        var type = mapping.StoreType;
-        var open = type.IndexOf('(');
+        var open = storeType.IndexOf('(');
         if (
             open < 0
             || !(
-                mapping.StoreTypeNameBase.Contains("date", StringComparison.OrdinalIgnoreCase)
-                || mapping.StoreTypeNameBase.Contains("time", StringComparison.OrdinalIgnoreCase)
+                storeTypeNameBase.Contains("date", StringComparison.OrdinalIgnoreCase)
+                || storeTypeNameBase.Contains("time", StringComparison.OrdinalIgnoreCase)
             )
         )
         {
             return null;
         }
 
-        var end = type.IndexOfAny([')', ','], open);
-        return int.TryParse(type.AsSpan()[(open + 1)..(end < 0 ? type.Length : end)], out var size)
+        var end = storeType.IndexOfAny([')', ','], open);
+        return int.TryParse(
+            storeType.AsSpan()[(open + 1)..(end < 0 ? storeType.Length : end)],
+            out var size
+        )
             ? size
             : null;
     }

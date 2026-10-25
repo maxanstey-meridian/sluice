@@ -211,12 +211,6 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             { "MySQL's timestamp without a size", () => new TimestampDateDb(MySql()), "Made" },
             { "MySQL's datetime without a size", () => new DatetimeDateDb(MySql()), "Made" },
             { "PostgreSQL's time with time zone", () => new TimeOfDayDb(Npgsql()), "Stamped" },
-            { "SQLite's default", () => new DefaultDateDb(Sqlite()), null },
-            {
-                "SQLite with a precision of 3, which its text ignores",
-                () => new MillisecondDateDb(Sqlite()),
-                null
-            },
         };
 
     [Theory]
@@ -250,10 +244,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     private static DbContextOptions MySql() =>
         new DbContextOptionsBuilder().UseMySQL("Server=none").Options;
 
-    private static DbContextOptions Sqlite() =>
-        new DbContextOptionsBuilder().UseSqlite("Data Source=:memory:").Options;
-
-    // Providers the suite doesn't build a model for, by the name EF's provider checks compare, with the size the column
+    // Providers the suite can't build a model for, by the name EF's provider checks compare, with the size the column
     // type carries: SQL Server's datetime takes no size, though EF writes the one the model asks for into its store
     // type; a type without a size is trusted only from a provider known to keep microseconds without one.
     [Theory]
@@ -263,6 +254,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime2", null, false)]
     [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetimeoffset", null, false)]
     [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime2", 3, true)]
+    [InlineData("Microsoft.EntityFrameworkCore.Sqlite", "TEXT", null, false)]
     [InlineData("Pomelo.EntityFrameworkCore.MySql", "timestamp", null, true)]
     [InlineData("Pomelo.EntityFrameworkCore.MySql", "datetime", 6, false)]
     [InlineData("Another.Provider", "datetime", null, true)]
@@ -274,6 +266,21 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         int? size,
         bool imprecise
     ) => ModelSources.ImpreciseDate(provider, storeTypeNameBase, size).Should().Be(imprecise);
+
+    // The size is read from the store type the table is made from, whatever the model asks for (SQLite keeps a
+    // precision out of its TEXT), and only a date or time type's, never a character length.
+    [Theory]
+    [InlineData("datetime(6)", "datetime", 6)]
+    [InlineData("timestamp(3) with time zone", "timestamp", 3)]
+    [InlineData("TIMESTAMP(3)", "TIMESTAMP", 3)]
+    [InlineData("datetime2", "datetime2", null)]
+    [InlineData("TEXT", "TEXT", null)]
+    [InlineData("varchar(50)", "varchar", null)]
+    public void A_date_column_s_size_is_the_one_its_type_carries(
+        string storeType,
+        string storeTypeNameBase,
+        int? size
+    ) => ModelSources.SizeIn(storeType, storeTypeNameBase).Should().Be(size);
 
     public readonly record struct GadgetNo(int Value);
 
