@@ -1,17 +1,1 @@
 #nullable enable
-Sluice.Query<TValue>.Size.get -> long?
-Sluice.Query<TValue>.Size.init -> void
-Sluice.Query<TKey, TValue>.Size.get -> long?
-Sluice.Query<TKey, TValue>.Size.init -> void
-Sluice.SluiceReads.DoNotCache() -> void
-Sluice.SluiceFlow
-static Sluice.SluiceFlow.Begin() -> System.IDisposable!
-Sluice.SluiceCache.Dispose() -> void
-Sluice.SluiceCache.DisposeAsync() -> System.Threading.Tasks.ValueTask
-*REMOVED*Sluice.Infrastructure.ActiveCompute
-*REMOVED*static Sluice.Infrastructure.ActiveCompute.Hold<T>(Sluice.SluiceReads! reads, System.Func<System.IServiceProvider!, T!>! create) -> T!
-*REMOVED*static Sluice.Infrastructure.ActiveCompute.Held<T>(Sluice.SluiceReads! reads) -> T?
-*REMOVED*static Sluice.Infrastructure.ActiveCompute.InFetch(Sluice.SluiceReads! reads) -> bool
-*REMOVED*static Sluice.Infrastructure.ActiveCompute.QueryName(Sluice.SluiceReads! reads) -> string!
-*REMOVED*static Sluice.Infrastructure.ActiveCompute.Reads.get -> Sluice.SluiceReads?
-*REMOVED*static Sluice.Infrastructure.ActiveCompute.Violate(Sluice.SluiceReads! reads, System.Exception! violation) -> System.Exception!

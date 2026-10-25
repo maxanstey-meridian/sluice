@@ -1,17 +1,1 @@
 #nullable enable
-static Sluice.SluiceReadsExtensions.Db<TContext>(this Sluice.SluiceReads! read, System.Action<TContext!, System.IServiceProvider!>! configure) -> TContext!
-static Sluice.SluiceReadsExtensions.EntityAsync<T>(this Sluice.SluiceReads! read, Microsoft.EntityFrameworkCore.DbSet<T!>! set, System.Linq.Expressions.Expression<System.Func<T!, object?>!>! uniqueColumn, object! value, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Linq.IQueryable<T!>!>!
-Sluice.SluiceContextStateAttribute
-Sluice.SluiceContextStateAttribute.SluiceContextStateAttribute() -> void
-Sluice.KeyedRows<T>
-Sluice.KeyedRows<T>.ExecuteDelete() -> int
-Sluice.KeyedRows<T>.ExecuteDeleteAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<int>!
-Sluice.KeyedRows<T>.ExecuteUpdate(System.Action<Microsoft.EntityFrameworkCore.Query.UpdateSettersBuilder<T!>!>! setPropertyCalls) -> int
-Sluice.KeyedRows<T>.ExecuteUpdateAsync(System.Action<Microsoft.EntityFrameworkCore.Query.UpdateSettersBuilder<T!>!>! setPropertyCalls, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<int>!
-Sluice.KeyedRowsExtensions
-static Sluice.KeyedRowsExtensions.ForKey<T>(this System.Linq.IQueryable<T!>! rows, object! key) -> Sluice.KeyedRows<T!>!
-static Sluice.KeyedRowsExtensions.ForKeys<T, TKey>(this System.Linq.IQueryable<T!>! rows, System.Collections.Generic.IEnumerable<TKey>! keys) -> Sluice.KeyedRows<T!>!
-Sluice.SluiceRoundTripsAttribute
-Sluice.SluiceRoundTripsAttribute.SluiceRoundTripsAttribute() -> void
-Sluice.SluiceEntityFrameworkCoreServiceCollectionExtensions
-static Sluice.SluiceEntityFrameworkCoreServiceCollectionExtensions.AddSluiceEntityFrameworkCore(this Microsoft.Extensions.DependencyInjection.IServiceCollection! services) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
