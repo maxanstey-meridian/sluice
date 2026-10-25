@@ -29,6 +29,7 @@ internal static class KeyFolding
             ),
             DateTimeOffset instant => WholeMicroseconds(instant.UtcTicks),
             TimeSpan duration => NearestSecond(duration.Ticks),
+            TimeOnly time => NearestSecond(time.Ticks),
             byte[] bytes => Convert.ToHexString(bytes),
             IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
             _ => value.ToString() ?? string.Empty,
@@ -37,8 +38,8 @@ internal static class KeyFolding
     private static string WholeMicroseconds(long ticks) =>
         (ticks - ticks % TicksPerMicrosecond).ToString(CultureInfo.InvariantCulture);
 
-    // A duration column keeps at least whole seconds: MySQL's time without a size rounds to them, PostgreSQL's interval
-    // keeps microseconds, cut by Npgsql, and SQL Server's time keeps 100 ns. Rounding to the nearest second gives a
+    // MySQL's time without a size rounds to the second, half away from zero; PostgreSQL's interval and time keep
+    // microseconds, cut by Npgsql, and SQL Server's unsized time keeps 100 ns. Rounding to the nearest second gives a
     // value and what each of them stores the same text: a half second is a whole microsecond, so cutting to the
     // microsecond never crosses one. Durations within a second of each other may share a key, which only
     // over-invalidates.

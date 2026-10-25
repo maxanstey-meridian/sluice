@@ -466,8 +466,9 @@ they touch by hand.
 The database may treat two different .NET values as the same key: `1m` and `1.00m`, `"abc"` and
 `"ABC "` in a case-insensitive column. So Sluice normalises (folds) key values, and the values
 `read.EntityAsync` reads a unique column by, before using them: `decimal`s lose trailing zeros, strings are upper-cased without trailing spaces (for
-`citext` and case-insensitive collations), dates are cut to the microsecond, and durations
-(`TimeSpan`) are rounded to the nearest second, which MySQL's `time` rounds to. Folding can
+`citext` and case-insensitive collations), dates are cut to the microsecond, and durations and
+times of day (`TimeSpan`, `TimeOnly`) are rounded to the nearest second, as MySQL's unsized
+`time` rounds them. Folding can
 only make an eviction broader, never miss one. Accent- and culture-sensitive collations aren't
 folded.
 

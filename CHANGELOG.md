@@ -44,6 +44,9 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   runs. Sluice doesn't recognise a key condition in your own `Where`: move `f.Id == id` into
   `ForKey`, rather than keep it in both, which, for an update, names the key column twice and
   evicts whole.
+- **Changed: a `TimeSpan` or `TimeOnly` key, foreign key or unique column folds to the nearest
+  second,** as MySQL's unsized `time` rounds it, so a duration or time of day with a fraction no
+  longer misses readers there. A `TimeOnly` used to fold to the minute.
 - **Breaking: a read by a unique column is `await read.EntityAsync(set, column, value, ct)`, and
   records the row it found.** It replaces `read.Entity(set, column, value)`. Before it returns the
   query, it runs one more query, an indexed lookup of the keys of the rows holding the value,
@@ -86,8 +89,6 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   doesn't lift that: its new rows' keys missed readers. A date type without a size is trusted
   only from PostgreSQL's timestamps, SQL Server's `datetime2` and `datetimeoffset` and SQLite's
   `TEXT`; on another provider, the column type needs a size of 6 or more, such as `datetime(6)`.
-  A `TimeSpan` key, foreign key or unique column folds to the nearest second, which MySQL's
-  unsized `time` rounds to, so a duration with a fraction no longer misses readers there.
 - **Breaking: a context without `UseSluice`, or an EF command with no context, throws inside a
   compute.** Its commands used to go
   unseen, so a compute that read through one cached a value nothing evicted. Sluice now watches
