@@ -159,7 +159,7 @@ Rules a reasonable-looking change could break. Each names the one place that enf
 
 ## SLUICE-CORE-023 A package's before-read step runs before every read
 
-**Rule:** `SluiceCache.BeforeRead` holds one step per cache, a later call replacing it, which every `GetOrSetAsync` awaits once its token is checked, before it reads FusionCache.
+**Rule:** `SluiceCache.BeforeRead` holds one step per cache, a later call replacing it, which every `GetOrSetAsync` awaits before it reads FusionCache.
 **Why:** the EF package publishes there what a transaction that ended without telling it wrote (SLUICE-EF-007), so the read doesn't serve what it changed.
 **Accepts:** one volatile read per call, plus the step itself once a package has registered one.
 **Owner:** `SluiceCache.BeforeRead` and `SluiceCache.GetOrSetAsync`, registered through `FlowWrites.BeforeRead`.

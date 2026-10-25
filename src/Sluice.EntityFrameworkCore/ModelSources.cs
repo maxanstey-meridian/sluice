@@ -949,28 +949,36 @@ internal static class ModelSources
                 property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
             );
 
-    // Store types that round a date unless given a precision: SQL Server's, which take none, and MySQL's datetime(6)
-    // is precise.
-    private static readonly HashSet<string> _impreciseUnsized = new(
-        StringComparer.OrdinalIgnoreCase
-    )
-    {
-        "datetime",
-        "smalldatetime",
-    };
-
     private static bool Imprecise(IProperty property, RelationalTypeMapping mapping)
     {
         var provider = mapping.Converter?.ProviderClrType ?? mapping.ClrType;
         var stored = Nullable.GetUnderlyingType(provider) ?? provider;
-        var precision = property.GetPrecision() ?? mapping.Precision;
         return (stored == typeof(DateTime) || stored == typeof(DateTimeOffset))
-            && (
-                string.Equals(mapping.StoreTypeNameBase, "date", StringComparison.OrdinalIgnoreCase)
-                || precision is < 6
-                || (precision is null && _impreciseUnsized.Contains(mapping.StoreTypeNameBase))
+            && ImpreciseDate(
+                mapping.GetType().Name,
+                mapping.StoreType,
+                mapping.StoreTypeNameBase,
+                property.GetPrecision() ?? mapping.Precision
             );
     }
+
+    // Judged by the store type and the provider's mapping, not the precision the model asks for alone: date and
+    // smalldatetime always round; SQL Server's datetime rounds to about 3 ms whatever size the model gives it, though
+    // EF writes that size into the store type ("datetime(6)"), so it's told from MySQL's precise datetime(6) by its
+    // mapping class; another provider's datetime without a size rounds; any type, below a size of 6.
+    internal static bool ImpreciseDate(
+        string mappingType,
+        string storeType,
+        string storeTypeNameBase,
+        int? precision
+    ) =>
+        storeTypeNameBase.Equals("date", StringComparison.OrdinalIgnoreCase)
+        || storeTypeNameBase.Equals("smalldatetime", StringComparison.OrdinalIgnoreCase)
+        || (
+            storeTypeNameBase.Equals("datetime", StringComparison.OrdinalIgnoreCase)
+            && (mappingType == "SqlServerDateTimeTypeMapping" || !storeType.Contains('('))
+        )
+        || precision is < 6;
 
     // EF's built-ins that give back every value they can load. An enum or number cast into a type that holds every
     // value the column can (int into long, float into double, any integer into decimal), and DateTime ticks and Guid

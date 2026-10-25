@@ -39,11 +39,6 @@ internal sealed partial class SluiceInterceptor
     // has been initialised. Weak, so a context that's dropped mid-save leaves nothing behind.
     private readonly ConditionalWeakTable<DbContext, SaveInProgress> _saves = new();
 
-    // The EF id of the transaction EF last began for a save of the context's own. It commits before the save returns,
-    // so only a read from inside the save could see its writes pending, and a write in it on a flow without a box
-    // isn't logged (event 7). By id, since EF begins a new one for each such save.
-    private readonly ConditionalWeakTable<DbContext, StrongBox<Guid>> _saveTransaction = new();
-
     // What a bulk write (ExecuteUpdate, ExecuteDelete) took when EF initialised its command, held against the command
     // until it ends: the keys a keyed one (ForKey, ForKeys) pinned, and the ambient transaction it ran in. Weak, so a
     // command EF drops leaves nothing behind.
@@ -826,10 +821,22 @@ internal sealed partial class SluiceInterceptor
 
             LogNothingCaptured(rows, context.GetType().Name);
             var model = context.Model;
-            return new(context, () => EveryType(model), save.RolledBack, Recorded: null);
+            return new(
+                context,
+                () => EveryType(model),
+                save.RolledBack,
+                Recorded: null,
+                save.OwnTransaction
+            );
         }
 
-        return new(context, capture.Dependencies, save.RolledBack, capture.Transaction.Ambient);
+        return new(
+            context,
+            capture.Dependencies,
+            save.RolledBack,
+            capture.Transaction.Ambient,
+            save.OwnTransaction
+        );
     }
 
     private static List<Dependency> EveryType(IModel model) =>
@@ -938,7 +945,13 @@ internal sealed partial class SluiceInterceptor
                 return () => [.. _efPending.TakeMadeOn(ef, connection), .. write.Derive()];
             }
 
-            var ended = Defer(write.Context, transaction, write.Derive(), write.Undone);
+            var ended = Defer(
+                write.Context,
+                transaction,
+                write.Derive(),
+                write.Undone,
+                write.OwnTransaction
+            );
             return ended.Count > 0 ? () => ended : null;
         }
 
@@ -978,7 +991,8 @@ internal sealed partial class SluiceInterceptor
         DbContext context,
         ContextTransaction transaction,
         List<Dependency> dependencies,
-        bool undone
+        bool undone,
+        Guid? ownTransaction
     )
     {
         var connection = ContextTransaction.Connection(context);
@@ -997,11 +1011,7 @@ internal sealed partial class SluiceInterceptor
         }
 
         var id = transaction.EfId!.Value;
-        AddProbe(
-            connection,
-            id,
-            quiet: _saveTransaction.TryGetValue(context, out var own) && own.Value == id
-        );
+        AddProbe(connection, id, quiet: id == ownTransaction);
         return ended;
     }
 
@@ -1022,9 +1032,9 @@ internal sealed partial class SluiceInterceptor
     {
         if (eventData.Context is { } context)
         {
-            if (_saves.TryGetValue(context, out _))
+            if (_saves.TryGetValue(context, out var save))
             {
-                _saveTransaction.AddOrUpdate(context, new(eventData.TransactionId));
+                save.OwnTransaction = eventData.TransactionId;
             }
 
             AddProbe(ContextTransaction.Connection(context), eventData.TransactionId, quiet: true);
@@ -1177,7 +1187,17 @@ internal sealed partial class SluiceInterceptor
                 && ContextTransaction.On(ef, ContextTransaction.Connection(context).DbConnection)
             )
             {
-                return [.. dependencies, .. Defer(context, now, dependencies, leftover.RolledBack)];
+                return
+                [
+                    .. dependencies,
+                    .. Defer(
+                        context,
+                        now,
+                        dependencies,
+                        leftover.RolledBack,
+                        leftover.OwnTransaction
+                    ),
+                ];
             }
         }
         else if (then.Ambient is { } ambient)
@@ -1307,12 +1327,14 @@ internal sealed partial class SluiceInterceptor
     private partial void LogNoFlow();
 
     // A write that ended on a context, with how to derive what it may have changed, whether a rollback to a savepoint
-    // undid it, and the ambient transaction it ran in when its context may not see it where it completes.
+    // undid it, the ambient transaction it ran in when its context may not see it where it completes, and for a save,
+    // the EF transaction EF began for it.
     private readonly record struct Write(
         DbContext Context,
         Func<List<Dependency>> Derive,
         bool Undone,
-        Transaction? Recorded
+        Transaction? Recorded,
+        Guid? OwnTransaction = null
     );
 
     // What a bulk command took when EF initialised it.
@@ -1325,6 +1347,11 @@ internal sealed partial class SluiceInterceptor
         public CapturedSave? Capture { get; set; }
 
         public bool RolledBack { get; set; }
+
+        // The EF id of the transaction EF began for this save, if it began one. It commits before the save returns, so
+        // only a read from inside the save could see its writes pending, and a write in it on a flow without a box isn't
+        // logged (event 7).
+        public Guid? OwnTransaction { get; set; }
     }
 
     // What EF transactions have pending, each by its DbTransaction, which contexts sharing a transaction have in

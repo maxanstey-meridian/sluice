@@ -245,8 +245,7 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
 
     // Without SluiceFlow.Begin, an EF transaction is never seen, so the read returns what's committed; so is an
     // enlisted transaction outside a scope, which isn't Transaction.Current. Sluice warns once per cache, at the first
-    // write in one, and not for the transaction EF begins for a save of its own, which commits before the save
-    // returns, nor for one that writes nothing.
+    // write in one, and not for one that writes nothing.
     [Theory]
     [InlineData(Kind.EfTransaction)]
     [InlineData(Kind.UsedTransaction)]
@@ -260,26 +259,14 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
         var (ada, bob) = await reader.AddCustomers();
         await using (var plain = postgres.CreateDb(node))
         {
-            // Two rows, so EF begins a transaction of its own for the save.
-            foreach (
-                var customer in await plain
-                    .Customers.Where(c => c.Id == ada || c.Id == bob)
-                    .ToListAsync()
-            )
-            {
-                customer.Name += " Senior";
-            }
-
-            await plain.SaveChangesAsync();
+            await plain.Rename(bob, "Bob Babbage");
             await using var readOnly = await plain.Database.BeginTransactionAsync();
             await plain.NameOf(ada);
         }
 
         NoFlowWarnings(node)
             .Should()
-            .BeEmpty(
-                "a save's own transaction commits before it returns, and the other wrote nothing"
-            );
+            .BeEmpty("the save committed before it returned, and the transaction wrote nothing");
         var adaRead = await CachedRead.Customer(node.Cache, ada);
         await using var transaction = await Begin(node, kind);
 
@@ -294,6 +281,32 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
             .ContainSingle()
             .Which.Message.Should()
             .Contain("SluiceFlow.Begin()");
+    }
+
+    // A conflict ends a save while the transaction EF began for it is still live, so its writes reach that
+    // transaction, which rolls back before the save throws: not warned. One in the app's own transaction is.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Without_a_flow_box_a_conflicting_save_warns_only_in_the_app_s_own_transaction(
+        bool inAppTransaction
+    )
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb(enlist: false);
+        await using var db = postgres.CreateDb(node);
+        var (ada, bob) = await reader.AddCustomers();
+        var customers = await db.Customers.Where(c => c.Id == ada || c.Id == bob).ToListAsync();
+        await using var transaction = inAppTransaction
+            ? await db.Database.BeginTransactionAsync()
+            : null;
+        await reader.Customers.Where(c => c.Id == bob).ExecuteDeleteAsync();
+        customers.ForEach(c => c.Name += " (edited)");
+
+        var conflict = () => db.SaveChangesAsync();
+
+        await conflict.Should().ThrowAsync<DbUpdateConcurrencyException>();
+        NoFlowWarnings(node).Should().HaveCount(inAppTransaction ? 1 : 0);
     }
 
     private static IEnumerable<FakeLogRecord> NoFlowWarnings(SluiceNode node) =>

@@ -220,6 +220,37 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         dependencies.Should().NotThrow(precision);
     }
 
+    // Other providers' mappings, which the suite has no database for: SQL Server's datetime takes no size, though EF
+    // writes the one the model asks for into its store type, so its mapping class tells it from MySQL's datetime(6).
+    [Theory]
+    [InlineData("SqlServerDateTimeTypeMapping", "datetime", "datetime", null, true)]
+    [InlineData("SqlServerDateTimeTypeMapping", "datetime(7)", "datetime", 7, true)]
+    [InlineData("SqlServerDateTimeTypeMapping", "smalldatetime", "smalldatetime", null, true)]
+    [InlineData("SqlServerDateTimeTypeMapping", "datetime2", "datetime2", null, false)]
+    [InlineData("SqlServerDateTimeTypeMapping", "datetime2(3)", "datetime2", 3, true)]
+    [InlineData("MySqlDateTimeTypeMapping", "datetime(6)", "datetime", 6, false)]
+    [InlineData("MySqlDateTimeTypeMapping", "datetime(3)", "datetime", 3, true)]
+    [InlineData("MySqlDateTimeTypeMapping", "datetime", "datetime", null, true)]
+    [InlineData("NpgsqlDateTimeDateTypeMapping", "date", "date", null, true)]
+    [InlineData(
+        "NpgsqlTimestampTzTypeMapping",
+        "timestamp with time zone",
+        "timestamp with time zone",
+        null,
+        false
+    )]
+    public void A_date_store_type_is_imprecise_when_it_rounds_below_the_microsecond(
+        string mappingType,
+        string storeType,
+        string storeTypeNameBase,
+        int? precision,
+        bool imprecise
+    ) =>
+        ModelSources
+            .ImpreciseDate(mappingType, storeType, storeTypeNameBase, precision)
+            .Should()
+            .Be(imprecise);
+
     public readonly record struct GadgetNo(int Value);
 
     public enum Colour
