@@ -15,7 +15,8 @@ internal static class KeyFolding
     // Dividing by one at the maximum scale leaves the smallest scale that holds the value, so 1.00m becomes 1m.
     private const decimal ScaleNormaliser = 1.0000000000000000000000000000m;
 
-    // PostgreSQL stores date-times, durations and times of day to the microsecond, and every connector cuts to it.
+    // PostgreSQL stores date-times, durations and times of day to the microsecond, and every connector sends them
+    // exactly, or cut toward zero, to the microsecond or finer.
     private const long TicksPerMicrosecond = 10;
 
     internal static string Fold(object value) =>

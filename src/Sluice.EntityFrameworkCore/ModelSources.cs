@@ -874,11 +874,11 @@ internal static class ModelSources
     /// isn't known to round-trip: neither marked <see cref="SluiceRoundTripsAttribute"/> nor one of EF's built-ins that
     /// gives back every value it can load. A save reports the value it would write for what EF loaded, so a converter
     /// that loads a stored value and writes back another misses the readers of the stored value. Then refuses one whose
-    /// date the database stores less precisely than to the microsecond, which rounds what a save writes. Checked once
-    /// per model, before any of its sources is built, and before a save or bulk write on it runs.
+    /// date or time the database stores less precisely than to the microsecond, which rounds what a save writes.
+    /// Checked once per model, before any of its sources is built, and before a save or bulk write on it runs.
     /// </summary>
     /// <exception cref="InvalidOperationException">
-    /// The model has such a converter or such a date column; the message names each.
+    /// The model has such a converter or such a date or time column; the message names each.
     /// </exception>
     internal static void EnsureRoundTrips(IModel model) =>
         model.GetOrAddRuntimeAnnotationValue(
@@ -918,8 +918,8 @@ internal static class ModelSources
     // A date or time stored less precisely than the microsecond Sluice folds them to (SQL Server's datetime, about 3 ms,
     // and smalldatetime, a minute; MySQL's datetime, timestamp or time without a size, whole seconds; a date in a date
     // column, or a time-of-day one, no date at all; a size under 6; or a type without a size, unless its provider is
-    // known to keep microseconds without one) holds a value other than the one a save reports for a new row, or a reader asks by, so
-    // the two give the row different key text and an eviction is missed.
+    // known to keep microseconds without one) holds a value other than the one a save reports for a new row, or a
+    // reader asks by, so the two give the row different key text and an eviction is missed.
     private static void EnsurePrecise(IModel model)
     {
         var refused = Keying(model)
@@ -975,7 +975,10 @@ internal static class ModelSources
     // length ("varchar(50)") isn't taken for fractional-second digits.
     internal static int? SizeIn(string storeType, string storeTypeNameBase)
     {
-        var open = storeType.IndexOf('(');
+        // An interval's fractional seconds are the size after its last TO ("INTERVAL DAY(9) TO SECOND(0)"); its days'
+        // size isn't one, so "INTERVAL DAY(9) TO SECOND" has none.
+        var to = storeType.LastIndexOf(" TO ", StringComparison.OrdinalIgnoreCase);
+        var open = storeType.IndexOf('(', to < 0 ? 0 : to);
         if (
             open < 0
             || !(
@@ -1000,37 +1003,40 @@ internal static class ModelSources
     // Judged by the store type and the provider that maps it, the mapping's assembly, which is the name EF's own
     // provider checks (IsSqlServer, IsNpgsql) compare. A date column and a time-of-day one drop part of the value, and
     // smalldatetime rounds to the minute; SQL Server's datetime rounds to about 3 ms whatever size the model gives it,
-    // though EF writes that size into the store type ("datetime(6)"). Otherwise a size under 6 rounds, one of 6 or more
-    // doesn't, and a type without one is trusted only where its provider is known to keep microseconds without one:
-    // MySQL's keep whole seconds, and a provider Sluice doesn't know may round too, which would miss evictions silently.
-    internal static bool ImpreciseDate(string provider, string storeTypeNameBase, int? size)
-    {
-        if (
-            _impreciseDates.Contains(storeTypeNameBase)
-            || (
-                provider == SqlServerProvider
-                && storeTypeNameBase.Equals("datetime", StringComparison.OrdinalIgnoreCase)
-            )
+    // though EF writes that size into the store type ("datetime(6)"). Otherwise as BelowMicroseconds.
+    internal static bool ImpreciseDate(string provider, string storeTypeNameBase, int? size) =>
+        _impreciseDates.Contains(storeTypeNameBase)
+        || (
+            provider == SqlServerProvider
+            && storeTypeNameBase.Equals("datetime", StringComparison.OrdinalIgnoreCase)
         )
-        {
-            return true;
-        }
+        || BelowMicroseconds(_preciseUnsizedDates, provider, storeTypeNameBase, size);
 
-        return ImpreciseTime(provider, storeTypeNameBase, size);
-    }
-
-    // A duration or time of day, and a date past the types that always drop part of it: a size under 6 rounds, one of
-    // 6 or more doesn't, and a type without one is trusted only where its provider is known to keep microseconds
-    // without one.
+    // A duration or time of day, as BelowMicroseconds.
     internal static bool ImpreciseTime(string provider, string storeTypeNameBase, int? size) =>
+        BelowMicroseconds(_preciseUnsizedTimes, provider, storeTypeNameBase, size);
+
+    // A size under 6 rounds, one of 6 or more doesn't, and a type without one is trusted only where its provider is
+    // known to keep microseconds without one: MySQL's keep whole seconds, and a provider Sluice doesn't know may round
+    // too, which would miss evictions silently.
+    private static bool BelowMicroseconds(
+        Dictionary<string, HashSet<string>> preciseUnsized,
+        string provider,
+        string storeTypeNameBase,
+        int? size
+    ) =>
         size is { } digits
             ? digits < 6
             : !(
-                _preciseUnsized.TryGetValue(provider, out var precise)
+                preciseUnsized.TryGetValue(provider, out var precise)
                 && precise.Contains(storeTypeNameBase)
             );
 
     private const string SqlServerProvider = "Microsoft.EntityFrameworkCore.SqlServer";
+
+    private const string NpgsqlProvider = "Npgsql.EntityFrameworkCore.PostgreSQL";
+
+    private const string SqliteProvider = "Microsoft.EntityFrameworkCore.Sqlite";
 
     // Types that drop part of a date whatever their size: a date, a time of day, and smalldatetime's minutes.
     private static readonly HashSet<string> _impreciseDates = new(StringComparer.OrdinalIgnoreCase)
@@ -1043,33 +1049,42 @@ internal static class ModelSources
         "time without time zone",
     };
 
-    // The types each provider keeps to the microsecond or better without a size: PostgreSQL's timestamps, interval and
-    // time; SQL Server's datetime2, datetimeoffset and time, to 100 ns; and SQLite's text, written to 100 ns. A time
-    // type here never trusts a date: ImpreciseDate refuses those first.
-    private static readonly Dictionary<string, HashSet<string>> _preciseUnsized = new()
+    // The date types each provider keeps to the microsecond or better without a size: PostgreSQL's timestamps, SQL
+    // Server's datetime2 and datetimeoffset, to 100 ns, and SQLite's text, written to 100 ns.
+    private static readonly Dictionary<string, HashSet<string>> _preciseUnsizedDates = new()
     {
-        ["Npgsql.EntityFrameworkCore.PostgreSQL"] = new(StringComparer.OrdinalIgnoreCase)
+        [NpgsqlProvider] = new(StringComparer.OrdinalIgnoreCase)
         {
             "timestamp",
             "timestamptz",
             "timestamp with time zone",
             "timestamp without time zone",
-            "interval",
-            "time",
-            "time without time zone",
         },
         [SqlServerProvider] = new(StringComparer.OrdinalIgnoreCase)
         {
             "datetime2",
             "datetimeoffset",
-            "time",
         },
-        ["Microsoft.EntityFrameworkCore.Sqlite"] = new(StringComparer.OrdinalIgnoreCase) { "TEXT" },
+        [SqliteProvider] = new(StringComparer.OrdinalIgnoreCase) { "TEXT" },
+    };
+
+    // The duration and time-of-day types each provider keeps to the microsecond or better without a size:
+    // PostgreSQL's interval and time, SQL Server's time, to 100 ns, and SQLite's text, written to 100 ns.
+    private static readonly Dictionary<string, HashSet<string>> _preciseUnsizedTimes = new()
+    {
+        [NpgsqlProvider] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "interval",
+            "time",
+            "time without time zone",
+        },
+        [SqlServerProvider] = new(StringComparer.OrdinalIgnoreCase) { "time" },
+        [SqliteProvider] = new(StringComparer.OrdinalIgnoreCase) { "TEXT" },
     };
 
     // EF's built-ins that give back every value they can load. An enum or number cast into a type that holds every
-    // value the column can (int into long, float into double, any integer into decimal), and DateTime ticks and Guid
-    // bytes, which construct exactly what they read or throw. Off the list: everything that parses text, which accepts
+    // value the column can (int into long, float into double, any integer into decimal), and DateTime and TimeSpan
+    // ticks and Guid bytes, which construct exactly what they read or throw. Off the list: everything that parses text, which accepts
     // more than one spelling of a value; casts that narrow (a long column read as int, a decimal as long) or round;
     // DateTimeToBinaryConverter, whose stored kind bits have spellings ToBinary never writes; and the bool converters,
     // which read every value but the true one as false.
@@ -1079,6 +1094,7 @@ internal static class ModelSources
         if (
             type.IsDefined(typeof(SluiceRoundTripsAttribute), inherit: false)
             || type == typeof(DateTimeToTicksConverter)
+            || type == typeof(TimeSpanToTicksConverter)
             || type == typeof(GuidToBytesConverter)
         )
         {

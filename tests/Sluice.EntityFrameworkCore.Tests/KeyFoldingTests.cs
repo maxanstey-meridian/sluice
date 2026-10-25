@@ -49,7 +49,7 @@ public sealed class KeyFoldingTests
         KeyFolding
             .Fold(duration + TimeSpan.FromTicks(9))
             .Should()
-            .Be(KeyFolding.Fold(duration), "every connector cuts to the microsecond");
+            .Be(KeyFolding.Fold(duration), "no connector sends less than the microsecond");
         KeyFolding
             .Fold(duration + TimeSpan.FromTicks(10))
             .Should()

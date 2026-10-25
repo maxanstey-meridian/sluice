@@ -197,9 +197,10 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         dependencies.Should().NotThrow();
     }
 
-    // Each provider's own mapping of the column, built without a server: PostgreSQL's timestamp keeps microseconds with
-    // or without a size, MySQL's datetime and timestamp keep whole seconds without one.
-    public static TheoryData<string, Func<DbContext>, string?> DateColumns =>
+    // Each provider's own mapping of the column, built without a server: PostgreSQL's timestamp, interval and time keep
+    // microseconds with or without a size; MySQL's datetime, timestamp and time keep whole seconds without one. Each
+    // row names every column it refuses.
+    public static TheoryData<string, Func<DbContext>, string?> DateAndTimeColumns =>
         new()
         {
             { "PostgreSQL's default", () => new DefaultDateDb(Npgsql()), null },
@@ -208,29 +209,51 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             { "MySQL's default", () => new DefaultDateDb(MySql()), null },
             { "MySQL with a precision of 6", () => new MicrosecondDateDb(MySql()), null },
             { "MySQL's datetime(6) by column type", () => new SizedDatetimeDateDb(MySql()), null },
-            { "MySQL's timestamp without a size", () => new TimestampDateDb(MySql()), "Made" },
-            { "MySQL's datetime without a size", () => new DatetimeDateDb(MySql()), "Made" },
-            { "PostgreSQL's time with time zone", () => new TimeOfDayDb(Npgsql()), "Stamped" },
+            {
+                "MySQL's timestamp without a size",
+                () => new TimestampDateDb(MySql()),
+                "Gadget.Made (timestamp)"
+            },
+            {
+                "MySQL's datetime without a size",
+                () => new DatetimeDateDb(MySql()),
+                "Gadget.Made (datetime)"
+            },
+            {
+                "PostgreSQL's time with time zone",
+                () => new TimeOfDayDb(Npgsql()),
+                "Gadget.Stamped (time with time zone)"
+            },
             { "PostgreSQL's interval and time", () => new DefaultTimedDb(Npgsql()), null },
             {
                 "PostgreSQL's interval with a precision of 3",
                 () => new MillisecondTimedDb(Npgsql()),
-                "Lasts"
+                "Gadget.Lasts (interval(3))"
             },
             {
                 "MySQL's time(6), its default for a TimeSpan, and its time for a TimeOnly",
                 () => new DefaultTimedDb(MySql()),
-                "Opens"
+                "Gadget.Opens (time)"
+            },
+            {
+                "MySQL's time(6) by column type for a TimeOnly",
+                () => new SizedTimeOfDayDb(MySql()),
+                null
+            },
+            {
+                "MySQL's TimeOnly with a precision of 6",
+                () => new PreciseTimeOfDayDb(MySql()),
+                null
             },
             {
                 "MySQL's time without a size for a TimeSpan",
                 () => new UnsizedTimedDb(MySql()),
-                "Lasts"
+                "Gadget.Lasts (time), Gadget.Opens (time)"
             },
         };
 
     [Theory]
-    [MemberData(nameof(DateColumns))]
+    [MemberData(nameof(DateAndTimeColumns))]
     public void A_unique_date_or_time_is_refused_where_its_provider_stores_it_to_less_than_the_microsecond(
         string column,
         Func<DbContext> create,
@@ -246,7 +269,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             dependencies
                 .Should()
                 .Throw<InvalidOperationException>(column)
-                .WithMessage($"*Gadget.{refused} *microsecond*");
+                .WithMessage($"Sluice can't key {refused}: *microsecond*");
         }
         else
         {
@@ -293,6 +316,8 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     [InlineData("TEXT", "TEXT", null)]
     [InlineData("varchar(50)", "varchar", null)]
     [InlineData("interval(3)", "interval", 3)]
+    [InlineData("INTERVAL DAY(9) TO SECOND(0)", "INTERVAL DAY", 0)]
+    [InlineData("INTERVAL DAY(9) TO SECOND", "INTERVAL DAY", null)]
     public void A_date_column_s_size_is_the_one_its_type_carries(
         string storeType,
         string storeTypeNameBase,
@@ -447,6 +472,8 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     {
         protected virtual void Lasts(PropertyBuilder<TimeSpan> lasts) { }
 
+        protected virtual void Opens(PropertyBuilder<TimeOnly> opens) { }
+
         protected override void OnModelCreating(ModelBuilder model) =>
             Gadgets(
                 model,
@@ -455,13 +482,24 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
                     gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter());
                     Lasts(gadget.Property(g => g.Lasts));
                     gadget.HasIndex(g => g.Lasts).IsUnique();
-                    gadget.Property(g => g.Opens);
+                    Opens(gadget.Property(g => g.Opens));
                     gadget.HasIndex(g => g.Opens).IsUnique();
                 }
             );
     }
 
     private sealed class DefaultTimedDb(DbContextOptions options) : TimedDb(options);
+
+    private sealed class SizedTimeOfDayDb(DbContextOptions options) : TimedDb(options)
+    {
+        protected override void Opens(PropertyBuilder<TimeOnly> opens) =>
+            opens.HasColumnType("time(6)");
+    }
+
+    private sealed class PreciseTimeOfDayDb(DbContextOptions options) : TimedDb(options)
+    {
+        protected override void Opens(PropertyBuilder<TimeOnly> opens) => opens.HasPrecision(6);
+    }
 
     private sealed class MillisecondTimedDb(DbContextOptions options) : TimedDb(options)
     {
@@ -509,7 +547,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     }
 
     // A typed id marked by its author; an enum stored as its number; a long key stored in an int column, which holds
-    // every value the column can; a DateTime stored as ticks; a Guid stored as bytes.
+    // every value the column can; a DateTime and a TimeSpan stored as ticks; a Guid stored as bytes.
     private sealed class TrustedDb(DbContextOptions options) : DbContext(options)
     {
         protected override void OnModelCreating(ModelBuilder model)
@@ -523,6 +561,8 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             gadget.HasOne<Shelf>().WithMany().HasForeignKey(g => g.ShelfId);
             gadget.Property(g => g.Made).HasConversion(new DateTimeToTicksConverter());
             gadget.HasIndex(g => g.Made).IsUnique();
+            gadget.Property(g => g.Lasts).HasConversion(new TimeSpanToTicksConverter());
+            gadget.HasIndex(g => g.Lasts).IsUnique();
             gadget.Property(g => g.Tag).HasConversion(new GuidToBytesConverter());
             gadget.HasIndex(g => g.Tag).IsUnique();
             model.Entity<Shelf>().ToTable("shelves_that_do_not_exist");

@@ -44,10 +44,11 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   runs. Sluice doesn't recognise a key condition in your own `Where`: move `f.Id == id` into
   `ForKey`, rather than keep it in both, which, for an update, names the key column twice and
   evicts whole.
-- **Changed: a `TimeSpan` or `TimeOnly` key, foreign key or unique column folds to the
+- **Breaking: a `TimeSpan` or `TimeOnly` key, foreign key or unique column folds to the
   microsecond, as dates do, and its column is checked like a date's:** a size under 6, or no
   size outside PostgreSQL's `interval` and `time`, SQL Server's `time` and SQLite's `TEXT`
-  (MySQL's unsized `time` keeps whole seconds), is refused at first use. A `TimeSpan` used to
+  (MySQL's unsized `time` keeps whole seconds), is refused at first use. Oracle's MySQL provider
+  maps a `TimeOnly` to an unsized `time`, so give it `HasPrecision(6)`. A `TimeSpan` used to
   fold to 100 ns and a `TimeOnly` to the minute, so a value the database rounded missed readers.
 - **Breaking: a read by a unique column is `await read.EntityAsync(set, column, value, ct)`, and
   records the row it found.** It replaces `read.Entity(set, column, value)`. Before it returns the
@@ -80,8 +81,8 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   the readers of the stored value stale. Sluice now refuses the model, the first time it uses
   it, with `InvalidOperationException` naming each such property, unless the converter's class
   is marked `[SluiceRoundTrips]` (your promise that it round-trips) or is one of EF's lossless
-  built-ins: `EnumToNumberConverter`, a widening `CastingConverter`, `DateTimeToTicksConverter`
-  and `GuidToBytesConverter`. Every typed-id converter needs the mark, and one written as
+  built-ins: `EnumToNumberConverter`, a widening `CastingConverter`, `DateTimeToTicksConverter`,
+  `TimeSpanToTicksConverter` and `GuidToBytesConverter`. Every typed-id converter needs the mark, and one written as
   `HasConversion(id => id.Value, value => new UserId(value))` moves into a class deriving from
   `ValueConverter<TModel, TProvider>` first. Enum-to-string and the other string-parsing
   built-ins need it too, since they accept more than one spelling of a value. A key, foreign key

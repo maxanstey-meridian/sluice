@@ -508,7 +508,8 @@ Without the mark, the first time Sluice uses the model (a read, `Dependency`,
 such property and its converter, before anything is written. These EF built-ins give back
 every value they can load, so they need no mark: `EnumToNumberConverter`, a `CastingConverter`
 into a type that holds every stored value (the same type, a wider integer, any integer into
-`decimal`, `float` into `double`), `DateTimeToTicksConverter` and `GuidToBytesConverter`. The rest
+`decimal`, `float` into `double`), `DateTimeToTicksConverter`, `TimeSpanToTicksConverter` and
+`GuidToBytesConverter`. The rest
 need it, if they round-trip for your data: the string-parsing ones (enum, number or `Guid` to
 string) accept more than one spelling of a value (`"01"`, `" Active"`), a cast that narrows or
 rounds loses values, `DateTimeToBinaryConverter` reads kind bits it never writes, and the bool

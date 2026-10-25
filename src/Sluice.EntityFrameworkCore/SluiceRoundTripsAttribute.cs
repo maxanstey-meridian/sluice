@@ -4,8 +4,8 @@ namespace Sluice;
 /// Marks an EF Core value converter that round-trips: converting any value the column can hold to .NET and back gives
 /// that same stored value. Sluice refuses a model with a converter on a key, foreign key or unique column unless it
 /// carries this, or is one of EF's built-ins that does (<c>EnumToNumberConverter</c> and the numeric
-/// <c>CastingConverter</c>s into a type that holds every stored value, <c>DateTimeToTicksConverter</c> and
-/// <c>GuidToBytesConverter</c>).
+/// <c>CastingConverter</c>s into a type that holds every stored value, <c>DateTimeToTicksConverter</c>,
+/// <c>TimeSpanToTicksConverter</c> and <c>GuidToBytesConverter</c>).
 /// </summary>
 /// <remarks>
 /// It's your promise, and Sluice can't check it: it never sees the stored value, only what EF loaded. A save
