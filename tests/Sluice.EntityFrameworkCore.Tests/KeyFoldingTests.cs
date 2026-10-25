@@ -41,6 +41,26 @@ public sealed class KeyFoldingTests
     }
 
     [Fact]
+    public void Durations_fold_to_the_nearest_second()
+    {
+        var duration = TimeSpan.FromSeconds(90);
+
+        KeyFolding
+            .Fold(duration + TimeSpan.FromMilliseconds(499.9999))
+            .Should()
+            .Be(KeyFolding.Fold(duration), "MySQL's time without a size rounds to the second");
+        KeyFolding
+            .Fold(duration + TimeSpan.FromMilliseconds(500))
+            .Should()
+            .Be(KeyFolding.Fold(duration + TimeSpan.FromSeconds(1)));
+        KeyFolding
+            .Fold(duration + TimeSpan.FromSeconds(1))
+            .Should()
+            .NotBe(KeyFolding.Fold(duration));
+        KeyFolding.Fold(-duration).Should().NotBe(KeyFolding.Fold(duration));
+    }
+
+    [Fact]
     public void Byte_arrays_fold_by_content()
     {
         KeyFolding

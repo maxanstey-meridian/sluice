@@ -86,6 +86,8 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   doesn't lift that: its new rows' keys missed readers. A date type without a size is trusted
   only from PostgreSQL's timestamps, SQL Server's `datetime2` and `datetimeoffset` and SQLite's
   `TEXT`; on another provider, the column type needs a size of 6 or more, such as `datetime(6)`.
+  A `TimeSpan` key, foreign key or unique column folds to the nearest second, which MySQL's
+  unsized `time` rounds to, so a duration with a fraction no longer misses readers there.
 - **Breaking: a context without `UseSluice`, or an EF command with no context, throws inside a
   compute.** Its commands used to go
   unseen, so a compute that read through one cached a value nothing evicted. Sluice now watches
