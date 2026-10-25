@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
@@ -13,6 +14,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     private static readonly Query<string, Tag> _tag = new("ef-folded-tag");
     private static readonly Query<string, Product> _product = new("ef-folded-product");
     private static readonly Query<int, int> _clash = new("ef-folded-clash");
+    private static readonly Query<int, int> _named = new("ef-folded-named");
 
     [Fact]
     public async Task A_numeric_key_read_as_1_is_evicted_by_the_same_value_written_as_1_00()
@@ -225,6 +227,139 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
 
         dependencies.Should().NotThrow(entryPoint);
     }
+
+    // Every other entry point names it too, each first on a model of its own: the check passes by PostgreSQL's name, so
+    // the database's own error for the missing table comes back, not Sluice's refusal nor a provider no entry point
+    // named.
+    public static TheoryData<string, Func<SluiceNode, DbContext, Task>> ContextEntryPoints =>
+        new()
+        {
+            {
+                "read.Entity",
+                (node, _) =>
+                    Read(node, read => Task.FromResult(read.Entity(Gadgets(read), new GadgetNo(1))))
+            },
+            {
+                "read.EntityAsync",
+                (node, _) =>
+                    Read(
+                        node,
+                        read =>
+                            read.EntityAsync(Gadgets(read), g => g.Made, new DateTime(2026, 1, 1))
+                    )
+            },
+            {
+                "read.Children",
+                (node, _) =>
+                    Read(
+                        node,
+                        read => Task.FromResult(read.Children(Gadgets(read), g => g.ShelfId, 1L))
+                    )
+            },
+            {
+                "a query in a compute",
+                (node, _) => Read(node, read => Task.FromResult<IQueryable<Gadget>>(Gadgets(read)))
+            },
+            {
+                "SaveChanges",
+                async (_, db) =>
+                {
+                    db.Add(new Gadget { Id = new GadgetNo(1), Made = new DateTime(2026, 1, 1) });
+                    try
+                    {
+                        await db.SaveChangesAsync();
+                    }
+                    catch (DbUpdateException failed)
+                        when (failed.InnerException is PostgresException missing)
+                    {
+                        throw missing;
+                    }
+                }
+            },
+            { "ExecuteDelete", (_, db) => db.Set<Gadget>().ExecuteDeleteAsync() },
+        };
+
+    [Theory]
+    [MemberData(nameof(ContextEntryPoints))]
+    public async Task Every_entry_point_names_its_context_s_provider_for_the_date_and_time_check(
+        string entryPoint,
+        Func<SluiceNode, DbContext, Task> call
+    )
+    {
+        await using var node = new SluiceNode(services: services =>
+            services.AddDbContext<NamedProviderDb>(
+                (provider, options) =>
+                    options
+                        .UseNpgsql(postgres.ConnectionString)
+                        .UseSluice(provider)
+                        .EnableServiceProviderCaching(false)
+            )
+        );
+        await using var db = new NamedProviderDb(
+            new DbContextOptionsBuilder<NamedProviderDb>()
+                .UseNpgsql(postgres.ConnectionString)
+                .UseSluice(node.Services)
+                .EnableServiceProviderCaching(false)
+                .Options
+        );
+
+        var run = () => call(node, db);
+
+        (await run.Should().ThrowAsync<PostgresException>(entryPoint))
+            .Which.SqlState.Should()
+            .Be(PostgresErrorCodes.UndefinedTable, entryPoint);
+    }
+
+    // A save that reports rows with no command Sluice saw publishes every type in its model, which builds their sources:
+    // on a model of its own, the check passes by PostgreSQL's name, so the save evicts a reader of the type.
+    [Fact]
+    public async Task A_save_Sluice_saw_no_command_of_names_its_context_s_provider_for_the_date_and_time_check()
+    {
+        await using var node = new SluiceNode();
+        using var reader = new NamedProviderDb(
+            new DbContextOptionsBuilder<NamedProviderDb>()
+                .UseNpgsql("Host=none")
+                .EnableServiceProviderCaching(false)
+                .Options
+        );
+        var gadgets = reader.Set<Gadget>().AllDependencies().ToList();
+        var cached = await CachedRead.Of(
+            node.Cache,
+            (read, _) =>
+            {
+                read.From(gadgets);
+                return Task.CompletedTask;
+            }
+        );
+        await using var db = new NamedProviderDb(
+            new DbContextOptionsBuilder<NamedProviderDb>()
+                .UseNpgsql(postgres.ConnectionString)
+                .UseSluice(node.Services)
+                .AddInterceptors(new SuppressSave(rows: 1))
+                .EnableServiceProviderCaching(false)
+                .Options
+        );
+
+        await db.SaveChangesAsync();
+
+        (await cached.WasEvicted()).Should().BeTrue();
+    }
+
+    private static DbSet<Gadget> Gadgets(SluiceReads read) =>
+        read.Db<NamedProviderDb>().Set<Gadget>();
+
+    private static Task Read(SluiceNode node, Func<SluiceReads, Task<IQueryable<Gadget>>> query) =>
+        node
+            .Cache.GetOrSetAsync(
+                _named,
+                1,
+                async (read, ct) =>
+                {
+                    await (await query(read)).ToListAsync(ct);
+                    return 1;
+                }
+            )
+            .AsTask();
 
     // Each provider's own mapping of the column, built without a server, on a context without UseSluice: PostgreSQL's
     // timestamp, interval and time keep microseconds with or without a size; MySQL's datetime, timestamp and time keep
@@ -560,6 +695,29 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     {
         protected override void Made(PropertyBuilder<DateTime> made) =>
             made.HasColumnType("timestamp");
+    }
+
+    // PostgreSQL's unsized timestamp as a unique column, and a foreign key to read children by, in tables that don't
+    // exist. Every context gets a model of its own, as each test builds it without EF's service provider cache.
+    private sealed class NamedProviderDb(DbContextOptions<NamedProviderDb> options)
+        : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder model)
+        {
+            var gadget = model.Entity<Gadget>();
+            gadget.ToTable("gadgets_that_do_not_exist");
+            gadget
+                .Ignore(g => g.ParentId)
+                .Ignore(g => g.Stamped)
+                .Ignore(g => g.Lasts)
+                .Ignore(g => g.Opens)
+                .Ignore(g => g.Tag);
+            gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter());
+            gadget.Property(g => g.Made).HasColumnType("timestamp");
+            gadget.HasIndex(g => g.Made).IsUnique();
+            gadget.HasOne<Shelf>().WithMany().HasForeignKey(g => g.ShelfId);
+            model.Entity<Shelf>().ToTable("shelves_that_do_not_exist");
+        }
     }
 
     // EF's own parser, which MySQL's provider uses, reads the 6 as a size, not a precision.

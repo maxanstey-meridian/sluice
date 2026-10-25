@@ -879,13 +879,14 @@ internal static class ModelSources
     /// tells a column type's precision by its provider. Only the context knows which that is: a provider may map a
     /// type with a mapping EF shares between providers (SQLite's <see cref="TimeSpan"/>). Every entry point that builds
     /// a source, saves or writes in bulk calls it first, on a context with <c>UseSluice</c> or not. EF builds a model
-    /// for one provider, so the name never changes.
+    /// for one provider, so the name never changes, and is read only the first time. A context that has a model has a
+    /// provider, so it has a name.
     /// </summary>
     internal static void NameProvider(DbContext context) =>
         context.Model.GetOrAddRuntimeAnnotationValue(
             ProviderAnnotation,
-            static name => name!,
-            context.Database.ProviderName ?? ""
+            static context => context!.Database.ProviderName!,
+            context
         );
 
     /// <inheritdoc cref="NameProvider(DbContext)"/>
