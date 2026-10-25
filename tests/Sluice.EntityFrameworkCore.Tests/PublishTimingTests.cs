@@ -662,6 +662,38 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         (await adaRead.WasEvicted()).Should().BeTrue();
     }
 
+    // Npgsql hands the same DbTransaction object to the next transaction on the connection, so one the app commits and
+    // begins again outside EF still looks live. A context joining the next publishes what the object held, which, for
+    // contexts sharing one live transaction, only over-invalidates.
+    [Fact]
+    public async Task A_transaction_committed_and_begun_again_outside_EF_publishes_what_it_held_when_a_context_joins_the_next()
+    {
+        await using var node = new SluiceNode();
+        await using var reader = postgres.CreateDb();
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        await using var connection = new NpgsqlConnection(postgres.ConnectionString);
+        await connection.OpenAsync();
+        var first = await connection.BeginTransactionAsync();
+        await using (var db = postgres.CreateDb(node, connection: connection))
+        {
+            await db.Database.UseTransactionAsync(first);
+            await db.Rename(ada, "Ada Lovelace");
+        }
+
+        await first.CommitAsync();
+        await using var next = await connection.BeginTransactionAsync();
+        next.Should().BeSameAs(first);
+        (await adaRead.WasEvicted()).Should().BeFalse("the object looks live");
+
+        await using var later = postgres.CreateDb(node, connection: connection);
+        await later.Database.UseTransactionAsync(next);
+
+        (await adaRead.WasEvicted())
+            .Should()
+            .BeTrue("joining the next published what the first held");
+    }
+
     [Fact]
     public async Task The_sweep_of_joined_transactions_holds_none_of_the_writer_s_async_state()
     {
@@ -918,10 +950,12 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
             await owner.Rename(ada, "Ada Lovelace");
         }
 
+        // Joining publishes what the transaction holds early as well as when it ends, since the object may belong to
+        // the next transaction on the connection (Npgsql reuses it); for a shared one that only over-invalidates.
         await guest.Database.UseTransactionAsync(transaction.GetDbTransaction());
         (await adaRead.WasEvicted())
             .Should()
-            .BeFalse("the guest joined the transaction, which hasn't committed");
+            .Be(ownerUsesSluice, "the join published the owner's write");
 
         await guest.Rename(bob, "Bob Babbage");
         (await bobRead.WasEvicted()).Should().BeFalse("the transaction hasn't committed");

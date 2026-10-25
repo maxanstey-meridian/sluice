@@ -44,6 +44,9 @@ any flow, and every second, until it has ended), or its connection beginning ano
 closing (even when you close it yourself) or being disposed, whichever comes first. Until then,
 a read can cache the old value again. A transaction disposed without commit or rollback looks the same to
 Sluice as one committed outside EF, so it's invalidated too, which only evicts more than it
+needs to. Npgsql hands the same `DbTransaction` object to the next transaction on a connection,
+so a context joining one with `UseTransaction` publishes what the object already holds, and
+again when it ends: for contexts sharing one transaction, that too only evicts more than it
 needs to. Commit and roll back through EF (`transaction.Commit()` on the
 `IDbContextTransaction`) and none of this applies.
 

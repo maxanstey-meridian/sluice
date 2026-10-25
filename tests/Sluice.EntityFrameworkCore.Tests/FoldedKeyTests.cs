@@ -222,6 +222,7 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
 
     // Other providers' mappings, which the suite has no database for: SQL Server's datetime takes no size, though EF
     // writes the one the model asks for into its store type, so its mapping class tells it from MySQL's datetime(6).
+    // MySQL's timestamp without a size keeps whole seconds; PostgreSQL's is precise.
     [Theory]
     [InlineData("SqlServerDateTimeTypeMapping", "datetime", "datetime", null, true)]
     [InlineData("SqlServerDateTimeTypeMapping", "datetime(7)", "datetime", 7, true)]
@@ -231,6 +232,16 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     [InlineData("MySqlDateTimeTypeMapping", "datetime(6)", "datetime", 6, false)]
     [InlineData("MySqlDateTimeTypeMapping", "datetime(3)", "datetime", 3, true)]
     [InlineData("MySqlDateTimeTypeMapping", "datetime", "datetime", null, true)]
+    [InlineData("MySqlDateTimeTypeMapping", "timestamp", "timestamp", null, true)]
+    [InlineData("MySqlDateTimeOffsetTypeMapping", "timestamp", "timestamp", null, true)]
+    [InlineData("MySqlDateTimeTypeMapping", "timestamp(6)", "timestamp", 6, false)]
+    [InlineData(
+        "NpgsqlTimestampTypeMapping",
+        "timestamp without time zone",
+        "timestamp without time zone",
+        null,
+        false
+    )]
     [InlineData("NpgsqlDateTimeDateTypeMapping", "date", "date", null, true)]
     [InlineData(
         "NpgsqlTimestampTzTypeMapping",

@@ -472,8 +472,9 @@ folded.
 
 Folding follows PostgreSQL's rules. The test suite runs on PostgreSQL, and other providers are
 untested. A key, foreign key or unique column holding a date the database stores less precisely
-than to the microsecond, such as SQL Server's `datetime` (about 3 ms) or `smalldatetime`, a
-`DateTime` in a `date` column, or a precision under 6, is refused at first use, as an unmarked
+than to the microsecond, such as SQL Server's `datetime` (about 3 ms) or `smalldatetime`,
+MySQL's `datetime` or `timestamp` without a size (whole seconds), a `DateTime` in a `date`
+column, or a precision under 6, is refused at first use, as an unmarked
 converter is, below, and `[SluiceRoundTrips]` doesn't lift it: the database rounds what a save
 writes, so a new row's key and a key a read asks by wouldn't match what the row holds. Store
 such a date in SQL Server's `datetime2`, MySQL's `datetime(6)` or a PostgreSQL `timestamp` of

@@ -127,9 +127,10 @@ no longer than the entry's duration.
   next looks, such as the flow's next cached read, the context's next command, its connection
   closing or, for a transaction EF began, its disposal, since EF raises no event for it. One you
   passed in with `UseTransaction` is checked before every cached read on that server, and every
-  second, so other servers stop serving the old value at most a second after it ended, unless you
-  begin another transaction on that connection outside EF first (Npgsql hands back the same
-  object, which then looks live until that one ends). A read in between can cache the old value. Commit through EF. See
+  second, so other servers stop serving the old value at most a second after it ended. If you
+  begin another transaction on that connection outside EF first, Npgsql hands back the same
+  object, which then looks live: the first's writes publish when a context joins the next, or
+  else when that one ends. A read in between can cache the old value. Commit through EF. See
   [Committing outside EF](/guides/transactions#committing-outside-ef).
 - **A cached read of your own uncommitted writes is caught only where Sluice sees the
   transaction**: a `TransactionScope` by itself, and an EF or enlisted transaction once the

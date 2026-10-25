@@ -454,8 +454,10 @@ internal sealed partial class SluiceInterceptor
     // A context joining a transaction (UseTransaction) on the connection that has it shares what it has pending, so it
     // keeps it, and publishes what any other on the connection has pending, as starting one does. What the
     // DbTransaction object holds from another connection belongs to a transaction that has ended, since a transaction
-    // runs on one connection and the object is on this one now, so that publishes too. One EF refuses publishes
-    // nothing, as starting one doesn't.
+    // runs on one connection and the object is on this one now, so that publishes too. What it holds from this one
+    // publishes now as well, and again when it ends: the app may have committed it and begun another outside EF, which
+    // a provider hands the same object (Npgsql does), and nothing tells that from contexts sharing one transaction, for
+    // which publishing early only over-invalidates. One EF refuses publishes nothing, as starting one doesn't.
     public DbTransaction TransactionUsed(
         DbConnection connection,
         TransactionEventData eventData,
@@ -487,6 +489,7 @@ internal sealed partial class SluiceInterceptor
             [
                 .. _efPending.TakeOn(connection, keep: other => other == transaction),
                 .. _efPending.TakeUnlessOn(transaction, connection),
+                .. _efPending.CopyMadeOn(transaction, connection),
             ]
             : [];
 
@@ -1518,6 +1521,17 @@ internal sealed partial class SluiceInterceptor
             lock (_lock)
             {
                 return UnlessOn(transaction, connection);
+            }
+        }
+
+        // What the transaction has pending from this connection, copied: the record keeps it.
+        public List<Dependency> CopyMadeOn(DbTransaction transaction, DbConnection connection)
+        {
+            lock (_lock)
+            {
+                return Find(transaction) is { } pending && pending.Connection == connection
+                    ? pending.All()
+                    : [];
             }
         }
 

@@ -965,7 +965,8 @@ internal static class ModelSources
     // Judged by the store type and the provider's mapping, not the precision the model asks for alone: date and
     // smalldatetime always round; SQL Server's datetime rounds to about 3 ms whatever size the model gives it, though
     // EF writes that size into the store type ("datetime(6)"), so it's told from MySQL's precise datetime(6) by its
-    // mapping class; another provider's datetime without a size rounds; any type, below a size of 6.
+    // mapping class; MySQL's datetime and timestamp without a size keep whole seconds, as does another provider's
+    // datetime (PostgreSQL's timestamp without one is precise); any type, below a size of 6.
     internal static bool ImpreciseDate(
         string mappingType,
         string storeType,
@@ -977,6 +978,10 @@ internal static class ModelSources
         || (
             storeTypeNameBase.Equals("datetime", StringComparison.OrdinalIgnoreCase)
             && (mappingType == "SqlServerDateTimeTypeMapping" || !storeType.Contains('('))
+        )
+        || (
+            mappingType is "MySqlDateTimeTypeMapping" or "MySqlDateTimeOffsetTypeMapping"
+            && !storeType.Contains('(')
         )
         || precision is < 6;
 
