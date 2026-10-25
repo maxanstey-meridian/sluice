@@ -406,7 +406,7 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         ContextDisposed,
 
         // Passed in with UseTransaction. Returning a pooled context closes the connection the app opened through EF
-        // without an event; its next lease opens it.
+        // without an event, but EF resets the context's services, Sluice's included; its next lease opens it.
         PooledContextLeasedAgain,
 
         // EF began it, on a connection the app created: disposing the context closes nothing, and EF only disposes its
@@ -516,16 +516,21 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         await Dispose(db, sync);
         if (abandoned is Abandoned.PooledContextLeasedAgain)
         {
+            (await reader.NameOf(ada)).Should().Be("Ada Lovelace");
             (await adaRead.WasEvicted())
                 .Should()
-                .BeFalse("returning the context closed its connection without an event");
+                .BeTrue("EF reset the context, which let go of the ended transaction");
             await using var next = await pool.CreateDbContextAsync();
             next.ContextId.InstanceId.Should()
                 .Be(db.ContextId.InstanceId, "the pool hands out the same instance");
 
             // Opened by hand, so nothing closes it before the read.
             await next.Database.OpenConnectionAsync();
-            (await adaRead.WasEvicted()).Should().BeTrue("the next lease opened the connection");
+            (await adaRead.WasEvicted())
+                .Should()
+                .BeFalse(
+                    "the reset took what the connection held, so opening it again finds nothing"
+                );
             return;
         }
 
@@ -540,12 +545,21 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
     // publishes it. The second transaction's write is published only when it commits, not when the first DbConnection
     // is disposed. The first context still holds the object when the app opens its connection again, on another
     // physical connection, so its save runs outside the transaction, commits at once, and publishes at once, leaving
-    // the second transaction's write to its commit.
+    // the second transaction's write to its commit. Begun on the second DbConnection outside EF, the object still holds
+    // the first transaction's record, which the first context's save publishes, as that transaction has ended.
+    public enum Handover
+    {
+        Begun,
+        Joined,
+        BegunOutsideEf,
+    }
+
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(Handover.Begun)]
+    [InlineData(Handover.Joined)]
+    [InlineData(Handover.BegunOutsideEf)]
     public async Task A_DbTransaction_object_Npgsql_hands_to_another_connection_publishes_what_it_held_when_it_begins_there_and_its_next_write_only_when_that_commits(
-        bool joined
+        Handover handover
     )
     {
         await using var node = new SluiceNode();
@@ -580,8 +594,33 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
         (await adaRead.WasEvicted()).Should().BeFalse("nothing has seen the commit yet");
 
         await second.OpenAsync();
+        if (handover is Handover.BegunOutsideEf)
+        {
+            await using var outside = await second.BeginTransactionAsync();
+            outside
+                .Should()
+                .BeSameAs(transaction, "Npgsql hands out the physical connection's object again");
+            (await adaRead.WasEvicted())
+                .Should()
+                .BeFalse("Sluice didn't see the object begin again");
+
+            await first.OpenAsync();
+            earlier.Database.AutoSavepointsEnabled = false;
+            await earlier.Rename(bob, "Bob Babbage");
+            (await reader.NameOf(bob))
+                .Should()
+                .Be("Bob Babbage", "the save ran outside the transaction");
+            (await adaRead.WasEvicted())
+                .Should()
+                .BeTrue(
+                    "the save found the object on another connection, so its own transaction had ended"
+                );
+            await earlier.DisposeAsync();
+            return;
+        }
+
         await using var later = postgres.CreateDb(node, connection: second);
-        if (joined)
+        if (handover is Handover.Joined)
         {
             await later.Database.UseTransactionAsync(await second.BeginTransactionAsync());
         }
@@ -657,16 +696,19 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
             .And.Contain("1 rows");
     }
 
-    // The context that ends the transaction may have no UseSluice: EF raises its commit and rollback events for every
-    // context, and Sluice listens. One that has UseSluice saves before the other joins, which keeps what the
-    // transaction has pending for its commit.
+    // The context that ends the transaction may have no UseSluice: EF raises its commit, rollback and failure events
+    // for every context, and Sluice listens. One that has UseSluice saves before the other joins, which keeps what the
+    // transaction has pending for its commit. A savepoint the owner fails to release is reported as a failed
+    // transaction, which publishes what the transaction holds and keeps it for the commit.
     [Theory]
-    [InlineData(true, false)]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
     public async Task A_save_on_a_context_sharing_another_context_s_transaction_is_evicted_when_the_transaction_ends_whichever_context_ends_it(
         bool ownerUsesSluice,
-        bool rollBack
+        bool rollBack,
+        bool ownerFailsARelease
     )
     {
         await using var node = new SluiceNode();
@@ -679,7 +721,10 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
 
         await using var owner = ownerUsesSluice
             ? postgres.CreateDb(node, connection: connection)
-            : postgres.CreateDb(connection: connection);
+            : postgres.CreateDb(
+                connection: connection,
+                before: ownerFailsARelease ? [new FailReleaseSavepoint()] : []
+            );
         await using var guest = postgres.CreateDb(node, connection: connection);
         await using var transaction = await owner.Database.BeginTransactionAsync();
         if (ownerUsesSluice)
@@ -694,6 +739,38 @@ public sealed class PublishTimingTests(PostgresFixture postgres)
 
         await guest.Rename(bob, "Bob Babbage");
         (await bobRead.WasEvicted()).Should().BeFalse("the transaction hasn't committed");
+
+        // Contexts on connections of their own can't take the transaction up: EF refuses it after raising its used or
+        // started event, and the transaction carries on.
+        const string onAnotherConnection =
+            "The specified transaction is not associated with the current connection.*";
+        await using var joiner = postgres.CreateDb(node);
+        var join = () => joiner.Database.UseTransactionAsync(transaction.GetDbTransaction());
+        await join.Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(onAnotherConnection);
+        await using var beginner = postgres.CreateDb(
+            node,
+            before: [new BeginInstead(transaction.GetDbTransaction())]
+        );
+        var begin = () => beginner.Database.BeginTransactionAsync();
+        await begin
+            .Should()
+            .ThrowAsync<InvalidOperationException>()
+            .WithMessage(onAnotherConnection);
+        (await bobRead.WasEvicted())
+            .Should()
+            .BeFalse(
+                "EF refused the transaction on the other connections, and it hasn't committed"
+            );
+
+        if (ownerFailsARelease)
+        {
+            await owner.Rename(ada, "Ada Lovelace");
+            (await bobRead.WasEvicted())
+                .Should()
+                .BeTrue("the owner's savepoint failed to release, a failed transaction");
+        }
 
         if (rollBack)
         {

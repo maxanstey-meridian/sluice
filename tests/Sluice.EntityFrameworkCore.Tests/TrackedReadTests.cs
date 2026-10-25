@@ -23,7 +23,9 @@ public sealed class TrackedReadTests(PostgresFixture postgres)
         "*Writes can't run inside a compute*run them before or after GetOrSetAsync*";
     private const string WithNoContext =
         "An EF command with no context ran inside a compute (select 1)*can't tell what it read, or which "
-        + "transaction it ran in*add or attach entities before or after GetOrSetAsync.";
+        + "transaction it ran in*add or attach entities before or after GetOrSetAsync. A command the app builds "
+        + "and runs itself without a context has none either: run it before or after GetOrSetAsync, or give it the "
+        + "context it belongs to.";
 
     // The remedies the analysis's reasons end with.
     private const string Declare =

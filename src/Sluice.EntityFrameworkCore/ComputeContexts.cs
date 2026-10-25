@@ -268,6 +268,8 @@ internal sealed class ComputeContexts(IServiceProvider root, AsyncServiceScope s
 
     // What this built goes first: the scope may hold services those contexts use. Each is disposed even when one
     // before it throws, as the compute disposes what it holds (SLUICE-CORE-015), and the caller gets what they threw.
+    // Then it lets go of them: a cached value that holds an ExecutionContext can reach the compute, and through it
+    // this, for as long as the value is cached.
     public async ValueTask DisposeAsync()
     {
         List<Exception>? failures = null;
@@ -282,6 +284,14 @@ internal sealed class ComputeContexts(IServiceProvider root, AsyncServiceScope s
             {
                 (failures ??= []).Add(failure);
             }
+        }
+
+        lock (_lock)
+        {
+            _contexts = [];
+            _built.Clear();
+            _probes.Clear();
+            _configureServices = null;
         }
 
         switch (failures)

@@ -764,13 +764,20 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
     // Npgsql's DbTransaction object belongs to the physical connection, which its pool hands to whichever DbConnection
     // opens next. A context on this flow still holds the object after the app commits it outside EF and closes the
     // connection itself; another flow's transaction runs on the object now, and what that has written isn't this
-    // flow's. One physical connection, in a pool of its own, so the other flow's DbConnection gets it.
-    [Fact]
-    public async Task A_DbTransaction_object_Npgsql_hands_to_another_flow_s_connection_does_not_count_that_flow_s_writes_as_pending_here()
+    // flow's. One physical connection, in a pool of its own, so the other flow's DbConnection gets it. Begun there
+    // outside EF, the object still holds this flow's transaction's record, which this flow's next read publishes, as
+    // that transaction has ended.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_DbTransaction_object_Npgsql_hands_to_another_flow_s_connection_does_not_count_that_flow_s_writes_as_pending_here(
+        bool outsideEf
+    )
     {
         await using var node = new SluiceNode();
         await using var reader = postgres.CreateDb();
         var (ada, bob) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
         var bobRead = await CachedRead.Customer(node.Cache, bob);
         var onePhysical = new NpgsqlConnectionStringBuilder(postgres.ConnectionString)
         {
@@ -791,17 +798,38 @@ public sealed class UncommittedWriteTests(PostgresFixture postgres)
         await first.CloseAsync();
 
         Task other;
+        NpgsqlTransaction? outside = null;
         using (ExecutionContext.SuppressFlow())
         {
             other = Task.Run(async () =>
             {
                 await second.OpenAsync();
+                if (outsideEf)
+                {
+                    outside = await second.BeginTransactionAsync();
+                    return;
+                }
+
                 await later.Database.BeginTransactionAsync();
                 await later.Rename(bob, "Bob Babbage");
             });
         }
 
         await other;
+        if (outsideEf)
+        {
+            outside
+                .Should()
+                .BeSameAs(transaction, "Npgsql hands out the physical connection's object again");
+            (await adaRead.WasEvicted())
+                .Should()
+                .BeTrue(
+                    "the read found the object on another connection, so this flow's transaction had ended"
+                );
+            await outside!.CommitAsync();
+            return;
+        }
+
         later
             .Database.CurrentTransaction!.GetDbTransaction()
             .Should()

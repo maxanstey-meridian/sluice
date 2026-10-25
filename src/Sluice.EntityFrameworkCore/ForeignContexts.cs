@@ -139,7 +139,9 @@ internal sealed class ForeignContexts
             $"An EF command with no context ran inside a compute ({TrackedReads.Statement(command)}), so Sluice "
                 + "can't tell what it read, or which transaction it ran in. EF runs one for a provider's own work, "
                 + "such as taking a key from a HiLo sequence when an entity is added or attached, which writes: "
-                + "add or attach entities before or after GetOrSetAsync."
+                + "add or attach entities before or after GetOrSetAsync. A command the app builds and runs itself "
+                + "without a context has none either: run it before or after GetOrSetAsync, or give it the context it "
+                + "belongs to."
         );
 
     public void OnCompleted() { }

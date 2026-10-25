@@ -13,7 +13,7 @@ benchmarks are in [`benchmarks/`](https://github.com/maxanstey-meridian/sluice/t
   with one query or one `read.Children`, or record the source's `All`, so the value has one dependency.
 - **With EF Core, a save costs about 7 µs more, and a cache miss about 32 µs more with a plain query, or 47 µs more
   through a read helper.** Against a database across a network, where a query takes hundreds of microseconds, that's
-  small, and only misses pay it.
+  small, and hits pay none of it.
 
 ## Cache hits
 

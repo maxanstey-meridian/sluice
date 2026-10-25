@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Sluice.EntityFrameworkCore;
 
 namespace Sluice;
@@ -44,6 +45,10 @@ public static class SluiceDbContextOptionsBuilderExtensions
         {
             return builder;
         }
+
+        ((IDbContextOptionsBuilderInfrastructure)builder).AddOrUpdateExtension(
+            new SluiceOptionsExtension()
+        );
 
         // The reads interceptor first: a command it refuses inside a compute (a save, say) throws before the write
         // interceptor captures it, so a write that never ran publishes nothing.

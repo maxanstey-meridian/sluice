@@ -76,13 +76,15 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   `HasConversion(id => id.Value, value => new UserId(value))` moves into a class deriving from
   `ValueConverter<TModel, TProvider>` first. Enum-to-string and the other string-parsing
   built-ins need it too, since they accept more than one spelling of a value.
-- **Breaking: a context without `UseSluice` throws inside a compute.** Its commands used to go
+- **Breaking: a context without `UseSluice`, or an EF command with no context, throws inside a
+  compute.** Its commands used to go
   unseen, so a compute that read through one cached a value nothing evicted. Sluice now watches
   EF's diagnostic events for every context, and inside a compute such a command throws before
   it runs: a write anywhere, a read outside a fused fetch, and a read in a fused fetch inside a
-  transaction. An EF command with no context (a provider's own, such as Npgsql's HiLo key
-  sequence on `Add`) throws anywhere inside a compute, a fused fetch included. Add `UseSluice` to
-  its options and query it through `read.Db`, or read it in a fused fetch.
+  transaction. Add `UseSluice` to its options and query it through `read.Db`, or read it in a
+  fused fetch. An EF command with no context (a provider's own, such as Npgsql's HiLo key
+  sequence on `Add`) throws anywhere inside a compute, a fused fetch included, where 0.4.0 let a
+  read run: add or attach entities before or after `GetOrSetAsync`, not inside it.
 - **Breaking: a compute's context and its services are made without the caller's request.**
   They were made on the first caller's async flow, so a tenant provider over
   `IHttpContextAccessor` read that caller's tenant. Now the context, its constructor's scoped
@@ -154,20 +156,23 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
 - **Fixed: a `DbTransaction` committed or rolled back outside EF.** Its writes were never
   invalidated. Sluice now sees that it
   ended the next time it looks (the flow's next cached read, the context's next command, the
-  transaction's disposal, its connection beginning another transaction, opening, closing or
-  being disposed) and invalidates then, a pooled context's or a connection you opened yourself
+  transaction's disposal if EF began it, its connection beginning another transaction, opening,
+  closing or being disposed) and invalidates then, a pooled context's or a connection you opened yourself
   included. A transaction disposed without commit or rollback looks the same, so it now
   invalidates what it wrote, at its disposal if EF began it, which only evicts more than needed.
-  Npgsql hands a transaction object to whichever connection next gets its physical connection
-  from the pool, so what a transaction holds belongs to the connection it ran on.
+  A write on a context whose connection you closed and opened again yourself, which runs
+  outside the transaction the context still holds, is invalidated at once rather than with
+  that transaction.
 - **Fixed: a commit or rollback on a context without `UseSluice`,** of a transaction a
   `UseSluice` context saved in through `UseTransaction`, invalidated nothing. It now invalidates
-  at the commit.
+  at the commit or rollback.
 - **Changed: a compute's context never comes from a pool.** A lease went back with what the
   compute's configure set (a tenant, a connection string) into a request's next lease, and kept
   the services an earlier lease gave it. Sluice now builds a pooled registration's context from
-  its options, with its constructor's services from the compute's scope, which costs one context
-  construction per compute.
+  its options, with its constructor's services from the compute's scope. With the checks below,
+  a miss through EF costs about 32 µs more than without Sluice on in-memory SQLite (about 3 µs
+  in 0.4.0), and a save about 7 µs; hits are unchanged. See
+  [Performance](https://maxanstey-meridian.github.io/sluice/misc/performance).
 - **Upgrading:** with a distributed cache, call `ClearAsync` once every node runs 0.5.0. Until
   then neither version evicts the other's entries: every EF dependency is renamed (now after
   tables), and an entry cached before 0.5.0 for a read by a unique column doesn't carry the key

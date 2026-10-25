@@ -12,7 +12,9 @@ public sealed class SluiceReads
     private readonly Lock _lock = new();
     private readonly HashSet<string> _tags = new(StringComparer.Ordinal);
     private readonly IServiceProvider _services;
-    private readonly CancellationToken _ct;
+
+    // The caller's, so it's dropped once the compute is released, as are what it held and the steps it added.
+    private CancellationToken _ct;
 
     // Made on the first Hold: a hit, and a compute that holds nothing, never needs it. In creation order, so they're
     // disposed in reverse: one made later may use one made earlier.
@@ -251,25 +253,32 @@ public sealed class SluiceReads
     }
 
     // Once the compute has closed, so nothing is added after. Disposes every resource, newest first, even when one
-    // throws, so a pooled context still goes back to its pool, then returns what they threw, or null.
+    // throws, so a pooled context still goes back to its pool, then returns what they threw, or null. Then drops them,
+    // the steps and the caller's token: a cached value that keeps the compute's async state (a task, a token's
+    // registration) keeps this through it, and mustn't keep them too. The tags stay: the entry keeps the same strings.
     internal async ValueTask<List<Exception>?> ReleaseAsync()
     {
-        if (_held is null)
+        List<Exception>? failures = null;
+        if (_held is { } held)
         {
-            return null;
+            for (var i = held.Count - 1; i >= 0; i--)
+            {
+                try
+                {
+                    await held[i].Resource.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception failure)
+                {
+                    (failures ??= []).Add(failure);
+                }
+            }
         }
 
-        List<Exception>? failures = null;
-        for (var i = _held.Count - 1; i >= 0; i--)
+        lock (_lock)
         {
-            try
-            {
-                await _held[i].Resource.DisposeAsync().ConfigureAwait(false);
-            }
-            catch (Exception failure)
-            {
-                (failures ??= []).Add(failure);
-            }
+            _held = null;
+            _beforeStore = null;
+            _ct = default;
         }
 
         return failures;

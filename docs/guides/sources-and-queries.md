@@ -290,8 +290,8 @@ then stop evicting each other's entries until those entries expire.
 The constructors check names and key types, and throw `ArgumentException`. Declarations are
 `static readonly` fields, so that happens the first time the class is used, wrapped in a
 `TypeInitializationException`. One test per declaring class finds it first (a clash with an EF
-dependency's name shows only once the model has been used too, so a test that also saves through
-each context finds that):
+dependency's name shows only once the model has been used too, so a test that also saves a change
+through each context finds that):
 
 ```csharp
 [Fact]

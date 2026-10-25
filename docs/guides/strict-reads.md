@@ -75,10 +75,11 @@ helpers check this when you call them, too.
 That includes a context without `UseSluice`, which Sluice can't record a query on. Sluice sees
 its commands through EF's diagnostic events, which EF raises for every context, and inside a
 compute such a command throws before it reaches the database: a write anywhere, a read outside a
-[fused fetch](#the-declared-route), and a read in one inside a transaction. An EF command with no
-context at all (a provider's own, such as a sequence generator's) throws anywhere inside a
-compute. Add `.UseSluice(services)` to that context's options and
-query it through `read.Db`, or read it in a fused fetch with a source you declare. Raw ADO.NET
+[fused fetch](#the-declared-route), and a read in one inside a transaction. Add
+`.UseSluice(services)` to that context's options and query it through `read.Db`, or read it in a
+fused fetch with a source you declare. An EF command with no context at all (a provider's own,
+such as a sequence generator's on `Add`) throws anywhere inside a compute: add or attach
+entities outside the compute. Raw ADO.NET
 and Dapper aren't EF commands, so they're still not seen: see
 [What isn't checked](#what-isn-t-checked).
 

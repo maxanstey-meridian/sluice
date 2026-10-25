@@ -305,29 +305,51 @@ public sealed class RaceTests
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#3", "it's published again once");
     }
 
-    // Node A's pending re-publish reaches node B as it's disposed, so B's value cached in between is evicted.
+    // Node A's pending re-publish reaches node B as it's disposed, so B's value cached in between is evicted. A's
+    // distributed cache write holds the re-publish until the test lets it go, so the dispose must still be waiting.
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Disposing_the_cache_publishes_pending_re_invalidations_at_once_and_throws_nothing(
+    public async Task Disposing_the_cache_publishes_pending_re_invalidations_at_once_waits_for_them_and_throws_nothing(
         bool asynchronously
     )
     {
         var l2 = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
+        var gated = new GatedDistributedCache(l2);
         var bus = Guid.NewGuid().ToString();
-        var a = SluiceNode.Clustered(l2, bus, services: OnFakeTime);
+        var a = SluiceNode.Clustered(gated, bus, services: OnFakeTime);
         await using var b = SluiceNode.Clustered(l2, bus);
         var reader = new CountingReader(b.Cache, _view);
         await reader.GetAsync("k", _rows.For(1));
         await a.Cache.InvalidateAsync(_rows.For(1));
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#2");
 
-        // Bounded, so a dispose that waits for the delay fails rather than hangs.
-        Func<Task> dispose = asynchronously
-            ? () => a.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10))
-            : () => Task.Run(a.Dispose).WaitAsync(TimeSpan.FromSeconds(10));
+        var writing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        gated.BeforeSet = () =>
+        {
+            writing.TrySetResult();
+            return release.Task;
+        };
 
-        await dispose.Should().NotThrowAsync();
+        // The asynchronous dispose has returned by the time its re-publish waits at the gate. The synchronous one blocks
+        // its thread, so it runs on another, and one that didn't wait would return soon after the gate: the delay gives
+        // it time to, and can't fail a dispose that waits.
+        var disposing = asynchronously ? a.DisposeAsync().AsTask() : Task.Run(a.Dispose);
+        await writing.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        if (!asynchronously)
+        {
+            await Task.WhenAny(disposing, Task.Delay(TimeSpan.FromMilliseconds(100)));
+        }
+
+        disposing.IsCompleted.Should().BeFalse("the re-publish is still writing");
+        release.SetResult();
+
+        // Bounded, so a dispose that waits for the delay fails rather than hangs.
+        await disposing
+            .Awaiting(call => call.WaitAsync(TimeSpan.FromSeconds(10)))
+            .Should()
+            .NotThrowAsync();
         (await reader.GetAsync("k", _rows.For(1))).Should().Be("k#3");
     }
 
@@ -521,6 +543,66 @@ public sealed class RaceTests
         published.Should().Contain("race-rows:2");
     }
 
+    // An invalidation reads the time before it takes the windows' lock, so under contention invalidations take it out
+    // of order. One that read the time just before a second ended, and takes the lock after one that read it just after,
+    // joins that one's window, due a second later, rather than open a second window, due first. The clock starts on a
+    // whole second, S.
+    [Fact]
+    public async Task An_invalidation_that_takes_the_lock_after_a_later_one_joins_its_window()
+    {
+        await using var node = new SluiceNode(
+            cache => cache.WithOptions(options => options.EnableSyncEventHandlersExecution = true),
+            OnFakeTime
+        );
+        var published = new List<string>();
+        node.Fusion.Events.RemoveByTag += (_, e) => published.Add(e.Tag);
+
+        _time.Advance(TimeSpan.FromSeconds(1) - TimeSpan.FromTicks(1));
+        _time.AfterNextTimestamp = () =>
+        {
+            _time.Advance(TimeSpan.FromTicks(2));
+            node.Cache.Invalidate(_rows.For(2));
+        };
+        node.Cache.Invalidate(_rows.For(1));
+        published.Clear();
+
+        await AdvanceAsATimerAsync(_republishDelay);
+        published
+            .Should()
+            .BeEmpty(
+                "row 1's invalidation, due at S + 6 s on its own, joined row 2's window, due at S + 7 s"
+            );
+
+        await AdvanceAsATimerAsync(TimeSpan.FromSeconds(1));
+        published.Should().BeEquivalentTo(["race-rows:1", "race-rows:2", "race-rows:*"]);
+    }
+
+    // The system timer runs on a coarser clock than the timestamp a window is due on, so it can fire up to one of that
+    // clock's ticks early (15.6 ms on Windows). The window then waits out the rest rather than publish early.
+    [Fact]
+    public async Task A_timer_that_fires_early_does_not_publish_early()
+    {
+        var early = TimeSpan.FromMilliseconds(15.6);
+        _time.TimersFireEarlyBy = early;
+        await using var node = new SluiceNode(
+            cache => cache.WithOptions(options => options.EnableSyncEventHandlersExecution = true),
+            OnFakeTime
+        );
+        var published = new List<string>();
+        node.Fusion.Events.RemoveByTag += (_, e) => published.Add(e.Tag);
+        await node.Cache.InvalidateAsync(_rows.For(1));
+        published.Clear();
+
+        await AdvanceAsATimerAsync(_republishDelay - early);
+        published.Should().BeEmpty("the timer fired, but the window is due 15.6 ms later");
+        await AdvanceAsATimerAsync(early - TimeSpan.FromTicks(1));
+        published.Should().BeEmpty("the window is due a tick later");
+
+        // Within the whole millisecond the rest is rounded up to.
+        await AdvanceAsATimerAsync(TimeSpan.FromMilliseconds(1));
+        published.Should().BeEquivalentTo(["race-rows:1", "race-rows:*"]);
+    }
+
     [Fact]
     public async Task ClearAsync_is_published_again_after_the_delay()
     {
@@ -543,36 +625,96 @@ public sealed class RaceTests
     }
 
     /// <summary>
-    /// A fake clock that counts its timers in whole milliseconds, truncated, as the system's do, so a delay that wasn't
-    /// rounded up fires early; and whose wall clock can be stepped apart from its monotonic timestamp, as an NTP
-    /// correction steps the system's.
+    /// A fake clock whose timers act as the system's: they count whole milliseconds, truncated, so a delay that wasn't
+    /// rounded up fires early; they can fire early by <see cref="TimersFireEarlyBy"/>, as the system's coarse timer
+    /// clock makes them; and they run their callback on the flow of the code that created them, unless it suppressed
+    /// that flow. Its wall clock can be stepped apart from its monotonic timestamp, as an NTP correction steps the
+    /// system's.
     /// </summary>
     private sealed class SystemLikeClock : FakeTimeProvider
     {
         /// <summary>How far the wall clock (<see cref="GetUtcNow"/>) has been stepped from the monotonic timestamp.</summary>
         public TimeSpan WallClockStep { get; set; }
 
+        /// <summary>How much earlier than it's due a new timer fires. One set again with Change fires on time.</summary>
+        public TimeSpan TimersFireEarlyBy { get; set; }
+
+        /// <summary>Runs once, in the next <see cref="GetTimestamp"/>, after it has read the time it returns.</summary>
+        public Action? AfterNextTimestamp { get; set; }
+
         public override DateTimeOffset GetUtcNow() => base.GetUtcNow() + WallClockStep;
 
-        public override long GetTimestamp() => base.GetUtcNow().Ticks;
+        public override long GetTimestamp()
+        {
+            var now = base.GetUtcNow().Ticks;
+            var after = AfterNextTimestamp;
+            AfterNextTimestamp = null;
+            after?.Invoke();
+            return now;
+        }
 
         public override ITimer CreateTimer(
             TimerCallback callback,
             object? state,
             TimeSpan dueTime,
             TimeSpan period
-        ) =>
-            base.CreateTimer(
-                callback,
+        )
+        {
+            // As System.Threading.Timer does; FakeTimeProvider's own run on the flow of whatever advances the clock.
+            var flow = ExecutionContext.Capture();
+            return base.CreateTimer(
+                flow is null
+                    ? callback
+                    : value => ExecutionContext.Run(flow, new ContextCallback(callback), value),
                 state,
-                WholeMilliseconds(dueTime),
+                WholeMilliseconds(dueTime) - TimersFireEarlyBy,
                 WholeMilliseconds(period)
             );
+        }
 
         private static TimeSpan WholeMilliseconds(TimeSpan time) =>
             TimeSpan.FromTicks(
                 time.Ticks / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond
             );
+    }
+
+    /// <summary>A distributed cache that runs <see cref="BeforeSet"/> before each asynchronous write, and awaits it.</summary>
+    private sealed class GatedDistributedCache(IDistributedCache inner) : IDistributedCache
+    {
+        public Func<Task>? BeforeSet { get; set; }
+
+        public async Task SetAsync(
+            string key,
+            byte[] value,
+            DistributedCacheEntryOptions options,
+            CancellationToken token = default
+        )
+        {
+            if (BeforeSet is { } before)
+            {
+                await before().ConfigureAwait(false);
+            }
+
+            await inner.SetAsync(key, value, options, token).ConfigureAwait(false);
+        }
+
+        public byte[]? Get(string key) => inner.Get(key);
+
+        public Task<byte[]?> GetAsync(string key, CancellationToken token = default) =>
+            inner.GetAsync(key, token);
+
+        public void Set(string key, byte[] value, DistributedCacheEntryOptions options) =>
+            inner.Set(key, value, options);
+
+        public void Refresh(string key) => inner.Refresh(key);
+
+        public Task RefreshAsync(string key, CancellationToken token = default) =>
+            inner.RefreshAsync(key, token);
+
+        public void Remove(string key) => inner.Remove(key);
+
+        public Task RemoveAsync(string key, CancellationToken token = default) =>
+            inner.RemoveAsync(key, token);
     }
 
     /// <summary>

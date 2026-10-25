@@ -362,6 +362,8 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     // Adds the tags, or the clear, to the window due at the first whole second at least the delay from now, opening it
     // if no invalidation has yet: one timer and one de-duplicated tag set per second, however many invalidations. Timed
     // on the monotonic timestamp, not the wall clock, which can step back and shorten a joiner's wait below the delay.
+    // Callers read the time before the lock, so they can take it out of order: one that finds a window due later than
+    // its own joins it, since it still waits at least the delay, rather than open a second window for a second gone by.
     private void PublishAgainLater(IEnumerable<string> tags, bool clear)
     {
         var second = _time.TimestampFrequency;
@@ -373,7 +375,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         RepublishWindow? openedAfterDispose = null;
         lock (_republishing)
         {
-            if (_joinable?.Due != due)
+            if (_joinable is null || due > _joinable.Due)
             {
                 _joinable = Open(due, _time.GetElapsedTime(now, due));
                 openedAfterDispose = _disposed ? _joinable : null;
@@ -413,15 +415,39 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         window.Publishing = RepublishAsync(window);
         if (!_disposed)
         {
-            // Rounded up to a whole millisecond, as the system timer counts, so it never fires early.
             window.Timer = _time.CreateTimer(
-                static state => ((RepublishWindow)state!).Fire(),
+                state => Elapsed((RepublishWindow)state!),
                 window,
-                TimeSpan.FromMilliseconds(Math.Ceiling(delay.TotalMilliseconds)),
+                WholeMilliseconds(delay),
                 Timeout.InfiniteTimeSpan
             );
         }
     }
+
+    // The system timer runs on a coarser clock than the timestamp a window is due on, so it can fire up to one of that
+    // clock's ticks (a jiffy, or 15.6 ms on Windows) early: then it's set again for what's left rather than fired. Under
+    // the lock, after the timer is set and before dispose disposes it, so it's never set again once disposed.
+    private void Elapsed(RepublishWindow window)
+    {
+        var early = _time.GetElapsedTime(_time.GetTimestamp(), window.Due);
+        if (early > TimeSpan.Zero)
+        {
+            lock (_republishing)
+            {
+                if (!_disposed)
+                {
+                    window.Timer!.Change(WholeMilliseconds(early), Timeout.InfiniteTimeSpan);
+                    return;
+                }
+            }
+        }
+
+        window.Fire();
+    }
+
+    // Rounded up, since the system timer counts whole milliseconds, truncated.
+    private static TimeSpan WholeMilliseconds(TimeSpan delay) =>
+        TimeSpan.FromMilliseconds(Math.Ceiling(delay.TotalMilliseconds));
 
     // Publishes the window's tags and clear once its timer or dispose fires it. Nothing awaits it but dispose, so every
     // failure ends here: FusionCache has logged a failed write, or was disposed first, at shutdown.

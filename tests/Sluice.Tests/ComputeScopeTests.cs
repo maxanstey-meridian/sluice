@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Transactions;
 using Sluice.Infrastructure;
 using Sluice.Tests.Support;
@@ -14,6 +15,7 @@ public sealed class ComputeScopeTests
     private static readonly Source<int> _rows = new("scope-rows");
     private static readonly Query<string, bool> _query = new("scope-query");
     private static readonly Query<string, object?> _checked = new("scope-checked");
+    private static readonly Query<string, ExecutionContext?> _flowing = new("scope-flowing");
 
     private class Held : IAsyncDisposable
     {
@@ -87,6 +89,65 @@ public sealed class ComputeScopeTests
         late.Should()
             .Throw<InvalidOperationException>()
             .WithMessage("*already returned, so it can't open anything more*");
+    }
+
+    // A cached value can keep the compute's async state, as a task or a token's registration does, and so the compute's
+    // read, which is on it. What the compute held, the steps it added and the caller's token mustn't stay reachable
+    // through that once it's disposed. Nothing but the read references them, so a full collection takes them unless the
+    // read still does.
+    [Fact]
+    public async Task What_a_compute_held_is_not_kept_by_a_value_that_keeps_the_compute_s_async_state()
+    {
+        await using var node = new SluiceNode();
+        WeakReference? held = null;
+        WeakReference? step = null;
+
+        var flow = await GetOrSetWithAToken(
+            node,
+            (read, _) =>
+            {
+                read.From(_rows.For(1));
+                held = new WeakReference(ActiveCompute.Hold(read, _ => new Held()));
+
+                // It captures what it needs, as a step does, so it isn't a cached static delegate.
+                var captured = new object();
+                Func<CancellationToken, Task> added = _ =>
+                {
+                    GC.KeepAlive(captured);
+                    return Task.CompletedTask;
+                };
+                step = new WeakReference(added);
+                ActiveCompute.BeforeStore(read, added);
+                return Task.FromResult(ExecutionContext.Capture());
+            },
+            out var token
+        );
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        flow.Should().NotBeNull();
+        held!
+            .IsAlive.Should()
+            .BeFalse("the compute's read dropped what it held once it was disposed");
+        step!.IsAlive.Should().BeFalse("and the steps it added");
+        token.IsAlive.Should().BeFalse("and the caller's token");
+        GC.KeepAlive(flow);
+    }
+
+    // Passes a token whose source is made in this frame and referenced by nothing else, since a debug build keeps an
+    // async method's temporaries alive.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ValueTask<ExecutionContext?> GetOrSetWithAToken(
+        SluiceNode node,
+        Func<SluiceReads, CancellationToken, Task<ExecutionContext?>> compute,
+        out WeakReference token
+    )
+    {
+        var tokens = new CancellationTokenSource();
+        token = new WeakReference(tokens);
+        return node.Cache.GetOrSetAsync(_flowing, "flow", compute, tokens.Token);
     }
 
     // One made later may use one made earlier, as a context uses its connection.

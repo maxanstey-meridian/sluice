@@ -394,7 +394,7 @@ internal sealed partial class SluiceInterceptor
         DbTransaction result
     )
     {
-        Publish(() => [.. _efPending.TakeOn(connection), .. _efPending.TakeAll(result)]);
+        Publish(() => Starting(connection, result));
         AddProbe(eventData);
         return result;
     }
@@ -406,16 +406,24 @@ internal sealed partial class SluiceInterceptor
         CancellationToken cancellationToken = default
     )
     {
-        await PublishAsync(() => [.. _efPending.TakeOn(connection), .. _efPending.TakeAll(result)])
-            .ConfigureAwait(false);
+        await PublishAsync(() => Starting(connection, result)).ConfigureAwait(false);
         AddProbe(eventData);
         return result;
     }
 
+    // EF checks that the transaction is on the context's connection only after its started and used events, and
+    // refuses one that isn't: one a TransactionStarting interceptor took from another connection, or the app passed to
+    // UseTransaction, which is live there, and leaves the context's own as it was. So none of it publishes.
+    private List<Dependency> Starting(DbConnection connection, DbTransaction transaction) =>
+        ContextTransaction.On(transaction, connection)
+            ? [.. _efPending.TakeOn(connection), .. _efPending.TakeAll(transaction)]
+            : [];
+
     // A context joining a transaction (UseTransaction) on the connection that has it shares what it has pending, so it
     // keeps it, and publishes what any other on the connection has pending, as starting one does. What the
     // DbTransaction object holds from another connection belongs to a transaction that has ended, since a transaction
-    // runs on one connection, so that publishes too.
+    // runs on one connection and the object is on this one now, so that publishes too. One EF refuses publishes
+    // nothing, as starting one doesn't.
     public DbTransaction TransactionUsed(
         DbConnection connection,
         TransactionEventData eventData,
@@ -440,10 +448,13 @@ internal sealed partial class SluiceInterceptor
     }
 
     private List<Dependency> Joining(DbConnection connection, DbTransaction transaction) =>
-        [
-            .. _efPending.TakeOn(connection, except: transaction),
-            .. _efPending.TakeUnlessOn(transaction, connection),
-        ];
+        ContextTransaction.On(transaction, connection)
+            ?
+            [
+                .. _efPending.TakeOn(connection, keep: other => other == transaction),
+                .. _efPending.TakeUnlessOn(transaction, connection),
+            ]
+            : [];
 
     public void TransactionCommitted(
         DbTransaction transaction,
@@ -645,6 +656,26 @@ internal sealed partial class SluiceInterceptor
         return Task.CompletedTask;
     }
 
+    // EF resets a pooled context for its next lease (PoolReset) without an event for a transaction passed to
+    // UseTransaction, which it lets go of, nor for closing a connection it owns. So what the context's connection holds
+    // of transactions that have ended publishes then: one committed or rolled back outside EF, or one closing the
+    // connection ended. One still live on it, on a connection the app owns, which EF leaves open, or before EF closes
+    // its own, keeps what it holds.
+    internal void Reset(IRelationalConnection connection) => Publish(() => EndedOn(connection));
+
+    internal Task ResetAsync(IRelationalConnection connection) =>
+        PublishAsync(() => EndedOn(connection));
+
+    private List<Dependency> EndedOn(IRelationalConnection connection)
+    {
+        var db = connection.DbConnection;
+        return _efPending.TakeOn(
+            db,
+            keep: transaction =>
+                !ContextTransaction.Ended(transaction) && ContextTransaction.On(transaction, db)
+        );
+    }
+
     private void RecordOpening(DbConnection connection, ConnectionEventData eventData)
     {
         if (
@@ -812,7 +843,8 @@ internal sealed partial class SluiceInterceptor
     // An EF transaction committed or rolled back outside EF (on the DbTransaction) has ended though EF still holds it,
     // so what it holds publishes now, with the write. One whose DbTransaction object the provider has handed to another
     // connection (ContextTransaction.On) is that connection's now, and the write ran outside it, so the write publishes
-    // now, and the transaction keeps what it holds. A write whose context can't see the ambient transaction it ran
+    // now, with what the object holds from the context's own connection, whose transaction has ended, and the other
+    // connection's transaction keeps what it holds. A write whose context can't see the ambient transaction it ran
     // in (a TransactionScope that doesn't flow into async code) publishes now, since it may not be in it, and again
     // when that transaction completes, since it may.
     private Func<List<Dependency>>? Route(Write write)
@@ -825,14 +857,10 @@ internal sealed partial class SluiceInterceptor
                 return () => [.. _efPending.TakeAll(ef), .. write.Derive()];
             }
 
-            if (
-                !ContextTransaction.On(
-                    ef,
-                    ContextTransaction.Connection(write.Context).DbConnection
-                )
-            )
+            var connection = ContextTransaction.Connection(write.Context).DbConnection;
+            if (!ContextTransaction.On(ef, connection))
             {
-                return write.Derive;
+                return () => [.. _efPending.TakeMadeOn(ef, connection), .. write.Derive()];
             }
 
             var ended = Defer(write.Context, transaction, write.Derive(), write.Undone);
@@ -907,7 +935,8 @@ internal sealed partial class SluiceInterceptor
 
     // A transaction committed or rolled back outside EF has ended though EF still holds it: what it held publishes now,
     // once, and nothing is pending. Publishing never throws. One whose DbTransaction object the provider has handed to
-    // another connection (ContextTransaction.On) is that connection's, and what it has pending isn't this flow's.
+    // another connection (ContextTransaction.On) is that connection's, and what it has pending isn't this flow's; what
+    // it holds from this flow's connection belongs to a transaction that has ended, so that publishes, as Route does.
     private IReadOnlyCollection<Dependency> PendingIn(
         WeakReference<IRelationalConnection> held,
         Guid transactionId
@@ -929,9 +958,13 @@ internal sealed partial class SluiceInterceptor
             return [];
         }
 
-        return ContextTransaction.On(transaction, live.DbConnection)
-            ? _efPending.Find(transaction)?.Pending() ?? []
-            : [];
+        if (!ContextTransaction.On(transaction, live.DbConnection))
+        {
+            Publish(() => _efPending.TakeMadeOn(transaction, live.DbConnection));
+            return [];
+        }
+
+        return _efPending.Find(transaction)?.Pending() ?? [];
     }
 
     // Publishes the write when the ambient transaction completes, and keeps it as pending until then. The core's
@@ -1213,8 +1246,22 @@ internal sealed partial class SluiceInterceptor
             }
         }
 
-        // Everything the connection's transactions have pending, but the one it's joining, taken.
-        public List<Dependency> TakeOn(DbConnection connection, DbTransaction? except = null)
+        // What the transaction has pending from this connection, taken.
+        public List<Dependency> TakeMadeOn(DbTransaction transaction, DbConnection connection)
+        {
+            lock (_lock)
+            {
+                return Find(transaction) is { } pending && pending.Connection == connection
+                    ? Remove(transaction)!.All()
+                    : [];
+            }
+        }
+
+        // Everything the connection's transactions have pending, but those kept, taken.
+        public List<Dependency> TakeOn(
+            DbConnection connection,
+            Func<DbTransaction, bool>? keep = null
+        )
         {
             if (!_byConnection.TryGetValue(connection, out _))
             {
@@ -1231,7 +1278,7 @@ internal sealed partial class SluiceInterceptor
                 return
                 [
                     .. onConnection
-                        .Where(transaction => transaction != except)
+                        .Where(transaction => keep?.Invoke(transaction) != true)
                         .ToList()
                         .SelectMany(transaction => Remove(transaction)!.All()),
                 ];

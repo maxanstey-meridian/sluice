@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using Sluice.EntityFrameworkCore.Tests.Support;
 
 namespace Sluice.EntityFrameworkCore.Tests;
@@ -100,5 +101,33 @@ public sealed class PoolingTests(PostgresFixture postgres)
         (await adaRead.WasEvicted())
             .Should()
             .BeFalse("the second lease's save doesn't publish what the first lease wrote again");
+    }
+
+    // EF resets a returned context without closing a connection the app owns, so a transaction passed to
+    // UseTransaction on it is still live, and the reset publishes nothing of it.
+    [Fact]
+    public async Task Returning_a_pooled_context_publishes_nothing_of_a_transaction_still_live_on_the_app_s_connection()
+    {
+        await using var connection = new NpgsqlConnection(postgres.ConnectionString);
+        await using var node = new SluiceNode(services: services =>
+            services.AddPooledDbContextFactory<ShopDb>(
+                (sp, options) => options.UseNpgsql(connection).UseSluice(sp),
+                poolSize: 1
+            )
+        );
+        await using var reader = postgres.CreateDb();
+        var (ada, _) = await reader.AddCustomers();
+        var adaRead = await CachedRead.Customer(node.Cache, ada);
+        var pool = node.Services.GetRequiredService<IDbContextFactory<ShopDb>>();
+        await connection.OpenAsync();
+
+        await using (var db = await pool.CreateDbContextAsync())
+        {
+            await db.Database.UseTransactionAsync(await connection.BeginTransactionAsync());
+            await db.Rename(ada, "Ada Lovelace");
+        }
+
+        (await adaRead.WasEvicted()).Should().BeFalse("the transaction is still live");
+        (await reader.NameOf(ada)).Should().Be("Ada", "the transaction hasn't committed");
     }
 }
