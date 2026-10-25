@@ -159,6 +159,7 @@ public static class SluiceReadsExtensions
         ArgumentNullException.ThrowIfNull(set);
         ArgumentNullException.ThrowIfNull(key);
 
+        ModelSources.NameProvider(set);
         var dependency = ModelSources.EntityDependency(set.EntityType, key, nameof(key));
         var query = TrackedReads.Query(set);
 
@@ -237,6 +238,7 @@ public static class SluiceReadsExtensions
         );
         ModelSources.EnsureKeyType(property, value, nameof(value), "value");
         ModelSources.EnsureStored(property, value, nameof(value));
+        ModelSources.NameProvider(set);
         var query = TrackedReads.Query(set);
 
         if (property.IsPrimaryKey())
@@ -314,6 +316,7 @@ public static class SluiceReadsExtensions
         var property = resolved.Properties[0];
         ModelSources.EnsureKeyType(property, principalKey, nameof(principalKey));
         ModelSources.EnsureStored(property, principalKey, nameof(principalKey));
+        ModelSources.NameProvider(set);
         var query = TrackedReads.Query(set);
 
         read.From(ModelSources.ForeignKey(resolved).For(principalKey));

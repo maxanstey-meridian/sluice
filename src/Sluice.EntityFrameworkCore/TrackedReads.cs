@@ -391,6 +391,7 @@ internal sealed partial class TrackedReads : IDbCommandInterceptor, IQueryExpres
     // taken without the mapping check.
     private static Dependency[]? Dependencies(DbContext context, string tag)
     {
+        ModelSources.NameProvider(context);
         var model = context.Model;
         var cache = model.GetOrAddRuntimeAnnotationValue(
             DependenciesAnnotation,

@@ -54,7 +54,7 @@ internal sealed class CapturedSave
     internal static CapturedSave Capture(DbContext context, ContextTransaction transaction)
     {
         // Before the save writes anything: once it has, a refusal could only be logged.
-        ModelSources.EnsureSources(context.Model);
+        ModelSources.EnsureSources(context);
         var save = new CapturedSave(transaction);
         var tracker = context.ChangeTracker;
 

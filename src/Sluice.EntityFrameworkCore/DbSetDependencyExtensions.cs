@@ -34,6 +34,7 @@ public static class DbSetDependencyExtensions
         ArgumentNullException.ThrowIfNull(set);
         ArgumentNullException.ThrowIfNull(key);
 
+        ModelSources.NameProvider(set);
         return ModelSources.EntityDependency(set.EntityType, key, nameof(key));
     }
 
@@ -51,6 +52,7 @@ public static class DbSetDependencyExtensions
         ArgumentNullException.ThrowIfNull(set);
 
         ModelSources.EnsureTable(set.EntityType);
+        ModelSources.NameProvider(set);
         return ModelSources.AllDependencies(set.EntityType);
     }
 }

@@ -197,31 +197,44 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         dependencies.Should().NotThrow();
     }
 
-    // A provider maps some types with a mapping EF shares between providers (SQLite's TimeSpan), whose assembly is EF's,
-    // so the check takes the provider from the context, which UseSluice names on the model.
-    [Fact]
-    public async Task A_UseSluice_model_names_its_provider_for_the_date_and_time_check()
-    {
-        await using var node = new SluiceNode();
-        await using var db = postgres.CreateDb(node);
+    // A provider maps some types with a mapping EF shares between providers (SQLite's TimeSpan), so the check takes the
+    // provider from the context, on one without UseSluice too: each entry point names it, here on a model of its own,
+    // which no other call has named. PostgreSQL's unsized timestamp is trusted only by PostgreSQL's name.
+    public static TheoryData<string, Action<DbSet<Gadget>>> SetEntryPoints =>
+        new()
+        {
+            { "set.Dependency", set => set.Dependency(new GadgetNo(1)) },
+            { "set.AllDependencies", set => set.AllDependencies() },
+        };
 
-        db.Model[ProviderNameConventionSetPlugin.Annotation].Should().Be(db.Database.ProviderName);
+    [Theory]
+    [MemberData(nameof(SetEntryPoints))]
+    public void A_set_names_its_context_s_provider_for_the_date_and_time_check(
+        string entryPoint,
+        Action<DbSet<Gadget>> call
+    )
+    {
+        using var db = new TimestampDateDb(
+            new DbContextOptionsBuilder()
+                .UseNpgsql("Host=none")
+                .EnableServiceProviderCaching(false)
+                .Options
+        );
+
+        var dependencies = () => call(db.Set<Gadget>());
+
+        dependencies.Should().NotThrow(entryPoint);
     }
 
-    // Each provider's own mapping of the column, built without a server: PostgreSQL's timestamp, interval and time keep
-    // microseconds with or without a size; MySQL's datetime, timestamp and time keep whole seconds without one. Each
-    // row names every column it refuses.
+    // Each provider's own mapping of the column, built without a server, on a context without UseSluice: PostgreSQL's
+    // timestamp, interval and time keep microseconds with or without a size; MySQL's datetime, timestamp and time keep
+    // whole seconds without one. Each row names every column it refuses.
     public static TheoryData<string, Func<DbContext>, string?> DateAndTimeColumns =>
         new()
         {
             { "PostgreSQL's default", () => new DefaultDateDb(Npgsql()), null },
             { "PostgreSQL with a precision of 6", () => new MicrosecondDateDb(Npgsql()), null },
             { "PostgreSQL's timestamp without a size", () => new TimestampDateDb(Npgsql()), null },
-            {
-                "PostgreSQL's timestamp without a size, on a model naming another provider",
-                () => new ElsewhereTimestampDateDb(Npgsql()),
-                "Gadget.Made (timestamp)"
-            },
             { "MySQL's default", () => new DefaultDateDb(MySql()), null },
             { "MySQL with a precision of 6", () => new MicrosecondDateDb(MySql()), null },
             { "MySQL's datetime(6) by column type", () => new SizedDatetimeDateDb(MySql()), null },
@@ -547,20 +560,6 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     {
         protected override void Made(PropertyBuilder<DateTime> made) =>
             made.HasColumnType("timestamp");
-    }
-
-    // PostgreSQL's unsized timestamp, on a model that names a provider Sluice doesn't know: the provider named on the
-    // model, not the mapping's, decides, as UseSluice names the context's.
-    private sealed class ElsewhereTimestampDateDb(DbContextOptions options) : DatedDb(options)
-    {
-        protected override void Made(PropertyBuilder<DateTime> made) =>
-            made.HasColumnType("timestamp");
-
-        protected override void OnModelCreating(ModelBuilder model)
-        {
-            base.OnModelCreating(model);
-            model.HasAnnotation(ProviderNameConventionSetPlugin.Annotation, "Another.Provider");
-        }
     }
 
     // EF's own parser, which MySQL's provider uses, reads the 6 as a size, not a precision.

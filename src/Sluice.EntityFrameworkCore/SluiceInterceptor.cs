@@ -399,7 +399,7 @@ internal sealed partial class SluiceInterceptor
                 save.Capture ??= Capture(context);
                 break;
             case CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete:
-                ModelSources.EnsureSources(context.Model);
+                ModelSources.EnsureSources(context);
                 _bulk.AddOrUpdate(result, new(KeyPin.Take(), CommandTransaction(context).Ambient));
                 break;
         }
@@ -823,6 +823,7 @@ internal sealed partial class SluiceInterceptor
             }
 
             LogNothingCaptured(rows, context.GetType().Name);
+            ModelSources.NameProvider(context);
             var model = context.Model;
             return new(
                 context,

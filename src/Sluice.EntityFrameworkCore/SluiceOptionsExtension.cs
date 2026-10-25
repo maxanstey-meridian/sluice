@@ -1,14 +1,12 @@
 using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Metadata.Conventions.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Sluice.EntityFrameworkCore;
 
 /// <summary>
-/// Gives a <c>UseSluice</c> context's internal services <see cref="PoolReset"/>, which EF resets with the context, and
-/// <see cref="ProviderNameConventionSetPlugin"/>, which names the provider on its model. The same for every cache, so it adds one
-/// internal service provider, not one per cache.
+/// Gives a <c>UseSluice</c> context's internal services <see cref="PoolReset"/>, which EF resets with the context. The
+/// same for every cache, so it adds one internal service provider, not one per cache.
 /// </summary>
 internal sealed class SluiceOptionsExtension : IDbContextOptionsExtension
 {
@@ -17,9 +15,7 @@ internal sealed class SluiceOptionsExtension : IDbContextOptionsExtension
     public DbContextOptionsExtensionInfo Info => _info ??= new ExtensionInfo(this);
 
     public void ApplyServices(IServiceCollection services) =>
-        new EntityFrameworkServicesBuilder(services)
-            .TryAdd<IResettableService, PoolReset>()
-            .TryAdd<IConventionSetPlugin, ProviderNameConventionSetPlugin>();
+        new EntityFrameworkServicesBuilder(services).TryAdd<IResettableService, PoolReset>();
 
     public void Validate(IDbContextOptions options) { }
 

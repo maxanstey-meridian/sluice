@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -20,6 +21,7 @@ internal static class ModelSources
     private const string SourceAnnotation = "Sluice:Source";
     private const string RowSharersAnnotation = "Sluice:RowSharers";
     private const string RoundTripsAnnotation = "Sluice:RoundTrips";
+    private const string ProviderAnnotation = "Sluice:Provider";
     private const string SourcesAnnotation = "Sluice:Sources";
     private const string CascadeAnnotation = "Sluice:Cascades";
     private const string TablePatternAnnotation = "Sluice:TablePattern";
@@ -837,8 +839,10 @@ internal static class ModelSources
     /// </summary>
     /// <exception cref="InvalidOperationException">The model has a converter Sluice can't trust.</exception>
     /// <exception cref="ArgumentException">The core refuses one of the model's source names.</exception>
-    internal static void EnsureSources(IModel model) =>
-        model.GetOrAddRuntimeAnnotationValue(
+    internal static void EnsureSources(DbContext context)
+    {
+        NameProvider(context);
+        context.Model.GetOrAddRuntimeAnnotationValue(
             SourcesAnnotation,
             static model =>
             {
@@ -866,8 +870,27 @@ internal static class ModelSources
 
                 return true;
             },
-            model
+            context.Model
         );
+    }
+
+    /// <summary>
+    /// Names the context's provider on its model, for the date and time check (<see cref="EnsurePrecise"/>), which
+    /// tells a column type's precision by its provider. Only the context knows which that is: a provider may map a
+    /// type with a mapping EF shares between providers (SQLite's <see cref="TimeSpan"/>). Every entry point that builds
+    /// a source, saves or writes in bulk calls it first, on a context with <c>UseSluice</c> or not. EF builds a model
+    /// for one provider, so the name never changes.
+    /// </summary>
+    internal static void NameProvider(DbContext context) =>
+        context.Model.GetOrAddRuntimeAnnotationValue(
+            ProviderAnnotation,
+            static name => name!,
+            context.Database.ProviderName ?? ""
+        );
+
+    /// <inheritdoc cref="NameProvider(DbContext)"/>
+    internal static void NameProvider<T>(DbSet<T> set)
+        where T : class => NameProvider(set.GetService<ICurrentDbContext>().Context);
 
     /// <summary>
     /// Refuses a model with a key, foreign key or unique column (<see cref="UniqueColumns"/>) whose value converter
@@ -923,7 +946,10 @@ internal static class ModelSources
     private static void EnsurePrecise(IModel model)
     {
         var provider =
-            model.FindAnnotation(ProviderNameConventionSetPlugin.Annotation)?.Value as string;
+            model.FindRuntimeAnnotationValue(ProviderAnnotation) as string
+            ?? throw new UnreachableException(
+                "Sluice checked a model whose context's provider no entry point named."
+            );
         var refused = Keying(model)
             .Select(property => (Property: property, Mapping: property.FindRelationalTypeMapping()))
             .Where(mapped => mapped.Mapping is { } mapping && Imprecise(mapping, provider))
@@ -956,13 +982,10 @@ internal static class ModelSources
                 property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
             );
 
-    // The provider is the one UseSluice names on the model; a model built without it, the mapping's assembly, which is
-    // the provider's own for every mapping but those EF shares between providers.
-    private static bool Imprecise(RelationalTypeMapping mapping, string? modelProvider)
+    private static bool Imprecise(RelationalTypeMapping mapping, string provider)
     {
         var providerType = mapping.Converter?.ProviderClrType ?? mapping.ClrType;
         var stored = Nullable.GetUnderlyingType(providerType) ?? providerType;
-        var provider = modelProvider ?? mapping.GetType().Assembly.GetName().Name ?? "";
         var size = SizeIn(mapping.StoreType, mapping.StoreTypeNameBase);
         if (stored == typeof(DateTime) || stored == typeof(DateTimeOffset))
         {
