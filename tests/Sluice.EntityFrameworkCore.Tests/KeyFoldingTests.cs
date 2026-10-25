@@ -41,46 +41,26 @@ public sealed class KeyFoldingTests
     }
 
     [Fact]
-    public void Durations_fold_to_the_nearest_second()
+    public void Durations_and_times_of_day_fold_to_whole_microseconds()
     {
-        var duration = TimeSpan.FromSeconds(90);
+        var duration = TimeSpan.FromSeconds(90).Add(TimeSpan.FromTicks(1_234_560));
+        var time = new TimeOnly(12, 0).Add(TimeSpan.FromTicks(1_234_560));
 
         KeyFolding
-            .Fold(duration + TimeSpan.FromMilliseconds(499.9999))
+            .Fold(duration + TimeSpan.FromTicks(9))
             .Should()
-            .Be(KeyFolding.Fold(duration), "MySQL's time without a size rounds to the second");
+            .Be(KeyFolding.Fold(duration), "every connector cuts to the microsecond");
         KeyFolding
-            .Fold(duration + TimeSpan.FromMilliseconds(500))
-            .Should()
-            .Be(KeyFolding.Fold(duration + TimeSpan.FromSeconds(1)));
-        KeyFolding
-            .Fold(duration + TimeSpan.FromSeconds(1))
+            .Fold(duration + TimeSpan.FromTicks(10))
             .Should()
             .NotBe(KeyFolding.Fold(duration));
+        KeyFolding
+            .Fold(-(duration + TimeSpan.FromTicks(9)))
+            .Should()
+            .Be(KeyFolding.Fold(-duration), "cut toward zero, as Npgsql and MySQL's connector do");
         KeyFolding.Fold(-duration).Should().NotBe(KeyFolding.Fold(duration));
-        KeyFolding
-            .Fold(-(duration + TimeSpan.FromMilliseconds(500)))
-            .Should()
-            .Be(KeyFolding.Fold(-(duration + TimeSpan.FromSeconds(1))), "half away from zero");
-    }
-
-    [Fact]
-    public void Times_of_day_fold_to_the_nearest_second()
-    {
-        var noon = new TimeOnly(12, 0);
-
-        KeyFolding
-            .Fold(noon.Add(TimeSpan.FromMilliseconds(400)))
-            .Should()
-            .Be(KeyFolding.Fold(noon));
-        KeyFolding
-            .Fold(noon.Add(TimeSpan.FromSeconds(59.6)))
-            .Should()
-            .Be(
-                KeyFolding.Fold(new TimeOnly(12, 1)),
-                "MySQL's time without a size rounds to the second"
-            );
-        KeyFolding.Fold(noon.Add(TimeSpan.FromSeconds(1))).Should().NotBe(KeyFolding.Fold(noon));
+        KeyFolding.Fold(time.Add(TimeSpan.FromTicks(9))).Should().Be(KeyFolding.Fold(time));
+        KeyFolding.Fold(time.Add(TimeSpan.FromTicks(10))).Should().NotBe(KeyFolding.Fold(time));
     }
 
     [Fact]

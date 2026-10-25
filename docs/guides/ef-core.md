@@ -466,26 +466,26 @@ they touch by hand.
 The database may treat two different .NET values as the same key: `1m` and `1.00m`, `"abc"` and
 `"ABC "` in a case-insensitive column. So Sluice normalises (folds) key values, and the values
 `read.EntityAsync` reads a unique column by, before using them: `decimal`s lose trailing zeros, strings are upper-cased without trailing spaces (for
-`citext` and case-insensitive collations), dates are cut to the microsecond, and durations and
-times of day (`TimeSpan`, `TimeOnly`) are rounded to the nearest second, as MySQL's unsized
-`time` rounds them. Folding can
+`citext` and case-insensitive collations), and dates, durations and times of day are cut to the
+microsecond. Folding can
 only make an eviction broader, never miss one. Accent- and culture-sensitive collations aren't
 folded.
 
 Folding follows PostgreSQL's rules. The test suite runs on PostgreSQL, and other providers are
-untested. A key, foreign key or unique column holding a date the database stores less precisely
-than to the microsecond, such as SQL Server's `datetime` (about 3 ms) or `smalldatetime`,
-MySQL's `datetime` or `timestamp` without a size (whole seconds), a `DateTime` in a `date`
-column, a date in a time-of-day column (`time`, `time with time zone`), or a precision under
-6, is refused at first use, as an unmarked converter is, below, and `[SluiceRoundTrips]` doesn't
-lift it: the database rounds what a save writes, so a new row's key and a key a read asks by
-wouldn't match what the row holds. A date type without a size is trusted only from a provider
-known to keep microseconds without one (PostgreSQL's timestamps, SQL Server's `datetime2` and
-`datetimeoffset`, SQLite's `TEXT`); on any other provider, the column type needs a size of 6 or
-more, such as `datetime(6)`, which `HasPrecision(6)` writes where the type takes one. Store
-such a date in SQL Server's `datetime2`, MySQL's `datetime(6)` or a PostgreSQL `timestamp` of
-precision 6 (the default), map a date-only value as `DateOnly` and a time of day as `TimeOnly`,
-or key the type by another column.
+untested. A key, foreign key or unique column holding a date, duration or time of day the
+database stores less precisely than to the microsecond, such as SQL Server's `datetime` (about
+3 ms) or `smalldatetime`, MySQL's `datetime`, `timestamp` or `time` without a size (whole
+seconds), a `DateTime` in a `date` column, a date in a time-of-day column (`time`, `time with
+time zone`), or a precision under 6, is refused at first use, as an unmarked converter is,
+below, and `[SluiceRoundTrips]` doesn't lift it: the database rounds what a save writes, so a
+new row's key and a key a read asks by wouldn't match what the row holds. A type without a size
+is trusted only from a provider known to keep microseconds without one (PostgreSQL's
+timestamps, `interval` and `time`, SQL Server's `datetime2`, `datetimeoffset` and `time`,
+SQLite's `TEXT`); on any other provider, the column type needs a size of 6 or more, such as
+`datetime(6)`, which `HasPrecision(6)` writes where the type takes one. Store such a value in
+SQL Server's `datetime2` or `time`, MySQL's `datetime(6)` or `time(6)`, or a PostgreSQL
+`timestamp`, `interval` or `time` of precision 6 (the default), map a date-only value as
+`DateOnly` and a time of day as `TimeOnly`, or key the type by another column.
 
 A value converter on a key, foreign key or unique column must round-trip: converting a stored
 value to .NET and back must give the stored value. A save reports what it would write back for

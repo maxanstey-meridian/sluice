@@ -211,11 +211,27 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
             { "MySQL's timestamp without a size", () => new TimestampDateDb(MySql()), "Made" },
             { "MySQL's datetime without a size", () => new DatetimeDateDb(MySql()), "Made" },
             { "PostgreSQL's time with time zone", () => new TimeOfDayDb(Npgsql()), "Stamped" },
+            { "PostgreSQL's interval and time", () => new DefaultTimedDb(Npgsql()), null },
+            {
+                "PostgreSQL's interval with a precision of 3",
+                () => new MillisecondTimedDb(Npgsql()),
+                "Lasts"
+            },
+            {
+                "MySQL's time(6), its default for a TimeSpan, and its time for a TimeOnly",
+                () => new DefaultTimedDb(MySql()),
+                "Opens"
+            },
+            {
+                "MySQL's time without a size for a TimeSpan",
+                () => new UnsizedTimedDb(MySql()),
+                "Lasts"
+            },
         };
 
     [Theory]
     [MemberData(nameof(DateColumns))]
-    public void A_unique_date_is_refused_where_its_provider_stores_it_to_less_than_the_microsecond(
+    public void A_unique_date_or_time_is_refused_where_its_provider_stores_it_to_less_than_the_microsecond(
         string column,
         Func<DbContext> create,
         string? refused
@@ -276,11 +292,26 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     [InlineData("datetime2", "datetime2", null)]
     [InlineData("TEXT", "TEXT", null)]
     [InlineData("varchar(50)", "varchar", null)]
+    [InlineData("interval(3)", "interval", 3)]
     public void A_date_column_s_size_is_the_one_its_type_carries(
         string storeType,
         string storeTypeNameBase,
         int? size
     ) => ModelSources.SizeIn(storeType, storeTypeNameBase).Should().Be(size);
+
+    // Durations and times of day where the suite doesn't build a model: SQL Server's time keeps 100 ns without a size.
+    [Theory]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "time", null, false)]
+    [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "time", 0, true)]
+    [InlineData("Microsoft.EntityFrameworkCore.Sqlite", "TEXT", null, false)]
+    [InlineData("Another.Provider", "time", null, true)]
+    [InlineData("Another.Provider", "time", 6, false)]
+    public void A_time_store_type_is_imprecise_unless_its_provider_keeps_microseconds(
+        string provider,
+        string storeTypeNameBase,
+        int? size,
+        bool imprecise
+    ) => ModelSources.ImpreciseTime(provider, storeTypeNameBase, size).Should().Be(imprecise);
 
     public readonly record struct GadgetNo(int Value);
 
@@ -298,6 +329,8 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
         public long ShelfId { get; set; }
         public DateTime Made { get; set; }
         public DateTimeOffset Stamped { get; set; }
+        public TimeSpan Lasts { get; set; }
+        public TimeOnly Opens { get; set; }
         public Guid Tag { get; set; }
     }
 
@@ -314,7 +347,13 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     {
         var gadget = model.Entity<Gadget>();
         gadget.ToTable("gadgets_that_do_not_exist");
-        gadget.Ignore(g => g.ShelfId).Ignore(g => g.Made).Ignore(g => g.Stamped).Ignore(g => g.Tag);
+        gadget
+            .Ignore(g => g.ShelfId)
+            .Ignore(g => g.Made)
+            .Ignore(g => g.Stamped)
+            .Ignore(g => g.Lasts)
+            .Ignore(g => g.Opens)
+            .Ignore(g => g.Tag);
         map(gadget);
     }
 
@@ -400,6 +439,39 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     private sealed class DefaultDateDb(DbContextOptions options) : DatedDb(options)
     {
         protected override void Made(PropertyBuilder<DateTime> made) { }
+    }
+
+    // A unique duration and time of day, each in its provider's default column but for what Lasts sets on the
+    // duration. One type each, since EF caches a model per context type.
+    private abstract class TimedDb(DbContextOptions options) : DbContext(options)
+    {
+        protected virtual void Lasts(PropertyBuilder<TimeSpan> lasts) { }
+
+        protected override void OnModelCreating(ModelBuilder model) =>
+            Gadgets(
+                model,
+                gadget =>
+                {
+                    gadget.Property(g => g.Id).HasConversion(new GadgetNoConverter());
+                    Lasts(gadget.Property(g => g.Lasts));
+                    gadget.HasIndex(g => g.Lasts).IsUnique();
+                    gadget.Property(g => g.Opens);
+                    gadget.HasIndex(g => g.Opens).IsUnique();
+                }
+            );
+    }
+
+    private sealed class DefaultTimedDb(DbContextOptions options) : TimedDb(options);
+
+    private sealed class MillisecondTimedDb(DbContextOptions options) : TimedDb(options)
+    {
+        protected override void Lasts(PropertyBuilder<TimeSpan> lasts) => lasts.HasPrecision(3);
+    }
+
+    private sealed class UnsizedTimedDb(DbContextOptions options) : TimedDb(options)
+    {
+        protected override void Lasts(PropertyBuilder<TimeSpan> lasts) =>
+            lasts.HasColumnType("time");
     }
 
     // A DateTimeOffset's date dropped by a time-of-day column.

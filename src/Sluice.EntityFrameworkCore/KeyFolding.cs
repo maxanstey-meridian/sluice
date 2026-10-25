@@ -15,7 +15,7 @@ internal static class KeyFolding
     // Dividing by one at the maximum scale leaves the smallest scale that holds the value, so 1.00m becomes 1m.
     private const decimal ScaleNormaliser = 1.0000000000000000000000000000m;
 
-    // PostgreSQL stores date-times to the microsecond.
+    // PostgreSQL stores date-times, durations and times of day to the microsecond, and every connector cuts to it.
     private const long TicksPerMicrosecond = 10;
 
     internal static string Fold(object value) =>
@@ -28,8 +28,8 @@ internal static class KeyFolding
                 instant.Kind == DateTimeKind.Local ? instant.ToUniversalTime().Ticks : instant.Ticks
             ),
             DateTimeOffset instant => WholeMicroseconds(instant.UtcTicks),
-            TimeSpan duration => NearestSecond(duration.Ticks),
-            TimeOnly time => NearestSecond(time.Ticks),
+            TimeSpan duration => WholeMicroseconds(duration.Ticks),
+            TimeOnly time => WholeMicroseconds(time.Ticks),
             byte[] bytes => Convert.ToHexString(bytes),
             IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
             _ => value.ToString() ?? string.Empty,
@@ -37,13 +37,4 @@ internal static class KeyFolding
 
     private static string WholeMicroseconds(long ticks) =>
         (ticks - ticks % TicksPerMicrosecond).ToString(CultureInfo.InvariantCulture);
-
-    // MySQL's time without a size rounds to the second, half away from zero; PostgreSQL's interval and time keep
-    // microseconds, cut by Npgsql, and SQL Server's unsized time keeps 100 ns. Rounding to the nearest second gives a
-    // value and what each of them stores the same text: a half second is a whole microsecond, so cutting to the
-    // microsecond never crosses one. Durations within a second of each other may share a key, which only
-    // over-invalidates.
-    private static string NearestSecond(long ticks) =>
-        Math.Round((decimal)ticks / TimeSpan.TicksPerSecond, MidpointRounding.AwayFromZero)
-            .ToString(CultureInfo.InvariantCulture);
 }

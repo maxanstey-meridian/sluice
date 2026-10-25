@@ -915,10 +915,10 @@ internal static class ModelSources
             model
         );
 
-    // A date stored less precisely than the microsecond Sluice folds dates to (SQL Server's datetime, about 3 ms, and
-    // smalldatetime, a minute; MySQL's datetime or timestamp without a size, whole seconds; a date column; a time-of-day
-    // column, no date at all; a size under 6; or a type without a size, unless its provider is known to keep
-    // microseconds without one) holds a value other than the one a save reports for a new row, or a reader asks by, so
+    // A date or time stored less precisely than the microsecond Sluice folds them to (SQL Server's datetime, about 3 ms,
+    // and smalldatetime, a minute; MySQL's datetime, timestamp or time without a size, whole seconds; a date in a date
+    // column, or a time-of-day one, no date at all; a size under 6; or a type without a size, unless its provider is
+    // known to keep microseconds without one) holds a value other than the one a save reports for a new row, or a reader asks by, so
     // the two give the row different key text and an eviction is missed.
     private static void EnsurePrecise(IModel model)
     {
@@ -932,15 +932,15 @@ internal static class ModelSources
         if (refused.Count > 0)
         {
             throw new InvalidOperationException(
-                $"Sluice can't key {string.Join(", ", refused)}: a key, foreign key or unique column whose date is "
-                    + "stored less precisely than to the microsecond, or not at all (a time-of-day column). The "
-                    + "database rounds or cuts what a save writes, so a new row's key, and a key a read asks by, isn't "
-                    + "the value the row holds, and an eviction is missed. Store it to the microsecond or better (on "
-                    + "SQL Server datetime2, on MySQL datetime(6), on PostgreSQL timestamp with a precision of 6 or "
-                    + "none set, and on any other provider a column type with a size of 6 or more, as HasPrecision(6) "
-                    + "writes where the type takes one), map a date-only value as DateOnly and a time of day as "
-                    + "TimeOnly, or key the type by another column. "
-                    + "[SluiceRoundTrips] doesn't lift this."
+                $"Sluice can't key {string.Join(", ", refused)}: a key, foreign key or unique column whose date or "
+                    + "time is stored less precisely than to the microsecond, or whose date isn't stored at all (a "
+                    + "time-of-day column). The database rounds or cuts what a save writes, so a new row's key, and a "
+                    + "key a read asks by, isn't the value the row holds, and an eviction is missed. Store it to the "
+                    + "microsecond or better (on SQL Server datetime2 or time, on MySQL datetime(6) or time(6), on "
+                    + "PostgreSQL timestamp, interval or time with a precision of 6 or none set, and on any other "
+                    + "provider a column type with a size of 6 or more, as HasPrecision(6) writes where the type takes "
+                    + "one), map a date-only value as DateOnly and a time of day as TimeOnly, or key the type by "
+                    + "another column. [SluiceRoundTrips] doesn't lift this."
             );
         }
     }
@@ -956,20 +956,23 @@ internal static class ModelSources
 
     private static bool Imprecise(RelationalTypeMapping mapping)
     {
-        var provider = mapping.Converter?.ProviderClrType ?? mapping.ClrType;
-        var stored = Nullable.GetUnderlyingType(provider) ?? provider;
-        return (stored == typeof(DateTime) || stored == typeof(DateTimeOffset))
-            && ImpreciseDate(
-                mapping.GetType().Assembly.GetName().Name ?? "",
-                mapping.StoreTypeNameBase,
-                SizeIn(mapping.StoreType, mapping.StoreTypeNameBase)
-            );
+        var providerType = mapping.Converter?.ProviderClrType ?? mapping.ClrType;
+        var stored = Nullable.GetUnderlyingType(providerType) ?? providerType;
+        var provider = mapping.GetType().Assembly.GetName().Name ?? "";
+        var size = SizeIn(mapping.StoreType, mapping.StoreTypeNameBase);
+        if (stored == typeof(DateTime) || stored == typeof(DateTimeOffset))
+        {
+            return ImpreciseDate(provider, mapping.StoreTypeNameBase, size);
+        }
+
+        return (stored == typeof(TimeSpan) || stored == typeof(TimeOnly))
+            && ImpreciseTime(provider, mapping.StoreTypeNameBase, size);
     }
 
     // The size the column type carries ("datetime(6)"), read from the store type the table is made from: a model
     // precision a provider leaves out of the column doesn't change what it stores, and providers disagree on whether
-    // the size lands in the mapping's Precision or its Size. Only a date or time type's, so a character length
-    // ("varchar(50)") isn't taken for fractional-second digits.
+    // the size lands in the mapping's Precision or its Size. Only a date, time or interval type's, so a character
+    // length ("varchar(50)") isn't taken for fractional-second digits.
     internal static int? SizeIn(string storeType, string storeTypeNameBase)
     {
         var open = storeType.IndexOf('(');
@@ -978,6 +981,7 @@ internal static class ModelSources
             || !(
                 storeTypeNameBase.Contains("date", StringComparison.OrdinalIgnoreCase)
                 || storeTypeNameBase.Contains("time", StringComparison.OrdinalIgnoreCase)
+                || storeTypeNameBase.Contains("interval", StringComparison.OrdinalIgnoreCase)
             )
         )
         {
@@ -1012,16 +1016,19 @@ internal static class ModelSources
             return true;
         }
 
-        if (size is { } digits)
-        {
-            return digits < 6;
-        }
-
-        return !(
-            _preciseUnsized.TryGetValue(provider, out var precise)
-            && precise.Contains(storeTypeNameBase)
-        );
+        return ImpreciseTime(provider, storeTypeNameBase, size);
     }
+
+    // A duration or time of day, and a date past the types that always drop part of it: a size under 6 rounds, one of
+    // 6 or more doesn't, and a type without one is trusted only where its provider is known to keep microseconds
+    // without one.
+    internal static bool ImpreciseTime(string provider, string storeTypeNameBase, int? size) =>
+        size is { } digits
+            ? digits < 6
+            : !(
+                _preciseUnsized.TryGetValue(provider, out var precise)
+                && precise.Contains(storeTypeNameBase)
+            );
 
     private const string SqlServerProvider = "Microsoft.EntityFrameworkCore.SqlServer";
 
@@ -1036,8 +1043,9 @@ internal static class ModelSources
         "time without time zone",
     };
 
-    // The types each provider keeps to the microsecond or better without a size: PostgreSQL's timestamps, SQL Server's
-    // datetime2 and datetimeoffset, to 100 ns, and SQLite's text, written to 100 ns.
+    // The types each provider keeps to the microsecond or better without a size: PostgreSQL's timestamps, interval and
+    // time; SQL Server's datetime2, datetimeoffset and time, to 100 ns; and SQLite's text, written to 100 ns. A time
+    // type here never trusts a date: ImpreciseDate refuses those first.
     private static readonly Dictionary<string, HashSet<string>> _preciseUnsized = new()
     {
         ["Npgsql.EntityFrameworkCore.PostgreSQL"] = new(StringComparer.OrdinalIgnoreCase)
@@ -1046,11 +1054,15 @@ internal static class ModelSources
             "timestamptz",
             "timestamp with time zone",
             "timestamp without time zone",
+            "interval",
+            "time",
+            "time without time zone",
         },
         [SqlServerProvider] = new(StringComparer.OrdinalIgnoreCase)
         {
             "datetime2",
             "datetimeoffset",
+            "time",
         },
         ["Microsoft.EntityFrameworkCore.Sqlite"] = new(StringComparer.OrdinalIgnoreCase) { "TEXT" },
     };
