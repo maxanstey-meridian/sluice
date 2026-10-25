@@ -199,17 +199,24 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
 
     // Each provider's own mapping of the column, built without a server: PostgreSQL's timestamp keeps microseconds with
     // or without a size, MySQL's datetime and timestamp keep whole seconds without one.
-    public static TheoryData<string, Func<DbContext>, bool> DateColumns =>
+    public static TheoryData<string, Func<DbContext>, string?> DateColumns =>
         new()
         {
-            { "PostgreSQL's default", () => new DefaultDateDb(Npgsql()), false },
-            { "PostgreSQL with a precision of 6", () => new MicrosecondDateDb(Npgsql()), false },
-            { "PostgreSQL's timestamp without a size", () => new TimestampDateDb(Npgsql()), false },
-            { "MySQL's default", () => new DefaultDateDb(MySql()), false },
-            { "MySQL with a precision of 6", () => new MicrosecondDateDb(MySql()), false },
-            { "MySQL's timestamp without a size", () => new TimestampDateDb(MySql()), true },
-            { "MySQL's datetime without a size", () => new DatetimeDateDb(MySql()), true },
-            { "PostgreSQL's time with time zone", () => new TimeOfDayDb(Npgsql()), true },
+            { "PostgreSQL's default", () => new DefaultDateDb(Npgsql()), null },
+            { "PostgreSQL with a precision of 6", () => new MicrosecondDateDb(Npgsql()), null },
+            { "PostgreSQL's timestamp without a size", () => new TimestampDateDb(Npgsql()), null },
+            { "MySQL's default", () => new DefaultDateDb(MySql()), null },
+            { "MySQL with a precision of 6", () => new MicrosecondDateDb(MySql()), null },
+            { "MySQL's datetime(6) by column type", () => new SizedDatetimeDateDb(MySql()), null },
+            { "MySQL's timestamp without a size", () => new TimestampDateDb(MySql()), "Made" },
+            { "MySQL's datetime without a size", () => new DatetimeDateDb(MySql()), "Made" },
+            { "PostgreSQL's time with time zone", () => new TimeOfDayDb(Npgsql()), "Stamped" },
+            { "SQLite's default", () => new DefaultDateDb(Sqlite()), null },
+            {
+                "SQLite with a precision of 3, which its text ignores",
+                () => new MillisecondDateDb(Sqlite()),
+                null
+            },
         };
 
     [Theory]
@@ -217,19 +224,19 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     public void A_unique_date_is_refused_where_its_provider_stores_it_to_less_than_the_microsecond(
         string column,
         Func<DbContext> create,
-        bool refused
+        string? refused
     )
     {
         using var db = create();
 
         var dependencies = () => db.Set<Gadget>().AllDependencies();
 
-        if (refused)
+        if (refused is not null)
         {
             dependencies
                 .Should()
                 .Throw<InvalidOperationException>(column)
-                .WithMessage("*Gadget.*microsecond*");
+                .WithMessage($"*Gadget.{refused} *microsecond*");
         }
         else
         {
@@ -243,9 +250,12 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     private static DbContextOptions MySql() =>
         new DbContextOptionsBuilder().UseMySQL("Server=none").Options;
 
-    // Providers the suite can't build a model for, by the name EF's provider checks compare: SQL Server's datetime
-    // takes no size, though EF writes the one the model asks for into its store type; a provider Sluice doesn't know
-    // is trusted only with a size of 6 or more.
+    private static DbContextOptions Sqlite() =>
+        new DbContextOptionsBuilder().UseSqlite("Data Source=:memory:").Options;
+
+    // Providers the suite doesn't build a model for, by the name EF's provider checks compare, with the size the column
+    // type carries: SQL Server's datetime takes no size, though EF writes the one the model asks for into its store
+    // type; a type without a size is trusted only from a provider known to keep microseconds without one.
     [Theory]
     [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime", null, true)]
     [InlineData("Microsoft.EntityFrameworkCore.SqlServer", "datetime", 7, true)]
@@ -261,9 +271,9 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     public void A_date_store_type_is_imprecise_unless_its_provider_keeps_microseconds(
         string provider,
         string storeTypeNameBase,
-        int? precision,
+        int? size,
         bool imprecise
-    ) => ModelSources.ImpreciseDate(provider, storeTypeNameBase, precision).Should().Be(imprecise);
+    ) => ModelSources.ImpreciseDate(provider, storeTypeNameBase, size).Should().Be(imprecise);
 
     public readonly record struct GadgetNo(int Value);
 
@@ -347,8 +357,8 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     }
 
     // The database rounds what a save writes to the column's precision (SQL Server's datetime and smalldatetime, which
-    // the model check refuses by name when no precision is given, too, and a date column whatever its precision). One
-    // type each, since EF caches a model per context type.
+    // the model check refuses whatever their precision, too, as it does a date column). One type each, since EF caches
+    // a model per context type.
     private abstract class DatedDb(DbContextOptions options) : DbContext(options)
     {
         protected abstract void Made(PropertyBuilder<DateTime> made);
@@ -404,6 +414,13 @@ public sealed class FoldedKeyTests(PostgresFixture postgres)
     {
         protected override void Made(PropertyBuilder<DateTime> made) =>
             made.HasColumnType("timestamp");
+    }
+
+    // EF's own parser, which MySQL's provider uses, reads the 6 as a size, not a precision.
+    private sealed class SizedDatetimeDateDb(DbContextOptions options) : DatedDb(options)
+    {
+        protected override void Made(PropertyBuilder<DateTime> made) =>
+            made.HasColumnType("datetime(6)");
     }
 
     private sealed class DatetimeDateDb(DbContextOptions options) : DatedDb(options)

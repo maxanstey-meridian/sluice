@@ -15,8 +15,9 @@
         <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
         <PackageReference Include="Testcontainers.PostgreSql" Version="4.15.0" />
         <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
-        <!-- Only to build models: the date check reads MySQL's type mappings, which no PostgreSQL test reaches. -->
+        <!-- Only to build models: the date check reads MySQL's and SQLite's type mappings, which no PostgreSQL test reaches. -->
         <PackageReference Include="MySql.EntityFrameworkCore" Version="10.0.12" />
+        <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.12" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12" />
         <PackageReference Include="Microsoft.Extensions.Diagnostics.Testing" Version="10.10.0" />
         <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.10.0" />

@@ -917,14 +917,14 @@ internal static class ModelSources
 
     // A date stored less precisely than the microsecond Sluice folds dates to (SQL Server's datetime, about 3 ms, and
     // smalldatetime, a minute; MySQL's datetime or timestamp without a size, whole seconds; a date column; a time-of-day
-    // column, no date at all; a precision under 6; or a type without a size on a provider Sluice doesn't know keeps
-    // microseconds without one) holds a value other than the one a save reports for a new row, or a
-    // reader asks by, so the two give the row different key text and an eviction is missed.
+    // column, no date at all; a size under 6; or a type without a size, unless its provider is known to keep
+    // microseconds without one) holds a value other than the one a save reports for a new row, or a reader asks by, so
+    // the two give the row different key text and an eviction is missed.
     private static void EnsurePrecise(IModel model)
     {
         var refused = Keying(model)
             .Select(property => (Property: property, Mapping: property.FindRelationalTypeMapping()))
-            .Where(mapped => mapped.Mapping is { } mapping && Imprecise(mapped.Property, mapping))
+            .Where(mapped => mapped.Mapping is { } mapping && Imprecise(mapping))
             .Select(mapped =>
                 $"{mapped.Property.DeclaringType.DisplayName()}.{mapped.Property.Name} ({mapped.Mapping!.StoreType})"
             )
@@ -937,8 +937,9 @@ internal static class ModelSources
                     + "database rounds or cuts what a save writes, so a new row's key, and a key a read asks by, isn't "
                     + "the value the row holds, and an eviction is missed. Store it to the microsecond or better (on "
                     + "SQL Server datetime2, on MySQL datetime(6), on PostgreSQL timestamp with a precision of 6 or "
-                    + "none set, and on any other provider with a precision of 6 or more set, HasPrecision(6)), map a "
-                    + "date-only value as DateOnly and a time of day as TimeOnly, or key the type by another column. "
+                    + "none set, and on any other provider a column type with a size of 6 or more, as HasPrecision(6) "
+                    + "writes where the type takes one), map a date-only value as DateOnly and a time of day as "
+                    + "TimeOnly, or key the type by another column. "
                     + "[SluiceRoundTrips] doesn't lift this."
             );
         }
@@ -953,7 +954,7 @@ internal static class ModelSources
                 property.IsKey() || property.IsForeignKey() || IsUniqueColumn(property)
             );
 
-    private static bool Imprecise(IProperty property, RelationalTypeMapping mapping)
+    private static bool Imprecise(RelationalTypeMapping mapping)
     {
         var provider = mapping.Converter?.ProviderClrType ?? mapping.ClrType;
         var stored = Nullable.GetUnderlyingType(provider) ?? provider;
@@ -961,8 +962,33 @@ internal static class ModelSources
             && ImpreciseDate(
                 mapping.GetType().Assembly.GetName().Name ?? "",
                 mapping.StoreTypeNameBase,
-                property.GetPrecision() ?? mapping.Precision
+                SizeIn(mapping)
             );
+    }
+
+    // The size the column type carries ("datetime(6)"), read from the store type the table is made from: a model
+    // precision a provider leaves out of the column doesn't change what it stores, and providers disagree on whether
+    // the size lands in the mapping's Precision or its Size. Only a date or time type's, so a character length
+    // ("varchar(50)") isn't taken for fractional-second digits.
+    private static int? SizeIn(RelationalTypeMapping mapping)
+    {
+        var type = mapping.StoreType;
+        var open = type.IndexOf('(');
+        if (
+            open < 0
+            || !(
+                mapping.StoreTypeNameBase.Contains("date", StringComparison.OrdinalIgnoreCase)
+                || mapping.StoreTypeNameBase.Contains("time", StringComparison.OrdinalIgnoreCase)
+            )
+        )
+        {
+            return null;
+        }
+
+        var end = type.IndexOfAny([')', ','], open);
+        return int.TryParse(type.AsSpan()[(open + 1)..(end < 0 ? type.Length : end)], out var size)
+            ? size
+            : null;
     }
 
     // Judged by the store type and the provider that maps it, the mapping's assembly, which is the name EF's own
@@ -971,7 +997,7 @@ internal static class ModelSources
     // though EF writes that size into the store type ("datetime(6)"). Otherwise a size under 6 rounds, one of 6 or more
     // doesn't, and a type without one is trusted only where its provider is known to keep microseconds without one:
     // MySQL's keep whole seconds, and a provider Sluice doesn't know may round too, which would miss evictions silently.
-    internal static bool ImpreciseDate(string provider, string storeTypeNameBase, int? precision)
+    internal static bool ImpreciseDate(string provider, string storeTypeNameBase, int? size)
     {
         if (
             _impreciseDates.Contains(storeTypeNameBase)
@@ -984,9 +1010,9 @@ internal static class ModelSources
             return true;
         }
 
-        if (precision is { } size)
+        if (size is { } digits)
         {
-            return size < 6;
+            return digits < 6;
         }
 
         return !(
@@ -1008,8 +1034,8 @@ internal static class ModelSources
         "time without time zone",
     };
 
-    // The types each provider keeps to the microsecond or better without a size: PostgreSQL's timestamps, and SQL
-    // Server's datetime2 and datetimeoffset, to 100 ns.
+    // The types each provider keeps to the microsecond or better without a size: PostgreSQL's timestamps, SQL Server's
+    // datetime2 and datetimeoffset, to 100 ns, and SQLite's text, written to 100 ns.
     private static readonly Dictionary<string, HashSet<string>> _preciseUnsized = new()
     {
         ["Npgsql.EntityFrameworkCore.PostgreSQL"] = new(StringComparer.OrdinalIgnoreCase)
@@ -1024,6 +1050,7 @@ internal static class ModelSources
             "datetime2",
             "datetimeoffset",
         },
+        ["Microsoft.EntityFrameworkCore.Sqlite"] = new(StringComparer.OrdinalIgnoreCase) { "TEXT" },
     };
 
     // EF's built-ins that give back every value they can load. An enum or number cast into a type that holds every

@@ -143,7 +143,8 @@ no longer than the entry's duration.
   registration's default is scoped); a singleton is refused. See [Setup](/guides/ef-core#setup).
 - **Tested on PostgreSQL only.** Key folding assumes PostgreSQL's comparison rules, and doesn't
   fold accent- or culture-sensitive collations. A date key, foreign key or unique column on a
-  provider other than PostgreSQL or SQL Server needs an explicit precision of 6 or more. See
+  provider other than PostgreSQL, SQL Server or SQLite needs a column type with a size of 6 or
+  more, such as `datetime(6)`. See
   [Key folding](/guides/ef-core#key-folding).
 - **Composite primary keys can't be read with `read.Entity`**, and `read.Children` takes a
   single-column foreign key. See [Keys](/guides/ef-core#keys).

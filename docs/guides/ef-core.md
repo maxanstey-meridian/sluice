@@ -477,9 +477,10 @@ MySQL's `datetime` or `timestamp` without a size (whole seconds), a `DateTime` i
 column, a date in a time-of-day column (`time`, `time with time zone`), or a precision under
 6, is refused at first use, as an unmarked converter is, below, and `[SluiceRoundTrips]` doesn't
 lift it: the database rounds what a save writes, so a new row's key and a key a read asks by
-wouldn't match what the row holds. A date type without a precision is trusted only from a
-provider known to keep microseconds without one (PostgreSQL's timestamps, SQL Server's
-`datetime2` and `datetimeoffset`); on any other provider, set `HasPrecision(6)` or more. Store
+wouldn't match what the row holds. A date type without a size is trusted only from a provider
+known to keep microseconds without one (PostgreSQL's timestamps, SQL Server's `datetime2` and
+`datetimeoffset`, SQLite's `TEXT`); on any other provider, the column type needs a size of 6 or
+more, such as `datetime(6)`, which `HasPrecision(6)` writes where the type takes one. Store
 such a date in SQL Server's `datetime2`, MySQL's `datetime(6)` or a PostgreSQL `timestamp` of
 precision 6 (the default), map a date-only value as `DateOnly` and a time of day as `TimeOnly`,
 or key the type by another column.
