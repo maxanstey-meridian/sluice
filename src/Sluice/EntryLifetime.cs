@@ -23,7 +23,7 @@ internal static class EntryLifetime
             InMemory(tags),
             subject,
             "in memory",
-            shorten ?? "Duration, MemoryCacheDuration, FailSafeMaxDuration or JitterMaxDuration",
+            shorten ?? "Duration, MemoryCacheDuration, FailSafeMaxDuration, or JitterMaxDuration",
             "TagsDefaultEntryOptions.MemoryCacheDuration or TagsDefaultEntryOptions.FailSafeMaxDuration"
         );
         Ensure(
@@ -32,8 +32,8 @@ internal static class EntryLifetime
             subject,
             "in the distributed cache",
             shorten
-                ?? "Duration, DistributedCacheDuration, DistributedCacheFailSafeMaxDuration or FailSafeMaxDuration",
-            "TagsDefaultEntryOptions.DistributedCacheDuration, TagsDefaultEntryOptions.DistributedCacheFailSafeMaxDuration "
+                ?? "Duration, DistributedCacheDuration, DistributedCacheFailSafeMaxDuration, or FailSafeMaxDuration",
+            "TagsDefaultEntryOptions.DistributedCacheDuration, TagsDefaultEntryOptions.DistributedCacheFailSafeMaxDuration, "
                 + "or TagsDefaultEntryOptions.FailSafeMaxDuration"
         );
     }

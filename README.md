@@ -82,7 +82,7 @@ A `Source` names something that can change. Reads record it and writes clear it,
 this one declaration, so they can't disagree on a name. A `Query` names something cached, with
 its key and value types, so the compiler checks the key and value of every call. Sluice needs
 each key as text, and `UserId` isn't a string, so each declaration says how to turn it into one
-(`id => id.Value`). Strings, numbers, `Guid`s and enums need nothing. `Duration` is optional:
+(`id => id.Value`). Strings, numbers, `Guid`s, and enums need nothing. `Duration` is optional:
 without it, the default you set in `AddSluice` applies. A value with no key, such as a list of
 everything, is a `Query<TValue>`.
 
@@ -128,7 +128,7 @@ it reads is recorded. `read.From(dependency, fetch)` works with any data source:
 dependency and runs the fetch in one call, so you can't record one thing and fetch another.
 EF Core is covered below.
 
-After both dashboards are cached, Alice's depends on the users, the flags and her greeting.
+After both dashboards are cached, Alice's depends on the users, the flags, and her greeting.
 Bob's depends on the users and the flags: he isn't an admin, so his compute never read a
 greeting.
 
@@ -161,7 +161,7 @@ builder.Services.AddDbContextFactory<AppDb>(
 
 `AddSluiceEntityFrameworkCore` registers the EF package, and `UseSluice` connects the context
 to Sluice; `UseSluice` throws without the first. Register the context however you like (`AddDbContext`,
-`AddDbContextFactory` or a pool): each compute takes an `AppDb` of its own from a DI scope it
+`AddDbContextFactory`, or a pool): each compute takes an `AppDb` of its own from a DI scope it
 opens for itself.
 
 ### Reading
@@ -194,7 +194,7 @@ var page = await pages.SingleOrDefaultAsync(ct);
 `read.Entity` depends on one row, so renaming Bob leaves Alice's dashboard cached.
 `read.Children` depends on the rows under one parent. Both return a query you can filter and
 project. Keys are your model's own types: the playground maps `UserId` with a value converter,
-so `read.Entity(computeDb.Users, userId)` takes a `UserId`. A converter on a key, foreign key or
+so `read.Entity(computeDb.Users, userId)` takes a `UserId`. A converter on a key, foreign key, or
 unique column must give back exactly the value it loaded, so Sluice asks you to say so on its
 class, and refuses the model otherwise:
 
@@ -225,7 +225,7 @@ flag.Enabled = !flag.Enabled;
 await db.SaveChangesAsync(ct);
 ```
 
-Once a save commits, Sluice clears the cached reads of every row it inserted, updated or
+Once a save commits, Sluice clears the cached reads of every row it inserted, updated, or
 deleted, and of the lists those rows were in or moved between. `ExecuteUpdate` and
 `ExecuteDelete` work too: Sluice can't tell which rows they changed, so once they commit, every
 cached read of the types in the table they wrote is evicted. Name the rows with `.ForKey(id)` or
@@ -247,7 +247,7 @@ for data written outside your app. For an EF set it's one line:
 ### What a compute can't read
 
 Inside a compute, a few things throw, because Sluice couldn't tell what they read: raw SQL
-(`FromSql`, `SqlQuery`), views, keyless types and database functions of your own. Read those in
+(`FromSql`, `SqlQuery`), views, keyless types, and database functions of your own. Read those in
 the fetch of `read.From(dependency, fetch)`, with a `Source` you declare and invalidate
 yourself, or with the EF sets' dependencies (`[.. db.Orders.AllDependencies()]`), so EF writes
 to those types evict it with no code of yours. A query on any context other than `read.Db`'s
@@ -308,7 +308,7 @@ start.
 - [What a compute can't read](https://maxanstey-meridian.github.io/sluice/guides/strict-reads):
   the full list, how to read views and raw SQL anyway, and what Sluice can't check
 - [Transactions](https://maxanstey-meridian.github.io/sluice/guides/transactions): EF
-  transactions, `TransactionScope` and retries all clear the cache after the commit, not before
+  transactions, `TransactionScope`, and retries all clear the cache after the commit, not before
 - [Several servers](https://maxanstey-meridian.github.io/sluice/guides/configuration): sharing
   the cache through Redis, and a startup check for settings that would let cleared values come
   back
@@ -318,8 +318,8 @@ start.
 - The EF Core tests run on a real PostgreSQL in Docker, not an in-memory fake.
 - A random workload makes saves, moves, deletes, deletes of rows it never loaded, bulk updates
   and deletes (by key or not), batches and transactions across cascades, set-null keys, inheritance, composite
-  keys and a many-to-many join. After every write, it checks each cached read, through the
-  helpers and through plain queries that follow navigations, joins and `Include`, against the
+  keys, and a many-to-many join. After every write, it checks each cached read, through the
+  helpers and through plain queries that follow navigations, joins, and `Include`, against the
   same read run fresh. A concurrent version runs four writers and four readers at once, and
   checks once they've finished. `SLUICE_RANDOM_SEEDS=50 dotnet test` runs more of both.
 - Benchmarks against FusionCache on its own are in

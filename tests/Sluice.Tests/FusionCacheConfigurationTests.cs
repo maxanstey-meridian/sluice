@@ -12,6 +12,10 @@ public sealed class FusionCacheConfigurationTests
 {
     private static readonly Source<int> _rows = new("config-rows");
     private static readonly Query<string, string> _view = new("config-view");
+    private static readonly Query<string, string> _staleView = new("config-stale-view")
+    {
+        MaxStaleness = TimeSpan.FromMinutes(1),
+    };
 
     // Cache configurations whose entries outlive the tag data that can invalidate them, each with the message
     // resolving SluiceCache must fail with.
@@ -74,6 +78,10 @@ public sealed class FusionCacheConfigurationTests
     };
 
     public static TheoryData<string> OutlivingTagData => new(_outlivingTagData.Keys);
+
+    // A strict query, or one with MaxStaleness, whose calls go through the stale copy's FusionCache call first.
+    private static Query<string, string> QueryOf(string kind) =>
+        kind == "MaxStaleness" ? _staleView : _view;
 
     private static Task<string> Read(SluiceReads read, CancellationToken ct)
     {
@@ -315,11 +323,14 @@ public sealed class FusionCacheConfigurationTests
             .ThrowAsync<OperationCanceledException>();
     }
 
-    [Fact]
-    public async Task An_already_cancelled_caller_gets_neither_a_hit_nor_a_compute()
+    [Theory]
+    [InlineData("strict")]
+    [InlineData("MaxStaleness")]
+    public async Task An_already_cancelled_caller_gets_neither_a_hit_nor_a_compute(string kind)
     {
+        var query = QueryOf(kind);
         await using var node = new SluiceNode();
-        await node.Cache.GetOrSetAsync(_view, "cached", Read);
+        await node.Cache.GetOrSetAsync(query, "cached", Read);
         using var caller = new CancellationTokenSource();
         await caller.CancelAsync();
         var ran = false;
@@ -330,16 +341,18 @@ public sealed class FusionCacheConfigurationTests
             return Read(read, ct);
         }
 
-        var hit = () => node.Cache.GetOrSetAsync(_view, "cached", Compute, caller.Token).AsTask();
-        var miss = () => node.Cache.GetOrSetAsync(_view, "missing", Compute, caller.Token).AsTask();
+        var hit = () => node.Cache.GetOrSetAsync(query, "cached", Compute, caller.Token).AsTask();
+        var miss = () => node.Cache.GetOrSetAsync(query, "missing", Compute, caller.Token).AsTask();
 
         await hit.Should().ThrowAsync<OperationCanceledException>();
         await miss.Should().ThrowAsync<OperationCanceledException>();
         ran.Should().BeFalse();
     }
 
-    [Fact]
-    public async Task A_cancelled_caller_resumes_only_after_its_compute_ends()
+    [Theory]
+    [InlineData("strict")]
+    [InlineData("MaxStaleness")]
+    public async Task A_cancelled_caller_resumes_only_after_its_compute_ends(string kind)
     {
         await using var node = new SluiceNode();
         using var caller = new CancellationTokenSource();
@@ -349,7 +362,7 @@ public sealed class FusionCacheConfigurationTests
 
         var call = node
             .Cache.GetOrSetAsync(
-                _view,
+                QueryOf(kind),
                 "k",
                 async (read, ct) =>
                 {
@@ -376,6 +389,9 @@ public sealed class FusionCacheConfigurationTests
         await started.Task;
         await caller.CancelAsync();
 
+        // A caller that doesn't wait resumes on another thread once the cancellation reaches FusionCache, so give it
+        // the time to.
+        await Task.WhenAny(call, Task.Delay(TimeSpan.FromMilliseconds(200)));
         call.IsCompleted.Should().BeFalse("the caller must wait for its compute");
         gate.SetResult();
         (await endedWhenCallerResumed).Should().BeTrue();
@@ -383,12 +399,17 @@ public sealed class FusionCacheConfigurationTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, "strict")]
+    [InlineData(true, "strict")]
+    [InlineData(false, "MaxStaleness")]
+    [InlineData(true, "MaxStaleness")]
     public async Task A_compute_outliving_the_factory_timeout_completes_before_the_caller_resumes(
-        bool soft
+        bool soft,
+        string kind
     )
     {
+        var query = QueryOf(kind);
+
         // FusionCache times a zero timeout out at once, before the factory has finished (or even run): a hard one
         // always, a soft one when fail-safe has a stale value to fall back to.
         await using var node = new SluiceNode(cache =>
@@ -407,8 +428,10 @@ public sealed class FusionCacheConfigurationTests
         );
         if (soft)
         {
-            await node.Cache.GetOrSetAsync(_view, "k", Read);
-            await node.Fusion.ExpireAsync("config-view:k");
+            // The stale copy goes too, or it would be served without a compute.
+            await node.Cache.GetOrSetAsync(query, "k", Read);
+            await node.Fusion.ExpireAsync(query.EntryKey("k"));
+            await node.Fusion.RemoveAsync($":{query.EntryKey("k")}");
         }
 
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -417,7 +440,7 @@ public sealed class FusionCacheConfigurationTests
 
         var call = node
             .Cache.GetOrSetAsync(
-                _view,
+                query,
                 "k",
                 async (read, _) =>
                 {

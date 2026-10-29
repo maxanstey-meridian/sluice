@@ -297,10 +297,11 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
 
     // The stale copy's factory: makes the normal entry's call, then keeps its value as the copy, tagged with the
     // compute's now-tags, for what's left of N since this factory started. Only a compute of this caller's that stored
-    // the normal entry leaves a copy: on a violation, DoNotCache, or an inner hit (whose tags it can't know; the node
-    // that computed it wrote its own copy), or once N has passed, it returns the value with every write skipped, as
-    // FactoryAsync does, so nothing is served over it. The copy's options have fail-safe off, so the compute's own
-    // exception passes through with nothing served.
+    // the normal entry leaves a copy: when the normal entry's call returned without that (a violation, DoNotCache, an
+    // inner hit, whose tags it can't know and whose node wrote its own copy, or a fail-safe value after the compute
+    // threw), or once N has passed, it returns the value with every write skipped, as FactoryAsync does, so nothing is
+    // served over it. The copy's options have fail-safe off, so the compute's own exception passes through with nothing
+    // served.
     private async Task<TValue> CopyFactoryAsync<TValue>(
         string entryKey,
         FusionCacheEntryOptions options,
@@ -329,6 +330,11 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
             return value;
         }
 
+        // The memory entry's expiry counts from now, so it gets what's left of N. The distributed cache's counts from
+        // the copy's stamp, taken before this factory started, so it gets N itself: what's left would shorten it twice,
+        // and other nodes, which read the copy from there, would lose it early, or on arrival once the compute took
+        // half of N.
+        copyOptions.DistributedCacheDuration = copyOptions.Duration;
         copyOptions.Duration = life;
         ctx.Tags = Dependency.NowTags(tags);
         return value;
@@ -436,9 +442,10 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="dependencies">What was written.</param>
     /// <remarks>
-    /// Takes no cancellation token, and is published again 5 to 6 s later in the background, as
-    /// <see cref="InvalidateAsync(IEnumerable{Dependency})"/> is. It writes twice the tags, so prefer that for writes
-    /// that can lag.
+    /// Behaves as <see cref="InvalidateAsync(IEnumerable{Dependency})"/> does: it takes no cancellation token, a
+    /// distributed cache write that fails doesn't make it throw, a slow one makes it wait, and it's published again 5 to
+    /// 6 s later in the background. It writes twice the tags, so use <see cref="InvalidateAsync(IEnumerable{Dependency})"/>
+    /// for writes that can lag.
     /// </remarks>
     public ValueTask InvalidateNowAsync(IEnumerable<Dependency> dependencies) =>
         InvalidateByAsync(dependencies, dependency => dependency.HardInvalidationTags);
@@ -706,7 +713,8 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         }
 
         // The copy lives N from its factory's start and no longer: fail-safe, jitter, and a level's own duration would
-        // each keep it past that, and a read of a logically expired entry would serve it. Its size is the query's.
+        // each keep it past that, and a read of a logically expired entry would serve it. Its factory sets the
+        // distributed cache's duration itself, to N from the copy's stamp. Its size is the query's.
         options.AllowStaleOnReadOnly = false;
         var copy = _entryOptions.Duplicate(n);
         copy.Size = options.Size;

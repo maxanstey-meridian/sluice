@@ -62,8 +62,8 @@ no longer than the entry's duration, or its query's `MaxStaleness` if that's lon
   stored. See [Leaving a value uncached](/guides/sources-and-queries#leaving-a-value-uncached).
 - **Under a memory size limit, tag markers aren't counted.** Sluice pins them (size 0,
   `NeverRemove`) so an invalidation is never lost to compaction, so the cache can hold more than
-  the limit by one small entry per dependency. See
-  [Limiting memory](/guides/configuration#limiting-memory).
+  the limit by one small entry per dependency (twice that for one read by a query with
+  `MaxStaleness`). See [Limiting memory](/guides/configuration#limiting-memory).
 
 ## Multi-node
 
@@ -106,7 +106,7 @@ no longer than the entry's duration, or its query's `MaxStaleness` if that's lon
   real old parent when its foreign key differs from the stored one, and its real old value of a
   unique column likewise. See
   [Rows saved without loading them](/guides/ef-core#rows-saved-without-loading-them).
-- **A value converter on a key, foreign key or unique column must round-trip**, and Sluice
+- **A value converter on a key, foreign key, or unique column must round-trip**, and Sluice
   can't check that it does: it never sees the stored value. So it refuses the model unless each
   such converter is one of EF's lossless built-ins or its class is marked `[SluiceRoundTrips]`,
   your promise. A converter from `HasConversion` lambdas moves into a class to be marked. See
@@ -125,7 +125,7 @@ no longer than the entry's duration, or its query's `MaxStaleness` if that's lon
   column again (a `Where` through a navigation joins a table whose key is also `Id`), it evicts
   the whole type. See
   [What a query records](/guides/ef-core#what-a-query-records),
-  [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes) and
+  [Bulk updates and deletes](/guides/ef-core#bulk-updates-and-deletes), and
   [Bulk writes by key](/guides/ef-core#bulk-writes-by-key).
 - **A `DbTransaction` committed or rolled back outside EF is invalidated late**: when Sluice
   next looks, such as the flow's next cached read, the context's next command, its connection
@@ -146,13 +146,13 @@ no longer than the entry's duration, or its query's `MaxStaleness` if that's lon
   from a DI scope of their own, so it must be registered scoped or transient (every EF
   registration's default is scoped); a singleton is refused. See [Setup](/guides/ef-core#setup).
 - **Tested on PostgreSQL only.** Key folding assumes PostgreSQL's comparison rules, and doesn't
-  fold accent- or culture-sensitive collations. A date, duration or time-of-day key, foreign key
-  or unique column on a provider other than PostgreSQL, SQL Server or SQLite needs a column type
+  fold accent- or culture-sensitive collations. A date, duration, or time-of-day key, foreign key,
+  or unique column on a provider other than PostgreSQL, SQL Server, or SQLite needs a column type
   with a size of 6 or more, such as `datetime(6)` or `time(6)`. See
   [Key folding](/guides/ef-core#key-folding).
 - **Composite primary keys can't be read with `read.Entity`**, and `read.Children` takes a
   single-column foreign key. See [Keys](/guides/ef-core#keys).
-- **Views, keyless types, functions and SQL-query mappings** can't be read inside a compute
+- **Views, keyless types, functions, and SQL-query mappings** can't be read inside a compute
   except in a fused fetch. See [What's refused](/guides/ef-core#what-s-refused).
 
 ## What a compute can't read
@@ -160,13 +160,13 @@ no longer than the entry's duration, or its query's `MaxStaleness` if that's lon
 - **Some reads go unchecked inside a compute**, such as `Find` of an entity a captured outside
   context already tracks, or Dapper on any connection. See
   [What isn't checked](/guides/strict-reads#what-isn-t-checked).
-- **Some reads only work in a fused fetch**: raw SQL, views, keyless types and your own
+- **Some reads only work in a fused fetch**: raw SQL, views, keyless types, and your own
   database functions. See [The declared route](/guides/strict-reads#the-declared-route).
 - **Query filters that read the context's state need the compute to set it**, from the query
   key, with `read.Db<AppDb>(db => db.TenantId = tenantId)`; Sluice can't check what the
   configure sets. Filters that read it where the configure can't set it (through a service the
   context holds, an unmarked property with a body, a method, a readonly field, or a virtual,
-  init-only or get-only property) are refused. See
+  init-only, or get-only property) are refused. See
   [Tenants](/guides/strict-reads#tenants-and-other-context-state).
 - **`[SluiceContextState]` is partly taken on trust.** A filter may read a scoped tenant
   service through a context property marked with it, set by

@@ -65,7 +65,7 @@ source once and use that one declaration everywhere. As for queries, see below f
 are compared.
 
 With the EF Core package, the names it gives a model's dependencies are its own: `Customers`,
-`Orders[CustomerId]`, `Pages(Slug)` and the rest are named after tables (see
+`Orders[CustomerId]`, `Pages(Slug)`, and the rest are named after tables (see
 [EF Core](/guides/ef-core)). A source of yours with one of those names would have its own key
 text, so a save through EF would miss its readers, and your writes would miss EF's. So it
 is refused, whichever comes first. Declaring your source throws `ArgumentException` once the
@@ -78,7 +78,7 @@ dependencies after a write Sluice can't see, use `set.Dependency(key)` or
 
 ## Queries
 
-A query has a name, a key type and a value type (or just a name and a value type, for a
+A query has a name, a key type, and a value type (or just a name and a value type, for a
 [query with no key](#queries-with-no-key)):
 
 - The compiler checks that each compute returns the query's value type.
@@ -86,7 +86,7 @@ A query has a name, a key type and a value type (or just a name and a value type
 - The cache key is `<name>:<key text>`, or just `<name>` for a query with no key. To change
   what a query caches and drop its old entries, rename it.
 
-Query names can't be blank, contain `:` or start with `__fc` (FusionCache keeps its own data
+Query names can't be blank, contain `:`, or start with `__fc` (FusionCache keeps its own data
 there, and Sluice refuses a FusionCache tag prefix outside it: see
 [What Sluice sets](/guides/configuration#what-sluice-sets)). Declaring the same name twice with
 different key or value types, or once with a key and once without, throws `ArgumentException`,
@@ -150,7 +150,7 @@ so it almost never hits. `MaxStaleness` lets such a query lag by a stated time i
 
 ```csharp
 // The open jobs on the public board: read on every page, written all day, fine an hour old.
-public static readonly Query<string, JobBoard> JobBoard = new("job-board")
+public static readonly Query<JobBoard> PublicJobBoard = new("job-board")
 {
     MaxStaleness = TimeSpan.FromHours(1),
 };
@@ -173,11 +173,11 @@ after it. So:
   [Saves that must go at once](/guides/ef-core#saves-that-must-go-at-once).
 
 It works by storing each computed value twice: the usual entry, which a write evicts at once, as
-always, and a *stale copy*, which only `InvalidateNowAsync` and `ClearAsync` evict, and which
-expires N after its compute began. A read takes the entry, else the copy, else computes. A
-compute that takes longer than N leaves no copy, so a write evicts its value at once. Nor does
-a compute that stores nothing: one that called [`DoNotCache`](#leaving-a-value-uncached), broke
-a rule, or ran while its flow had
+always, and a *stale copy*, which only `InvalidateNowAsync`, `InvalidateNow`, and `ClearAsync`
+evict, and which expires N after its compute began. A read takes the entry, else the copy, else
+computes. A compute that takes longer than N leaves no copy, so a write evicts its value at once.
+Nor does a compute that stores nothing: one that called
+[`DoNotCache`](#leaving-a-value-uncached), broke a rule, or ran while its flow had
 [uncommitted writes](/guides/strict-reads#reading-your-own-uncommitted-writes).
 
 N needn't be shorter than `Duration`. Longer, a value can outlive its `Duration`, written to or
@@ -190,9 +190,11 @@ The cost, paid only by queries that set it:
 
 - each compute writes the value twice, to memory and to the distributed cache, so it's
   serialised twice and counts twice under a [size limit](#size);
-- the copies carry tags of their own, so there are twice as many tag markers, and a server's
-  first read of a copy looks up each of its tags in the distributed cache, one round trip each;
-- a cold miss can make up to about six distributed cache reads, against one or two;
+- the copies carry tags of their own, so there are twice as many
+  [tag markers](/guides/configuration#limiting-memory), and a server's first read of a copy looks
+  up each of its tags in the distributed cache, one round trip each;
+- a read that finds neither the entry nor the copy in this server's memory can make up to about
+  six distributed cache reads, against one or two;
 - a read served from the copy costs a miss on the entry first;
 - the first read on each server after a write removes the evicted entry from the distributed
   cache and tells the other servers. In a race, that can evict a fresh entry another server has
@@ -200,7 +202,7 @@ The cost, paid only by queries that set it:
 
 A hit on the entry costs what it does without `MaxStaleness`.
 
-The copy's expiry is a time of day, set by the server that computed it and compared with each
+The copy expires at a fixed moment, set by the server that computed it and compared with each
 reading server's own clock. So clocks that disagree move the bound by the difference. See
 [Limitations](/misc/limitations#multi-node).
 

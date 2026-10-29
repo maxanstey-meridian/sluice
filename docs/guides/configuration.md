@@ -5,7 +5,7 @@ you configure there is FusionCache's, documented by
 [FusionCache](https://github.com/ZiggyCreatures/FusionCache/tree/main/docs): durations, the
 distributed cache (a shared second level, usually Redis), the backplane (messages that keep
 each server's memory cache in sync), the serialiser, fail-safe (serving the last good value
-when a compute fails), timeouts and auto-clone.
+when a compute fails), timeouts, and auto-clone.
 
 ```csharp
 using Sluice;
@@ -27,14 +27,15 @@ configuration, overriding anything that conflicts:
 
 | Setting | Value | Why |
 |---|---|---|
-| key prefix | the cache name | Sluice's keys, tags and clears can't touch another FusionCache on the same Redis |
+| key prefix | the cache name | Sluice's keys, tags, and clears can't touch another FusionCache on the same Redis |
 | `DisableTagging` | `false` | invalidation is tagging |
 | `RemoveByTagBehavior` | `Remove` | under `Expire`, fail-safe would serve a value that was just invalidated |
 | `FactorySoftTimeout`, `FactoryHardTimeout` | infinite, per call | a timed-out compute would keep running, and using what it holds, after the caller moved on |
 | `AllowTimedOutFactoryBackgroundCompletion`, `EagerRefreshThreshold` | off, per call | both store a value marked as built when its compute *finished*, so an invalidation that landed while it ran could be missed |
 | `ClearAsync` | without fail-safe | a cleared value is never served as a fallback |
 | `AllowStaleOnReadOnly` | off, per call, for a query with [`MaxStaleness`](/guides/sources-and-queries#maxstaleness) | it reads its entry and its stale copy before computing, and an expired one would be served past its `Duration` or past `MaxStaleness` |
-| a stale copy's fail-safe, `JitterMaxDuration`, `MemoryCacheDuration`, and `DistributedCacheDuration` | off | each would keep the copy past `MaxStaleness` |
+| a stale copy's fail-safe, `JitterMaxDuration`, and `MemoryCacheDuration` | off | each would keep the copy past `MaxStaleness` |
+| a stale copy's `DistributedCacheDuration` | the query's `MaxStaleness` | FusionCache counts it from the copy's stamp, taken before the compute, so in Redis the copy ends `MaxStaleness` after its compute began, as it does in memory |
 | `TagsDefaultEntryOptions.Priority`, `.Size` | `NeverRemove`, `0` | under a memory size limit, a tag marker evicted or refused for want of room would let an invalidated value be served again |
 
 And it refuses, when `SluiceCache` is first resolved, two `InternalStrings` settings that would
@@ -98,8 +99,9 @@ Tag markers, the small entries that record when each dependency was last invalid
 exempt: Sluice stores them with size 0 and `NeverRemove`, whatever you set, because a marker
 that went missing would read as "never invalidated" and an evicted value would come back. They
 aren't counted against the limit, so the cache can hold more than the limit by one small entry
-per dependency it has seen, until each expires: by default up to ten days after it was last
-written (`TagsDefaultEntryOptions.FailSafeMaxDuration`; see [the lifetime rule](#the-lifetime-rule)).
+per dependency it has seen (twice that for one read by a query with `MaxStaleness`), until
+each expires: by default up to ten days after it was last written
+(`TagsDefaultEntryOptions.FailSafeMaxDuration`; see [the lifetime rule](#the-lifetime-rule)).
 
 ## Logging
 
@@ -180,7 +182,7 @@ builder.Services.AddSluice(cache =>
 ```
 
 The packages are `ZiggyCreatures.FusionCache.Serialization.SystemTextJson`,
-`ZiggyCreatures.FusionCache.Backplane.StackExchangeRedis` and
+`ZiggyCreatures.FusionCache.Backplane.StackExchangeRedis`, and
 `Microsoft.Extensions.Caching.StackExchangeRedis`. The timeouts and both circuit breakers are
 the recommended settings; the next section says why.
 
@@ -190,13 +192,14 @@ What multi-node can't guarantee is in [Limitations](/misc/limitations#multi-node
 
 Sluice invalidates through FusionCache tags: each cached value is labelled with what it read,
 and invalidating writes a timestamp for a label. Each dependency you invalidate writes one or
-two tags to Redis, and announces each over the backplane. `InvalidateAsync`, and every EF save,
-waits for those writes. FusionCache puts no timeout on them, so only the Redis client's own
-timeout stops them waiting.
+two tags to Redis (two or four with `InvalidateNowAsync`), and announces each over the
+backplane. `InvalidateAsync`, `InvalidateNowAsync`, and every EF save wait for those writes.
+FusionCache puts no timeout on them, so only the Redis client's own timeout stops them waiting.
 
 - **A slow Redis** holds up each invalidation, and each EF save, until the client times out.
   That's why the sample sets one second.
-- **A failed write doesn't throw** out of `InvalidateAsync` or `SaveChanges`. FusionCache keeps
+- **A failed write doesn't throw** out of `InvalidateAsync`, `InvalidateNowAsync`, or
+  `SaveChanges`. FusionCache keeps
   the tag and writes it again once Redis is back (its auto-recovery, on by default). Until
   then, other servers don't hear of the invalidation. If the server restarts first, the retry
   is lost, and the old value lives until its entry expires.
@@ -244,8 +247,8 @@ your entries, or turning fail-safe off for the tag data:
 ```text
 The Sluice cache's DefaultEntryOptions keeps entries in memory for up to 30.00:00:00, longer
 than Sluice's tag data there (10.00:00:00), so an invalidated entry could come back once its tag
-data expires. Shorten Duration, MemoryCacheDuration, FailSafeMaxDuration or JitterMaxDuration, or
-lengthen TagsDefaultEntryOptions.MemoryCacheDuration or TagsDefaultEntryOptions.FailSafeMaxDuration.
+data expires. Shorten Duration, MemoryCacheDuration, FailSafeMaxDuration, or JitterMaxDuration,
+or lengthen TagsDefaultEntryOptions.MemoryCacheDuration or TagsDefaultEntryOptions.FailSafeMaxDuration.
 ```
 
 Lengthen the tag data to match:

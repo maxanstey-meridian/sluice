@@ -1,6 +1,6 @@
 # How It Works
 
-Sluice is glue over FusionCache. It has no cache, lock, queue or store of its own: dependencies
+Sluice is glue over FusionCache. It has no cache, lock, queue, or store of its own: dependencies
 become FusionCache tags, and invalidation is FusionCache's `RemoveByTag`.
 
 ## Dependencies become tags
@@ -54,12 +54,17 @@ expired entry, whatever fail-safe or `AllowStaleOnReadOnly` you set, since eithe
 past its life. On two misses, it calls `GetOrSetAsync` on the copy's key, and the copy's factory
 makes the usual call on the entry's key with the same `read`. So the copy is stamped before the
 compute starts, and an `InvalidateNowAsync` that lands while the compute runs removes the copy
-too. The copy's factory keeps the value only if its own compute stored the entry: it tags the
-copy with the entry's tags as now-tags, and gives it N less the time since the factory started,
-with fail-safe, jitter, and per-level durations off. Both times are read from
-`DateTimeOffset.UtcNow`, the clock FusionCache stamps and expires entries on, not the
-`TimeProvider` registered in DI. Otherwise, or once N has passed, it skips the three writes, as
-the guards below do. N counts from the compute, not the write, because FusionCache keeps only a
+too. An `InvalidateAsync` that lands while the compute runs leaves the copy, so the next caller
+gets it until N. The copy's factory keeps the value only if its own compute stored the entry: it
+tags the copy with the entry's tags as now-tags, with fail-safe, jitter, and
+`MemoryCacheDuration` off. In memory, FusionCache counts the copy's life from when it's stored,
+so the factory gives it N less the time since the factory started. The factory's start and end are
+both read from `DateTimeOffset.UtcNow`, the clock FusionCache stamps and expires entries on, not the
+`TimeProvider` registered in DI. In the distributed cache, FusionCache counts from the copy's
+stamp, so the factory sets `DistributedCacheDuration` to N. Either way the copy ends no later
+than N after its compute began. When its own compute stored nothing, or N has already passed,
+the factory skips the memory write, the distributed write, and the backplane message, as the
+guards below do. N counts from the compute, not the write, because FusionCache keeps only a
 tag's latest invalidation, not the first since an entry was stored. A query without
 `MaxStaleness` makes the single `GetOrSetAsync` call, and never touches a copy.
 
@@ -68,7 +73,7 @@ tag's latest invalidation, not the first since an entry was stored. A query with
 A compute that recorded nothing, called `GetOrSetAsync` from inside itself, or used another
 compute's `read`, is a bug. Sluice doesn't throw from the factory, because FusionCache's
 fail-safe would catch the exception and serve a stale value instead. The factory records the violation, tells FusionCache to skip the
-memory write, the distributed write and the backplane message, and returns. `GetOrSetAsync` then
+memory write, the distributed write, and the backplane message, and returns. `GetOrSetAsync` then
 throws once FusionCache returns. The EF package's strict-read checks use the same route, so a
 compute that catches their exception still caches nothing. `read.DoNotCache()` takes the same
 route, skipping the three writes, but hands the value back instead of throwing. A package can
@@ -103,7 +108,7 @@ scope), each write in it adds a probe for that list, keyed by the transaction, t
 flow's box. `GetOrSetAsync` asks the probes; with no box that's one `AsyncLocal` lookup, plus a read of
 `Transaction.Current` once the EF package has registered its ambient lookup. If anything is pending, the call skips FusionCache
 entirely, so it never joins another caller's stampede lock: it runs the compute through the same
-`read`, guards and held resources, stores nothing, and intersects the tags the compute read with
+`read`, guards, and held resources, stores nothing, and intersects the tags the compute read with
 the tags the pending writes will invalidate. Any overlap throws; none returns the fresh value.
 
 ## An invalidation
@@ -137,7 +142,7 @@ The EF package builds core sources from the model, once per model:
 Keys go through the property's value converter to the value the database stores, then are folded
 (decimal scale, string case and trailing spaces, dates to the microsecond), so values the
 database treats as equal give one tag. Before building any of them, the package checks that
-every converter on a key, foreign key or unique column is one it can trust to round-trip: marked
+every converter on a key, foreign key, or unique column is one it can trust to round-trip: marked
 `[SluiceRoundTrips]`, or one of EF's lossless built-ins.
 
 `read.Db<TContext>()` takes the compute's own context from a DI scope the compute opens for
@@ -151,7 +156,7 @@ scope of the app gets a different instance, and refuses a shared one.
 Recording what a query reads is one EF interceptor for the whole process:
 
 - **On every query compile** (`QueryCompilationStarting`), inside a compute or not: the query's
-  expression tree is walked for the entity types it reads: its roots, joins and subqueries, every
+  expression tree is walked for the entity types it reads: its roots, joins, subqueries, every
   navigation (matched by name on every type the instance could be), many-to-many join types, and,
   for each type reached, its query filters and auto-included navigations. Owned types count as
   their owner. The result goes into a `TagWith` on the query, so its SQL starts
@@ -173,7 +178,7 @@ inside a compute, a command on such a context throws when it's initialised: a wr
 a read outside a fused fetch, and a read in one inside a transaction. A command with no context
 at all (a provider's own, such as a sequence generator's) throws anywhere inside a compute.
 
-`read.Entity`, `read.EntityAsync` and `read.Children` record a narrower dependency, one row (by key, or by a unique
+`read.Entity`, `read.EntityAsync`, and `read.Children` record a narrower dependency, one row (by key, or by a unique
 column's value) or one parent's rows, then return the set as a no-tracking query with
 auto-includes off, filtered to the key or value (`Entity`) or foreign key value (`Children`). The query is marked, so its tag leaves its own type out unless it
 reaches that type again.
@@ -205,7 +210,7 @@ A second interceptor, one per `SluiceCache`, handles writes. For a save:
 3. **Publish**, depending on the transaction EF used, read the way EF's batch executor reads it:
    - none: invalidate now;
    - an EF transaction: hold the dependencies against the transaction, and invalidate on
-     commit, rollback or failure, or once Sluice sees it was ended outside EF;
+     commit, rollback, or failure, or once Sluice sees it was ended outside EF;
    - an enlisted or ambient transaction: invalidate from its `TransactionCompleted` event;
    - none where it completes, but a live `TransactionScope` its connection was opened in, or its
      first command ran in: invalidate now, and again from that scope's `TransactionCompleted`.
@@ -228,7 +233,7 @@ each unique column whose quoted name appears in the SQL; for a delete, each `CAS
 whose SQL names the key's column again, besides Sluice's own condition, may set the key,
 so it publishes whole. Every other type the SQL names publishes whole.
 
-A failed, cancelled or conflicting save publishes the same way: never drop, because
+A failed, cancelled, or conflicting save publishes the same way: never drop, because
 over-invalidating is safe. After a commit, a failure to invalidate is logged and never thrown.
 Sync EF calls publish synchronously, through `Invalidate`, never by blocking on async code.
 

@@ -128,18 +128,105 @@ public sealed class StalenessTests
         _runs.Should().Be(2);
     }
 
+    // A copy written anyway would be dead on arrival, so no read could tell; FusionCache would still remove it from
+    // memory, write it to the distributed cache or remove it there, and tell the other nodes. So this watches the
+    // writes. Handlers run inline, so each has reported by the time the read returns.
     [Fact]
     public async Task A_compute_that_outlasts_MaxStaleness_leaves_no_stale_copy()
     {
-        await using var node = new SluiceNode();
+        await using var node = SluiceNode.Clustered(
+            _l2,
+            _bus,
+            cache => cache.WithOptions(options => options.EnableSyncEventHandlersExecution = true)
+        );
+        var copyKey = $"{SluiceCache.CacheName}::{_view.EntryKey("1")}";
+        var writes = new ConcurrentQueue<string>();
+        node.Fusion.Events.Memory.Set += (_, e) => Record(e.Key, "memory set");
+        node.Fusion.Events.Memory.Remove += (_, e) => Record(e.Key, "memory remove");
+        node.Fusion.Events.Distributed.Set += (_, e) => Record(e.Key, "distributed set");
+        node.Fusion.Events.Distributed.Remove += (_, e) => Record(e.Key, "distributed remove");
+        node.Fusion.Events.Backplane.MessagePublished += (_, e) =>
+            Record(e.Message.CacheKey, "backplane");
+
+        void Record(string? key, string write)
+        {
+            if (key == copyKey)
+            {
+                writes.Enqueue(write);
+            }
+        }
+
         await Read(node.Cache, slow: _n * 1.2);
-        (await HasStaleCopy(node, _view)).Should().BeFalse();
+        writes.Should().BeEmpty();
 
         _data[1] = "new";
         await node.Cache.InvalidateAsync(_rows.For(1));
 
         (await Read(node.Cache)).Should().Be("new");
         _runs.Should().Be(2);
+        writes
+            .Should()
+            .Contain(
+                ["memory set", "distributed set", "backplane"],
+                "a quick compute writes its copy, which these handlers see"
+            );
+    }
+
+    // Node A's compute takes 0.6 N, so its copy reaches the distributed cache 0.6 N after its stamp. Node B reads it
+    // from there and keeps it until N after that stamp; given what was left of N, as memory is, it would have expired
+    // 0.4 N after the stamp, before it was written. B reads as soon as A's invalidation returns, for the most margin.
+    [Fact]
+    public async Task Another_node_keeps_a_slow_compute_s_stale_copy_for_MaxStaleness_from_its_start()
+    {
+        await using var a = SluiceNode.Clustered(_l2, _bus);
+        await using var b = SluiceNode.Clustered(_l2, _bus);
+        await Read(a.Cache, slow: _n * 0.6);
+        var began = _computeBegan;
+        _data[1] = "new";
+        await a.Cache.InvalidateAsync(_rows.For(1));
+
+        (await Read(b.Cache)).Should().Be("old", "node B reads node A's copy, which lives N");
+        _runs.Should().Be(1);
+
+        await Until(began, _n * 1.25);
+
+        (await Read(b.Cache)).Should().Be("new");
+        _runs.Should().Be(2);
+    }
+
+    // Another caller stores the normal entry between this caller's reads and its copy's lock: the copy's factory finds
+    // it there, and can't know its tags, so it writes no copy. One written anyway would carry no now-tags, and outlive
+    // the normal entry's invalidation. Handlers run inline, so the entry is there before the copy's factory runs.
+    [Fact]
+    public async Task An_inner_hit_leaves_no_stale_copy()
+    {
+        await using var node = new SluiceNode(cache =>
+            cache.WithOptions(options => options.EnableSyncEventHandlersExecution = true)
+        );
+        var copyKey = $"{SluiceCache.CacheName}::{_view.EntryKey("1")}";
+        var arranged = 0;
+        node.Fusion.Events.Miss += (_, e) =>
+        {
+            // The copy's read misses, just before its GetOrSetAsync takes the lock.
+            if (e.Key == copyKey && Interlocked.Exchange(ref arranged, 1) == 0)
+            {
+                node.Fusion.Set(
+                    _view.EntryKey("1"),
+                    "theirs",
+                    tags: ["stale-rows:1", "stale-rows:"]
+                );
+            }
+        };
+
+        (await Read(node.Cache)).Should().Be("theirs");
+        _runs.Should().Be(0);
+        (await HasStaleCopy(node, _view)).Should().BeFalse();
+
+        _data[1] = "new";
+        await node.Cache.InvalidateAsync(_rows.For(1));
+
+        (await Read(node.Cache)).Should().Be("new");
+        _runs.Should().Be(1);
     }
 
     // Counted from the end, the copy would last until 1.5 N from the compute's start, so the read at 1.25 N would get it.
@@ -160,8 +247,9 @@ public sealed class StalenessTests
     }
 
     // The app's fail-safe keeps the normal entry in memory long past its Duration, and asks every read to return an
-    // expired entry; node B keeps the copy it read from the distributed cache in memory for N from that read. Both
-    // entries' reads refuse what's expired whatever the app asks, so neither is served once its life has ended.
+    // expired entry; node B keeps the copy it read from the distributed cache in memory for N from that read, which is
+    // 0.5 N after the copy's compute began, so it's still there, expired, at 1.1 N. Both entries' reads refuse what's
+    // expired whatever the app asks, so neither is served once its life has ended.
     [Fact]
     public async Task With_fail_safe_on_neither_entry_is_served_past_its_life()
     {
@@ -179,7 +267,6 @@ public sealed class StalenessTests
         };
         await using var a = SluiceNode.Clustered(_l2, _bus, FailSafe);
         await using var b = SluiceNode.Clustered(_l2, _bus, FailSafe);
-        var before = Stopwatch.GetTimestamp();
         await Read(a.Cache, shortLived, row: 1);
         await Read(a.Cache, shortLived, row: 2);
         var lastBegan = _computeBegan;
@@ -188,7 +275,7 @@ public sealed class StalenessTests
         _data[1] = "new";
         _data[2] = "new";
         await a.Cache.InvalidateAsync(_rows.For(2));
-        await Until(before, _n * 0.5);
+        await Until(lastBegan, _n * 0.5);
         (await Read(b.Cache, shortLived, row: 2))
             .Should()
             .Be(
@@ -196,7 +283,24 @@ public sealed class StalenessTests
                 "node B reads the copy from the distributed cache, and keeps it for N from now"
             );
 
-        await Until(lastBegan, _n * 1.25);
+        await Until(lastBegan, _n * 1.1);
+
+        // Both expired entries are still there for a read that asks for one, so the reads below refuse them rather
+        // than find nothing.
+        static FusionCacheEntryOptions Permissive(SluiceNode node)
+        {
+            var options = node.Fusion.DefaultEntryOptions.Duplicate();
+            options.AllowStaleOnReadOnly = true;
+            return options;
+        }
+        (await a.Fusion.TryGetAsync<string>(shortLived.EntryKey("1"), Permissive(a)))
+            .GetValueOrDefault()
+            .Should()
+            .Be("old", "fail-safe keeps node A's expired entry");
+        (await b.Fusion.TryGetAsync<string>($":{shortLived.EntryKey("2")}", Permissive(b)))
+            .GetValueOrDefault()
+            .Should()
+            .Be("old", "node B keeps the copy for N from its read");
 
         (await Read(a.Cache, shortLived, row: 1))
             .Should()
@@ -314,18 +418,26 @@ public sealed class StalenessTests
         (await Read(node.Cache, _patient)).Should().Be("new");
     }
 
+    // With a distributed cache or a backplane, FusionCache can't just empty memory: each node drops an entry stamped
+    // before the clear when it next reads it, so that check is what removes each node's copy. Both nodes hold one.
     [Fact]
-    public async Task ClearAsync_evicts_stale_copies()
+    public async Task ClearAsync_evicts_stale_copies_on_every_node()
     {
-        await using var node = new SluiceNode();
-        await Read(node.Cache, _patient);
+        await using var a = SluiceNode.Clustered(_l2, _bus);
+        await using var b = SluiceNode.Clustered(_l2, _bus);
+        await Read(a.Cache, _patient);
         _data[1] = "new";
-        await node.Cache.InvalidateAsync(_rows.For(1));
-        (await Read(node.Cache, _patient)).Should().Be("old");
+        await a.Cache.InvalidateAsync(_rows.For(1));
+        (await Read(a.Cache, _patient)).Should().Be("old");
+        (await Read(b.Cache, _patient)).Should().Be("old");
 
-        await node.Cache.ClearAsync();
+        await a.Cache.ClearAsync();
 
-        (await Read(node.Cache, _patient)).Should().Be("new");
+        (await HasStaleCopy(a, _patient)).Should().BeFalse();
+        (await HasStaleCopy(b, _patient)).Should().BeFalse();
+        (await Read(b.Cache, _patient)).Should().Be("new");
+        (await Read(a.Cache, _patient)).Should().Be("new", "node A reads node B's new entry");
+        _runs.Should().Be(2);
     }
 
     // A copy written anyway would hold the violation's default value, or the uncached one, and the next read would
