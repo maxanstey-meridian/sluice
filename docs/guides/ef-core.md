@@ -40,11 +40,11 @@ builder.Services.AddDbContextFactory<ShopDb>(
   The default singleton factory makes it from the root provider, which refuses scoped services
   in Development and, elsewhere, hands every context one shared instance.
 - `UseSluice` needs `SluiceCache` (`AddSluice`), the EF package (`AddSluiceEntityFrameworkCore`,
-  called where you call `AddSluice`), and logging registered. ASP.NET Core and the Generic Host register
-  logging; a bare `ServiceCollection` needs `AddLogging()`. Without any of them, `UseSluice`
-  throws `InvalidOperationException`. `AddSluiceEntityFrameworkCore` also starts Sluice's watch
-  for [contexts without `UseSluice`](/guides/strict-reads#a-query-on-another-context) inside a
-  compute, so it covers the very first compute.
+  called where you call `AddSluice`), and logging registered. ASP.NET Core and the Generic Host
+  register logging; a bare `ServiceCollection` needs `AddLogging()`. Without any of them,
+  `UseSluice` throws `InvalidOperationException`. `AddSluiceEntityFrameworkCore` also starts
+  Sluice's watch for [contexts without `UseSluice`](/guides/strict-reads#a-query-on-another-context)
+  inside a compute, so it covers the very first compute.
 - Relational providers only: Sluice reads each save's transaction from the relational
   connection. A context on any other provider throws `NotSupportedException` when it saves,
   before it writes anything, and `read.Db` and the read helpers refuse it the same way. The
@@ -91,19 +91,18 @@ what it wrote, and nothing an earlier use wrote. Contexts sharing a transaction
 need nothing more, as long as each uses `UseSluice` with the same `SluiceCache`. See
 [Contexts sharing a transaction](/guides/transactions#contexts-sharing-a-transaction).
 
-A compute's context never comes from the pool. EF resets a pooled context's own state between
-uses, but not your fields, and not a connection string you set, so what a compute's
+A compute's context never comes from the pool. EF resets a pooled context's own state between uses,
+but not your fields, and not a connection string you set, so what a compute's
 [configure](/guides/strict-reads#tenants-and-other-context-state) set (a tenant, a tenant's
-database) would still be there for the next use, a request's. Instead, Sluice builds the
-compute's context from the pool's options, with its constructor's other services from the
-compute's own DI scope, and disposes it when the compute ends. For a pool registered through
-EF (`AddDbContextPool`, `AddPooledDbContextFactory`), nothing is leased and no factory of yours
-is called. A pool you built by hand (`new PooledDbContextFactory<T>(options)`) is leased once, to
-see that it's a pool, and the lease goes back untouched. EF's model and internal services are
-shared, so this costs one context
-construction per compute that uses one. Requests keep using the pool as before, and you still
-set a request's tenant on every lease, as
-[EF's docs do for tenants](https://learn.microsoft.com/ef/core/performance/advanced-performance-topics#managing-state-in-pooled-contexts).
+database) would still be there for the next use, a request's. Instead, Sluice builds the compute's
+context from the pool's options, with its constructor's other services from the compute's own DI
+scope, and disposes it when the compute ends. For a pool registered through EF (`AddDbContextPool`,
+`AddPooledDbContextFactory`), nothing is leased and no factory of yours is called. A pool you built
+by hand (`new PooledDbContextFactory<T>(options)`) is leased once, to see that it's a pool, and the
+lease goes back untouched. EF's model and internal services are shared, so this costs one context
+construction per compute that uses one. Requests keep using the pool as before, and you still set a
+request's tenant on every lease, as [EF's docs do for
+tenants](https://learn.microsoft.com/ef/core/performance/advanced-performance-topics#managing-state-in-pooled-contexts).
 
 ## Reading
 
@@ -142,10 +141,11 @@ Sluice works that out from the query when EF compiles it, so everything EF can e
 - every navigation it follows, in a filter, a projection, or an `Include`, by property, through
   `EF.Property`, through a cast or an interface, or by name;
 - many-to-many navigations, which read the join entity too;
-- what EF adds by itself: [auto-included](https://learn.microsoft.com/ef/core/querying/related-data/eager#model-configuration-for-auto-including-navigations)
+- what EF adds by itself:
+  [auto-included](https://learn.microsoft.com/ef/core/querying/related-data/eager#model-configuration-for-auto-including-navigations)
   navigations, unless you call `IgnoreAutoIncludes()`, and each type's query filters, unless you
-  ignore them: `IgnoreQueryFilters()` drops all of them, `IgnoreQueryFilters(["Tenant"])` just
-  the filters you name;
+  ignore them: `IgnoreQueryFilters()` drops all of them, `IgnoreQueryFilters(["Tenant"])` just the
+  filters you name;
 - `Find`, explicit loading (`Entry(order).Reference(o => o.Customer).LoadAsync()`), and compiled
   queries.
 
@@ -195,11 +195,11 @@ var orders = await read.Children(computeDb.Orders, order => order.CustomerId, cu
 | `await read.EntityAsync(computeDb.Forms, f => f.Slug, value, ct)` | the row whose unique column holds `value` | that row, or a row taking or leaving `value` |
 | `read.Children(computeDb.Orders, fk, key)` | the rows whose foreign key is `key` | any of those rows, or a row joining or leaving the set |
 
-Each returns an `IQueryable<T>` you can filter, order, page, and project, on the context
-`read.Db` gave you; `EntityAsync` returns it once it has looked up the rows holding the value
-([By a unique column](#by-a-unique-column)). Only the helper's own type is narrowed: the `Coupon` navigation in the second
-query still depends on every coupon. A read that finds nothing still depends on what it looked
-for, so inserting the row later evicts the cached "not found". The helpers don't track unless
+Each returns an `IQueryable<T>` you can filter, order, page, and project, on the context `read.Db`
+gave you; `EntityAsync` returns it once it has looked up the rows holding the value ([By a unique
+column](#by-a-unique-column)). Only the helper's own type is narrowed: the `Coupon` navigation in
+the second query still depends on every coupon. A read that finds nothing still depends on what it
+looked for, so inserting the row later evicts the cached "not found". The helpers don't track unless
 you call `AsTracking()`.
 
 The helpers don't load auto-included navigations, anywhere in the query. A helper's query
@@ -218,10 +218,10 @@ var ticket = await read.Entity(computeDb.Tickets, id)
 
 ### By a unique column
 
-`await read.EntityAsync(set, column, value, ct)` reads one row by a column that isn't its key, such as a slug
-or an email, without depending on every row of the type. A save of another row doesn't evict it;
-a save that gives a row that value, changes the row holding it, or moves the value off it, does.
-So a cached "not found" for a slug is evicted once a row gets that slug.
+`await read.EntityAsync(set, column, value, ct)` reads one row by a column that isn't its key, such
+as a slug or an email, without depending on every row of the type. A save of another row doesn't
+evict it; a save that gives a row that value, changes the row holding it, or moves the value off it,
+does. So a cached "not found" for a slug is evicted once a row gets that slug.
 
 The column must be covered by a single-column unique index or alternate key in the EF model
 (`HasIndex(f => f.Slug).IsUnique()`). A filtered unique index counts, so a slug unique only among
@@ -270,10 +270,10 @@ uncached with [`read.DoNotCache()`](/guides/sources-and-queries#leaving-a-value-
 ### Keys
 
 - Pass the key as the exact .NET type the model uses: the primary key's type for `Entity`, the
-  foreign key property's for `Children`. A typed id with a value converter is passed as the
-  typed id (and its converter marked `[SluiceRoundTrips]`: see [Key folding](#key-folding)). Any other type, such as `1L` for an `int` key, throws
-  `ArgumentException` naming the type expected. The compiler can't check these keys: the type
-  comes from the EF model.
+  foreign key property's for `Children`. A typed id with a value converter is passed as the typed id
+  (and its converter marked `[SluiceRoundTrips]`: see [Key folding](#key-folding)). Any other type,
+  such as `1L` for an `int` key, throws `ArgumentException` naming the type expected. The compiler
+  can't check these keys: the type comes from the EF model.
 - `Entity` doesn't support composite primary keys: it throws `NotSupportedException`. Use
   `Children`, or a plain query.
 - `Children`'s foreign key property may be nullable, but the key you pass can't be null: rows
@@ -330,11 +330,11 @@ Cached entities aren't attached to any context; to edit one, load it again on yo
 Every caller also gets the same object, so never modify one; see
 [Shared instances](/guides/configuration#shared-instances-and-auto-clone).
 
-Sluice checks every value before it's stored. A value that holds a lazy loader or a `DbContext` anywhere in
-its fields, such as an entity wrapped in your own record, throws `InvalidOperationException`,
-naming the query and the path to it, and nothing is cached: the cached value would load related
-rows later, outside the compute, or keep the compute's context alive. Select the values you need
-into your own type instead.
+Sluice checks every value before it's stored. A value that holds a lazy loader or a `DbContext`
+anywhere in its fields, such as an entity wrapped in your own record, throws
+`InvalidOperationException`, naming the query and the path to it, and nothing is cached: the cached
+value would load related rows later, outside the compute, or keep the compute's context alive.
+Select the values you need into your own type instead.
 
 ## Writing
 
@@ -363,12 +363,12 @@ deleted:
 A `Children` list is evicted when *any* row in it changes, not only when rows join or leave.
 One dependency covers the whole list; that's coarse on purpose.
 
-Sluice reads what changed from the change tracker when EF initialises the save's first command,
-once EF has detected changes and applied its cascades and orphan deletions at the timings you
-set, and it detects nothing itself, so it never changes what EF saves: with
-`AutoDetectChangesEnabled` off, an edit EF doesn't detect is neither saved nor invalidated. A
-save with nothing to write runs no command and invalidates nothing. A save that fails, is cancelled, or hits a concurrency conflict still
-invalidates what it was saving, because part of it may already have committed.
+Sluice reads what changed from the change tracker when EF initialises the save's first command, once
+EF has detected changes and applied its cascades and orphan deletions at the timings you set, and it
+detects nothing itself, so it never changes what EF saves: with `AutoDetectChangesEnabled` off, an
+edit EF doesn't detect is neither saved nor invalidated. A save with nothing to write runs no
+command and invalidates nothing. A save that fails, is cancelled, or hits a concurrency conflict
+still invalidates what it was saving, because part of it may already have committed.
 
 ### Writes that must go at once
 
@@ -513,11 +513,10 @@ they touch by hand.
 
 The database may treat two different .NET values as the same key: `1m` and `1.00m`, `"abc"` and
 `"ABC "` in a case-insensitive column. So Sluice normalises (folds) key values, and the values
-`read.EntityAsync` reads a unique column by, before using them: `decimal`s lose trailing zeros, strings are upper-cased without trailing spaces (for
-`citext` and case-insensitive collations), and dates, durations, and times of day are cut to the
-microsecond. Folding can
-only make an eviction broader, never miss one. Accent- and culture-sensitive collations aren't
-folded.
+`read.EntityAsync` reads a unique column by, before using them: `decimal`s lose trailing zeros,
+strings are upper-cased without trailing spaces (for `citext` and case-insensitive collations), and
+dates, durations, and times of day are cut to the microsecond. Folding can only make an eviction
+broader, never miss one. Accent- and culture-sensitive collations aren't folded.
 
 Folding follows PostgreSQL's rules. The test suite runs on PostgreSQL, and other providers are
 untested. A key, foreign key, or unique column holding a date, duration, or time of day the
@@ -642,13 +641,13 @@ await db.Set<FormEntity>().Where(f => f.OrganisationId == organisationId).ForKey
 await db.Set<Order>().ForKeys(ids).ExecuteUpdateAsync(s => s.SetProperty(o => o.Item, item), ct);
 ```
 
-Move the key condition (`f.Id == id`) out of your `Where` and into `ForKey`; the rest of the
-`Where` stays, so a conditional write is still conditional. Keep it in your `Where` as well and
-the statement names the key's column twice, so an update evicts as a plain one does (see below). Sluice doesn't recognise a key
-condition you write yourself: a bulk write without `ForKey` evicts every read of its type,
-whatever its `Where` says. `ForKey` and `ForKeys` return a `KeyedRows<T>`, not a query: it has
-`ExecuteUpdate`, `ExecuteUpdateAsync`, `ExecuteDelete`, and `ExecuteDeleteAsync`, taking EF's own
-setters, and nothing else, so it can't end up inside another query.
+Move the key condition (`f.Id == id`) out of your `Where` and into `ForKey`; the rest of the `Where`
+stays, so a conditional write is still conditional. Keep it in your `Where` as well and the
+statement names the key's column twice, so an update evicts as a plain one does (see below). Sluice
+doesn't recognise a key condition you write yourself: a bulk write without `ForKey` evicts every
+read of its type, whatever its `Where` says. `ForKey` and `ForKeys` return a `KeyedRows<T>`, not a
+query: it has `ExecuteUpdate`, `ExecuteUpdateAsync`, `ExecuteDelete`, and `ExecuteDeleteAsync`,
+taking EF's own setters, and nothing else, so it can't end up inside another query.
 
 Once a keyed statement commits, Sluice evicts:
 

@@ -73,8 +73,8 @@ read.From(Billing.Invoice.All);
 read.From(invoiceIds.Select(Billing.Invoice.For));
 ```
 
-Every hit checks each dependency the value recorded, at about 0.2 µs each: a hundred cost about 23 µs a hit. For
-thousands, record the source's `All` instead. See [Performance](/misc/performance).
+Every hit checks each dependency the value recorded, at about 0.2 µs each: a hundred cost about 23
+µs a hit. For thousands, record the source's `All` instead. See [Performance](/misc/performance).
 
 ### Rules for a compute
 
@@ -225,10 +225,11 @@ EF writes do this for you. See [Transactions](/guides/transactions).
 
 ### No cancellation token
 
-`InvalidateAsync` takes no token on purpose, and nor does `InvalidateNowAsync`. A request aborted just after its write committed
-must still invalidate, or the old value stays cached until it expires. With Redis, a failed
-Redis write doesn't make it throw, but a slow Redis holds it up until the Redis client times
-out; see [When Redis is slow or down](/guides/configuration#when-redis-is-slow-or-down).
+`InvalidateAsync` takes no token on purpose, and nor does `InvalidateNowAsync`. A request aborted
+just after its write committed must still invalidate, or the old value stays cached until it
+expires. With Redis, a failed Redis write doesn't make it throw, but a slow Redis holds it up until
+the Redis client times out; see [When Redis is slow or
+down](/guides/configuration#when-redis-is-slow-or-down).
 
 ### An invalidation during a compute
 

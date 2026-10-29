@@ -41,20 +41,20 @@ one. Bulk updates and deletes work the same way.
 ### Committing outside EF
 
 EF raises no event when you call `Commit()` or `Rollback()` on the `DbTransaction` itself
-(`db.Database.CurrentTransaction.GetDbTransaction()`). So Sluice notices the transaction has
-ended the next time it looks: at the flow's next cached read (on a flow that called
-`SluiceFlow.Begin()`), the context's next command, a write completing in it, the transaction
-being disposed, if EF began it (EF disposes it with the context, too; one you pass in with
-`UseTransaction` isn't seen being disposed, so Sluice checks it before every cached read, on
-any flow, and every second, until it has ended), or its connection beginning another transaction, opening,
-closing (even when you close it yourself) or being disposed, whichever comes first. Until then,
-a read can cache the old value again. A transaction disposed without commit or rollback looks the same to
-Sluice as one committed outside EF, so it's invalidated too, which only evicts more than it
-needs to. A context joining a transaction with `UseTransaction` invalidates what the transaction
-already holds, and again when it ends, since you may have committed it and begun another outside
-EF, which Npgsql hands the same `DbTransaction` object: for contexts sharing one transaction,
-that too only evicts more than it needs to. Commit and roll back through EF (`transaction.Commit()` on the
-`IDbContextTransaction`) and none of this applies.
+(`db.Database.CurrentTransaction.GetDbTransaction()`). So Sluice notices the transaction has ended
+the next time it looks: at the flow's next cached read (on a flow that called `SluiceFlow.Begin()`),
+the context's next command, a write completing in it, the transaction being disposed, if EF began it
+(EF disposes it with the context, too; one you pass in with `UseTransaction` isn't seen being
+disposed, so Sluice checks it before every cached read, on any flow, and every second, until it has
+ended), or its connection beginning another transaction, opening, closing (even when you close it
+yourself) or being disposed, whichever comes first. Until then, a read can cache the old value
+again. A transaction disposed without commit or rollback looks the same to Sluice as one committed
+outside EF, so it's invalidated too, which only evicts more than it needs to. A context joining a
+transaction with `UseTransaction` invalidates what the transaction already holds, and again when it
+ends, since you may have committed it and begun another outside EF, which Npgsql hands the same
+`DbTransaction` object: for contexts sharing one transaction, that too only evicts more than it
+needs to. Commit and roll back through EF (`transaction.Commit()` on the `IDbContextTransaction`)
+and none of this applies.
 
 ### `TransactionScope` with async code
 

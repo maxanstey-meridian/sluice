@@ -7,17 +7,17 @@ evicted by every write, so it almost never hits. A query can now lag by a stated
 Queries that don't opt in behave exactly as before.
 
 - **New: `Query.MaxStaleness`,** on both query types. With `MaxStaleness = TimeSpan.FromHours(1)`,
-  every server sees a committed change within an hour of when Sluice began computing the value
-  that missed it, give or take clock skew between servers. Quiet data keeps its entry for its
-  full `Duration`, and busy data is computed about once an hour, however often it's written.
-  Within that hour, a writer can read the old value of its own committed write: that's what
-  opting in means. Each compute also stores its value as a *stale copy*, under its own key, which
-  a write leaves alone and which expires that long after the compute began; a compute that takes
-  longer leaves none. That costs a second write to memory and the distributed cache per compute
-  (counted twice under a `SizeLimit`), twice the tag markers, and up to about six distributed
-  cache reads on a cold miss. Zero or less throws `ArgumentOutOfRangeException`, and a
-  `MaxStaleness` longer than the tag data's lifetime throws `InvalidOperationException` on first
-  use, naming it, as a long `Duration` does. See
+  every server sees a committed change within an hour of when Sluice began computing the value that
+  missed it, give or take clock skew between servers. Quiet data keeps its entry for its full
+  `Duration`, and busy data is computed about once an hour, however often it's written. Within that
+  hour, a writer can read the old value of its own committed write: that's what opting in means.
+  Each compute also stores its value as a *stale copy*, under its own key, which a write leaves
+  alone and which expires that long after the compute began; a compute that takes longer leaves
+  none. That costs a second write to memory and the distributed cache per compute (counted twice
+  under a `SizeLimit`), twice the tag markers, and up to about six distributed cache reads on a cold
+  miss. Zero or less throws `ArgumentOutOfRangeException`, and a `MaxStaleness` longer than the tag
+  data's lifetime throws `InvalidOperationException` on first use, naming it, as a long `Duration`
+  does. See
   [MaxStaleness](https://maxanstey-meridian.github.io/sluice/guides/sources-and-queries#maxstaleness).
 - **New: `InvalidateNowAsync` and `InvalidateNow`,** for data that must go at once, such as an
   erasure. They evict what `InvalidateAsync` does, and the stale copies too, take no
@@ -28,14 +28,14 @@ Queries that don't opt in behave exactly as before.
   `using (SluiceFlow.InvalidateNow()) { ... }`. Inside it, every EF save and bulk write (sync or
   async, `ForKey` and `ForKeys` included), and your own `InvalidateAsync` and `Invalidate` calls,
   evict as `InvalidateNowAsync` does. A save reaches every read it would evict anyway, `Children`
-  lists holding the row and cached "not found" reads by a unique value included. An EF write
-  takes the scope when it runs, not when its transaction commits: a save made inside it evicts
-  the stale copies even when its transaction commits after the scope has ended, and one made
-  outside it doesn't, even when its transaction commits inside one. It doesn't need
-  `SluiceFlow.Begin()`, scopes nest, and tasks started inside one keep it. Open it in the method
-  that writes, or one that calls it: one opened inside an `async` helper ends when the helper
-  returns. See
-  [Writes that must go at once](https://maxanstey-meridian.github.io/sluice/guides/ef-core#writes-that-must-go-at-once).
+  lists holding the row and cached "not found" reads by a unique value included. An EF write takes
+  the scope when it runs, not when its transaction commits: a save made inside it evicts the stale
+  copies even when its transaction commits after the scope has ended, and one made outside it
+  doesn't, even when its transaction commits inside one. It doesn't need `SluiceFlow.Begin()`,
+  scopes nest, and tasks started inside one keep it. Open it in the method that writes, or one that
+  calls it: one opened inside an `async` helper ends when the helper returns. See [Writes that must
+  go at
+  once](https://maxanstey-meridian.github.io/sluice/guides/ef-core#writes-that-must-go-at-once).
 - **Docs:** Sources and Queries gains MaxStaleness, and EF Core gains Writes that must go at once;
   Invalidating, Transactions, Configuration, How It Works, and Limitations say where stale copies
   differ (the tag table gains their `!` tags, and clock skew moves the bound).
@@ -115,21 +115,21 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   and moving or renaming a class changes nothing. Two types splitting one table share its
   dependencies, so they evict each other's readers of a row. Classes link only when their key
   columns and schema spelling match. Every EF dependency name changes, so see Upgrading.
-- **Breaking: converters on keys, foreign keys and unique columns need `[SluiceRoundTrips]`.**
-  A save invalidates by the value it would write back for what EF loaded, so a converter that
-  loads one stored value and writes back another (`"01"` loaded as 1 and written as `"1"`) left
-  the readers of the stored value stale. Sluice now refuses the model, the first time it uses
-  it, with `InvalidOperationException` naming each such property, unless the converter's class
-  is marked `[SluiceRoundTrips]` (your promise that it round-trips) or is one of EF's lossless
-  built-ins: `EnumToNumberConverter`, a widening `CastingConverter`, `DateTimeToTicksConverter`,
-  `TimeSpanToTicksConverter` and `GuidToBytesConverter`. Every typed-id converter needs the mark, and one written as
-  `HasConversion(id => id.Value, value => new UserId(value))` moves into a class deriving from
-  `ValueConverter<TModel, TProvider>` first. Enum-to-string and the other string-parsing
-  built-ins need it too, since they accept more than one spelling of a value. A key, foreign key
-  or unique column whose date the database rounds (SQL Server's `datetime` or `smalldatetime`,
-  MySQL's `datetime` or `timestamp` without a size, a `DateTime` in a `date` column, a date in a
-  time-of-day column, a precision under 6) is refused at first use too, and the mark
-  doesn't lift that: its new rows' keys missed readers. A date type without a size is trusted
+- **Breaking: converters on keys, foreign keys and unique columns need `[SluiceRoundTrips]`.** A
+  save invalidates by the value it would write back for what EF loaded, so a converter that loads
+  one stored value and writes back another (`"01"` loaded as 1 and written as `"1"`) left the
+  readers of the stored value stale. Sluice now refuses the model, the first time it uses it, with
+  `InvalidOperationException` naming each such property, unless the converter's class is marked
+  `[SluiceRoundTrips]` (your promise that it round-trips) or is one of EF's lossless built-ins:
+  `EnumToNumberConverter`, a widening `CastingConverter`, `DateTimeToTicksConverter`,
+  `TimeSpanToTicksConverter` and `GuidToBytesConverter`. Every typed-id converter needs the mark,
+  and one written as `HasConversion(id => id.Value, value => new UserId(value))` moves into a class
+  deriving from `ValueConverter<TModel, TProvider>` first. Enum-to-string and the other
+  string-parsing built-ins need it too, since they accept more than one spelling of a value. A key,
+  foreign key or unique column whose date the database rounds (SQL Server's `datetime` or
+  `smalldatetime`, MySQL's `datetime` or `timestamp` without a size, a `DateTime` in a `date`
+  column, a date in a time-of-day column, a precision under 6) is refused at first use too, and the
+  mark doesn't lift that: its new rows' keys missed readers. A date type without a size is trusted
   only from PostgreSQL's timestamps, SQL Server's `datetime2` and `datetimeoffset` and SQLite's
   `TEXT`; on another provider, the column type needs a size of 6 or more, such as `datetime(6)`.
 - **Breaking: a context without `UseSluice`, or an EF command with no context, throws inside a
@@ -156,8 +156,8 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   before `UseSluice`.
 - **Breaking: a cached value holding a lazy loader or a context is refused.** A lazily loading
   entity wrapped in your own type (a DTO holding it) slipped past the check on a query's result
-  type. Every value is now checked before it's stored, and one holding a lazy loader or a `DbContext` throws, naming the query and where in
-  the value it is. Nothing is cached.
+  type. Every value is now checked before it's stored, and one holding a lazy loader or a
+  `DbContext` throws, naming the query and where in the value it is. Nothing is cached.
 - **Breaking: a context registered as a singleton is refused.** `read.Db` checks, once per
   context type, that two DI scopes get different instances, and throws before the compute's
   first query if not, since every compute and request would share it.
@@ -215,21 +215,19 @@ is what Sluice can't see, or what's inherent to FusionCache, EF or .NET.
   logging a `Warning` (event 5) once. Bulk writes too. Keep using `Enabled`: EF fails a
   multi-batch save without it.
 - **Fixed: a `DbTransaction` committed or rolled back outside EF.** Its writes were never
-  invalidated. Sluice now sees that it
-  ended the next time it looks (the flow's next cached read, the context's next command, the
-  transaction's disposal if EF began it, its connection beginning another transaction, opening,
-  closing, even when you close it yourself, or being disposed, and for one you passed in with
-  `UseTransaction`, the next cached read on any flow, or within a second, so a server with no
-  reads of its own doesn't leave the others serving the old value) and invalidates then, a pooled context's
-  or a connection you opened yourself included. A transaction disposed without commit or rollback looks the same, so it now
-  invalidates what it wrote, at its disposal if EF began it, which only evicts more than needed.
-  A context joining a transaction with `UseTransaction` invalidates what the transaction already
-  holds, and again when it ends, since you may have committed it and begun another outside EF,
-  which Npgsql hands the same object; for contexts sharing one transaction that also only evicts
-  more than needed.
-  A write on a context whose connection you closed and opened again yourself, which runs
-  outside the transaction the context still holds, is invalidated at once rather than with
-  that transaction.
+  invalidated. Sluice now sees that it ended the next time it looks (the flow's next cached read,
+  the context's next command, the transaction's disposal if EF began it, its connection beginning
+  another transaction, opening, closing, even when you close it yourself, or being disposed, and for
+  one you passed in with `UseTransaction`, the next cached read on any flow, or within a second, so
+  a server with no reads of its own doesn't leave the others serving the old value) and invalidates
+  then, a pooled context's or a connection you opened yourself included. A transaction disposed
+  without commit or rollback looks the same, so it now invalidates what it wrote, at its disposal if
+  EF began it, which only evicts more than needed. A context joining a transaction with
+  `UseTransaction` invalidates what the transaction already holds, and again when it ends, since you
+  may have committed it and begun another outside EF, which Npgsql hands the same object; for
+  contexts sharing one transaction that also only evicts more than needed. A write on a context
+  whose connection you closed and opened again yourself, which runs outside the transaction the
+  context still holds, is invalidated at once rather than with that transaction.
 - **Fixed: a commit or rollback on a context without `UseSluice`,** of a transaction a
   `UseSluice` context saved in through `UseTransaction`, invalidated nothing. It now invalidates
   at the commit or rollback.

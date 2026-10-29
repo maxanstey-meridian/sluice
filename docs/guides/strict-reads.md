@@ -25,12 +25,12 @@ read the context). It can't for these, so they throw when they run inside a comp
   kind of query root EF adds that Sluice doesn't know how to follow;
 - types not mapped to a table: keyless types, and types mapped with `ToView`, `ToFunction` or
   `ToSqlQuery`. No tracked write ever invalidates them;
-- a query filter that reads the context's state, such as a tenant id held on the context,
-  unless the compute set it with `read.Db<AppDb>(configure)`; one that reads it where the
-  configure can't set it (through a service the context holds, an unmarked property with a
-  body, a method, a readonly field, or a virtual, init-only or get-only property), configured or not; or one
-  that reads other state that can change, such as a static tenant accessor, a captured service
-  or `DateTime.Now`. See [Tenants](#tenants-and-other-context-state);
+- a query filter that reads the context's state, such as a tenant id held on the context, unless the
+  compute set it with `read.Db<AppDb>(configure)`; one that reads it where the configure can't set
+  it (through a service the context holds, an unmarked property with a body, a method, a readonly
+  field, or a virtual, init-only or get-only property), configured or not; or one that reads other
+  state that can change, such as a static tenant accessor, a captured service or `DateTime.Now`. See
+  [Tenants](#tenants-and-other-context-state);
 - entities that load lazily or hold their context: lazy-loading proxies, an injected lazy
   loader or `DbContext`, or an owned value that holds one. A cached one would read related rows
   later, outside the compute, or keep its context alive. They're refused even when they arrive
@@ -223,8 +223,9 @@ transaction counts as a save does.
 EF tells Sluice when a transaction begins, or a write in it completes, but from inside EF's own
 async method, and anything an async method sets on the flow (an `AsyncLocal`) is undone when it
 returns. So Sluice can only note the transaction in something an outer method set up first, and
-that's what `SluiceFlow.Begin()` does. Call it once per entry point, not per unit of work: repositories
-often open their own transactions deep in a call, and one call at the top covers them all.
+that's what `SluiceFlow.Begin()` does. Call it once per entry point, not per unit of work:
+repositories often open their own transactions deep in a call, and one call at the top covers them
+all.
 
 ```csharp
 // ASP.NET Core: early in the pipeline, before anything that opens a transaction.
@@ -335,15 +336,15 @@ Sluice takes three things on trust here, as it takes a fused fetch's dependencie
   `IHttpContextAccessor` sees no request there, not whichever caller computes first. What the
   filter reads is what the configure sets, or the constructor's default.
 
-What Sluice does check: the filter must read the state where it's stored and where the
-configure can set it: a field that isn't readonly, or an auto-property that isn't virtual and has
-a setter that isn't `init`, of the context, holding a plain value (a string, number, `Guid`, enum or a struct of
+What Sluice does check: the filter must read the state where it's stored and where the configure can
+set it: a field that isn't readonly, or an auto-property that isn't virtual and has a setter that
+isn't `init`, of the context, holding a plain value (a string, number, `Guid`, enum or a struct of
 those). A filter that reads it through a tenant service the context holds
-(`i.TenantId == _tenants.TenantId`), an unmarked property with a body, a method, a `readonly` field, a
-virtual property, or a `{ get; }` or `{ get; init; }` property is refused even on a configured context, since the
-configure can't set it. Copy the value into a settable field or property in the constructor, and
-filter by that, or mark the property: see
-[A tenant read through a scoped service](#a-tenant-read-through-a-scoped-service).
+(`i.TenantId == _tenants.TenantId`), an unmarked property with a body, a method, a `readonly` field,
+a virtual property, or a `{ get; }` or `{ get; init; }` property is refused even on a configured
+context, since the configure can't set it. Copy the value into a settable field or property in the
+constructor, and filter by that, or mark the property: see [A tenant read through a scoped
+service](#a-tenant-read-through-a-scoped-service).
 
 The configure can also point the context at a tenant's own database before its first query,
 for database-per-tenant:
@@ -433,12 +434,12 @@ refused the same way. What it can't see stays your promise: a body that reads a 
 service it resolves later on the compute's flow and that keeps the caller's request,
 caches what it read for every caller.
 
-The property must hold a plain value, must have a body and mustn't be virtual or abstract,
-though an interface's implementation is fine; it may be private. The mark does nothing on an
-auto-property: a settable one is already accepted, and a get-only or init-only one is still
-refused, since it holds only what the constructor set. Unmarked properties with a body, methods, and members of objects the context holds
-(`_tenants.TenantId` written straight into the filter) are still refused, and the refusal of an
-unmarked property says how to mark it.
+The property must hold a plain value, must have a body and mustn't be virtual or abstract, though an
+interface's implementation is fine; it may be private. The mark does nothing on an auto-property: a
+settable one is already accepted, and a get-only or init-only one is still refused, since it holds
+only what the constructor set. Unmarked properties with a body, methods, and members of objects the
+context holds (`_tenants.TenantId` written straight into the filter) are still refused, and the
+refusal of an unmarked property says how to mark it.
 
 When the scoped service carries the user as well as the tenant (their id, their role), setting
 it in the compute's scope would make the compute run as a user who doesn't exist, and anything
@@ -473,12 +474,12 @@ compute's configure: on a request's context it would override the user's tenant.
 
 #### Keep the setter behind one helper
 
-Sluice checks a `[SluiceContextState]` body inside a compute, but it can't see who calls the
-setter. A request that calls `ReadAsTenant` on its own context reads another tenant's rows, and
-no compute is running to notice. So `ReadAsTenant` is safe only while nothing but a compute's
-configure calls it, and a review won't always catch the call that breaks that. Make the safe call the only call: one extension
-method on `read` that opens the compute's context as a tenant, and is the setter's only caller.
-For `AppDb` above, that's this:
+Sluice checks a `[SluiceContextState]` body inside a compute, but it can't see who calls the setter.
+A request that calls `ReadAsTenant` on its own context reads another tenant's rows, and no compute
+is running to notice. So `ReadAsTenant` is safe only while nothing but a compute's configure calls
+it, and a review won't always catch the call that breaks that. Make the safe call the only call: one
+extension method on `read` that opens the compute's context as a tenant, and is the setter's only
+caller. For `AppDb` above, that's this:
 
 ```csharp
 public static class TenantScope

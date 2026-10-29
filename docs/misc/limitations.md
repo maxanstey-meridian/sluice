@@ -173,13 +173,13 @@ no longer than the entry's duration, or its query's `MaxStaleness` if that's lon
   context holds, an unmarked property with a body, a method, a readonly field, or a virtual,
   init-only, or get-only property) are refused. See
   [Tenants](/guides/strict-reads#tenants-and-other-context-state).
-- **`[SluiceContextState]` is partly taken on trust.** A filter may read a scoped tenant
-  service through a context property marked with it, set by
-  `read.Db<AppDb>((db, services) => …)`. Sluice checks that the property reads the same with and
-  without the caller's async state, which catches a body reading the request, but a body that
-  reads a static, a clock coarse enough to read the same twice, or a service it resolves later and that keeps the caller, caches
-  one value for everyone with that key. See
-  [A tenant read through a scoped service](/guides/strict-reads#a-tenant-read-through-a-scoped-service).
+- **`[SluiceContextState]` is partly taken on trust.** A filter may read a scoped tenant service
+  through a context property marked with it, set by `read.Db<AppDb>((db, services) => …)`. Sluice
+  checks that the property reads the same with and without the caller's async state, which catches a
+  body reading the request, but a body that reads a static, a clock coarse enough to read the same
+  twice, or a service it resolves later and that keeps the caller, caches one value for everyone
+  with that key. See [A tenant read through a scoped
+  service](/guides/strict-reads#a-tenant-read-through-a-scoped-service).
 - **Invalidation isn't per tenant.** A write in one tenant evicts other tenants' cached reads
   of the same entity type, unless they read through `read.Children` on a tenant foreign key.
 - **Entities that load lazily or hold their context can't be cached**, returned by a query or

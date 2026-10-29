@@ -20,9 +20,10 @@ features:
     details: With EF Core, a save or bulk update clears what it changed once it commits, with no Sluice code. With anything else, you call InvalidateAsync after your write commits.
 ---
 
-Sluice is a .NET library that runs inside your app. [FusionCache](https://github.com/ZiggyCreatures/FusionCache)
-does the actual caching: in memory, in Redis, and keeping several servers in sync. Sluice adds
-the record of what each cached value read, and clears the right values when that data changes.
+Sluice is a .NET library that runs inside your app.
+[FusionCache](https://github.com/ZiggyCreatures/FusionCache) does the actual caching: in memory, in
+Redis, and keeping several servers in sync. Sluice adds the record of what each cached value read,
+and clears the right values when that data changes.
 
 ```text
 Name each thing that can change, once.

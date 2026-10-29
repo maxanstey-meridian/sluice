@@ -116,18 +116,18 @@ It's event id 2, under the category `Sluice.EntityFrameworkCore.TrackedReads`, a
 through EF's logger factory, which under dependency injection is your app's. To hide it, raise
 that category to `Warning`.
 
-It also logs once per entity type and cache when a save of that type has to evict `read.Children` lists
-under every parent, not just the parent the row had (see
-[Row versions](/guides/ef-core#row-versions)): event id 3 when the type has no row version, 4
-when it's stored across several tables. Those are under the category
+It also logs once per entity type and cache when a save of that type has to evict `read.Children`
+lists under every parent, not just the parent the row had (see [Row
+versions](/guides/ef-core#row-versions)): event id 3 when the type has no row version, 4 when it's
+stored across several tables. Those are under the category
 `Sluice.EntityFrameworkCore.SluiceInterceptor`, so raise that one to hide them.
 
 Three more, under the same category, mean something to fix:
 
-- event id 5, at `Warning`, once per cache: a save or bulk write inside a `TransactionScope` created without
-  `TransactionScopeAsyncFlowOption.Enabled` couldn't see the scope where it completed, so Sluice
-  invalidated at once and will again when the scope completes. See
-  [TransactionScope with async code](/guides/transactions#transactionscope-with-async-code).
+- event id 5, at `Warning`, once per cache: a save or bulk write inside a `TransactionScope` created
+  without `TransactionScopeAsyncFlowOption.Enabled` couldn't see the scope where it completed, so
+  Sluice invalidated at once and will again when the scope completes. See [TransactionScope with
+  async code](/guides/transactions#transactionscope-with-async-code).
 - event id 6, at `Error`: a save reported rows written but ran no command Sluice saw, so Sluice
   couldn't tell what it wrote and invalidated every cached read of every entity type in the
   context's model. Sluice reads what a save writes at its first command, so a provider or
@@ -240,10 +240,10 @@ So in memory and in Redis alike, an entry must not outlive the tag data:
   the same figure for `TagsDefaultEntryOptions`.
 
 FusionCache turns fail-safe on for tag data, which keeps it for up to ten days in memory and in
-Redis, so the defaults pass easily. A breach throws `InvalidOperationException` when
-`SluiceCache` is first resolved (with EF, that's when the first context is configured), or, for
-a query with its own `Duration` or a `MaxStaleness`, the first time the query is used. The usual ways to trip it are a long fail-safe on
-your entries, or turning fail-safe off for the tag data:
+Redis, so the defaults pass easily. A breach throws `InvalidOperationException` when `SluiceCache`
+is first resolved (with EF, that's when the first context is configured), or, for a query with its
+own `Duration` or a `MaxStaleness`, the first time the query is used. The usual ways to trip it are
+a long fail-safe on your entries, or turning fail-safe off for the tag data:
 
 ```text
 The Sluice cache's DefaultEntryOptions keeps entries in memory for up to 30.00:00:00, longer

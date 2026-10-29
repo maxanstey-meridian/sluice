@@ -159,21 +159,21 @@ builder.Services.AddDbContextFactory<AppDb>(
 );
 ```
 
-`AddSluiceEntityFrameworkCore` registers the EF package, and `UseSluice` connects the context
-to Sluice; `UseSluice` throws without the first. Register the context however you like (`AddDbContext`,
-`AddDbContextFactory`, or a pool): each compute takes an `AppDb` of its own from a DI scope it
-opens for itself.
+`AddSluiceEntityFrameworkCore` registers the EF package, and `UseSluice` connects the context to
+Sluice; `UseSluice` throws without the first. Register the context however you like (`AddDbContext`,
+`AddDbContextFactory`, or a pool): each compute takes an `AppDb` of its own from a DI scope it opens
+for itself.
 
 ### Reading
 
 Inside a compute, `read.Db<AppDb>()` gives you that context. Query it as you would any context:
 filters, projections, `Include`, navigations, joins, subqueries, many-to-many, `Find`, compiled
-queries. Sluice records every entity type each query reads, and a write to any of them evicts
-the value. The compute's context is fresh, tracks nothing by default, and isn't in your request's
-transaction, so it reads what's committed and nothing else. Dependencies are named after the
-tables a type is stored in, so a second class mapped to the same table, such as a read model in
-another context, is linked to the first: a write through either evicts reads through the other.
-See [What a query records](https://maxanstey-meridian.github.io/sluice/guides/ef-core#what-a-query-records).
+queries. Sluice records every entity type each query reads, and a write to any of them evicts the
+value. The compute's context is fresh, tracks nothing by default, and isn't in your request's
+transaction, so it reads what's committed and nothing else. Dependencies are named after the tables
+a type is stored in, so a second class mapped to the same table, such as a read model in another
+context, is linked to the first: a write through either evicts reads through the other. See [What a
+query records](https://maxanstey-meridian.github.io/sluice/guides/ef-core#what-a-query-records).
 
 A plain query depends on every row of each type it reads: renaming any user evicts every
 dashboard that read users. Sluice logs each cached query that does this the first time it runs,
@@ -258,11 +258,11 @@ key with `read.Db<AppDb>(db => db.TenantId = tenantId)`. A filter reading a scop
 service runs when the context property it reads is marked `[SluiceContextState]` and the compute
 sets the service with `read.Db<AppDb>((db, services) => …)`.
 
-A cached read inside your own transaction, after saves you haven't committed, throws when it
-depends on them, rather than hand you data older than your own write. Sluice sees a
-`TransactionScope` by itself; for EF transactions, add `using var _ = SluiceFlow.Begin();` once
-per entry point, such as in middleware. See
-[Reading your own uncommitted writes](https://maxanstey-meridian.github.io/sluice/guides/strict-reads#reading-your-own-uncommitted-writes).
+A cached read inside your own transaction, after saves you haven't committed, throws when it depends
+on them, rather than hand you data older than your own write. Sluice sees a `TransactionScope` by
+itself; for EF transactions, add `using var _ = SluiceFlow.Begin();` once per entry point, such as
+in middleware. See [Reading your own uncommitted
+writes](https://maxanstey-meridian.github.io/sluice/guides/strict-reads#reading-your-own-uncommitted-writes).
 
 One thing doesn't throw, and isn't tracked either: raw ADO.NET or Dapper on `read.Db`'s
 connection (`computeDb.Database.GetDbConnection()`) outside a `read.From` fetch. Sluice only
@@ -296,9 +296,10 @@ start.
 - [Typed declarations](https://maxanstey-meridian.github.io/sluice/guides/sources-and-queries):
   which key types work, typed ids, keys with several parts or a tenant, and how long each query
   is cached
-- [Bounded staleness](https://maxanstey-meridian.github.io/sluice/guides/sources-and-queries#maxstaleness):
-  let a broad read over busy data lag by a stated time instead of recomputing on every write,
-  and evict at once what must go, such as an erasure
+- [Bounded
+  staleness](https://maxanstey-meridian.github.io/sluice/guides/sources-and-queries#maxstaleness):
+  let a broad read over busy data lag by a stated time instead of recomputing on every write, and
+  evict at once what must go, such as an erasure
 - [Invalidating](https://maxanstey-meridian.github.io/sluice/guides/invalidation): several
   things at once or a whole source, fallback values that still get cleared, and clearing
   everything
@@ -316,12 +317,12 @@ start.
 ## How it's tested
 
 - The EF Core tests run on a real PostgreSQL in Docker, not an in-memory fake.
-- A random workload makes saves, moves, deletes, deletes of rows it never loaded, bulk updates
-  and deletes (by key or not), batches and transactions across cascades, set-null keys, inheritance, composite
-  keys, and a many-to-many join. After every write, it checks each cached read, through the
-  helpers and through plain queries that follow navigations, joins, and `Include`, against the
-  same read run fresh. A concurrent version runs four writers and four readers at once, and
-  checks once they've finished. `SLUICE_RANDOM_SEEDS=50 dotnet test` runs more of both.
+- A random workload makes saves, moves, deletes, deletes of rows it never loaded, bulk updates and
+  deletes (by key or not), batches and transactions across cascades, set-null keys, inheritance,
+  composite keys, and a many-to-many join. After every write, it checks each cached read, through
+  the helpers and through plain queries that follow navigations, joins, and `Include`, against the
+  same read run fresh. A concurrent version runs four writers and four readers at once, and checks
+  once they've finished. `SLUICE_RANDOM_SEEDS=50 dotnet test` runs more of both.
 - Benchmarks against FusionCache on its own are in
   [Performance](https://maxanstey-meridian.github.io/sluice/misc/performance). In short: a hit
   costs about 0.2 µs per dependency, so keep each value's dependencies to tens rather than
@@ -339,7 +340,8 @@ start.
 (what Sluice deliberately doesn't do)
 
 Contributors: each package's rules, with the tests that prove them, are in
-[`src/Sluice/INVARIANTS.md`](https://github.com/maxanstey-meridian/sluice/blob/main/src/Sluice/INVARIANTS.md) and
+[`src/Sluice/INVARIANTS.md`](https://github.com/maxanstey-meridian/sluice/blob/main/src/Sluice/INVARIANTS.md)
+and
 [`src/Sluice.EntityFrameworkCore/INVARIANTS.md`](https://github.com/maxanstey-meridian/sluice/blob/main/src/Sluice.EntityFrameworkCore/INVARIANTS.md).
 
 ## License
