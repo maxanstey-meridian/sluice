@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0
+
+One gap found planning Casebridge's public case map: a broad, expensive read over busy data is
+evicted by every write, so it almost never hits. A query can now lag by a stated time instead.
+Queries that don't opt in behave exactly as before.
+
+- **New: `Query.MaxStaleness`,** on both query types. With `MaxStaleness = TimeSpan.FromHours(1)`,
+  every server sees a committed change within an hour of when Sluice began computing the value
+  that missed it, give or take clock skew between servers. Quiet data keeps its entry for its
+  full `Duration`, and busy data is computed about once an hour, however often it's written.
+  Within that hour, a writer can read the old value of its own committed write: that's what
+  opting in means. Each compute also stores its value as a *stale copy*, under its own key, which
+  a write leaves alone and which expires that long after the compute began; a compute that takes
+  longer leaves none. That costs a second write to memory and the distributed cache per compute
+  (counted twice under a `SizeLimit`), twice the tag markers, and up to about six distributed
+  cache reads on a cold miss. Zero or less throws `ArgumentOutOfRangeException`, and a
+  `MaxStaleness` longer than the tag data's lifetime throws `InvalidOperationException` on first
+  use, naming it, as a long `Duration` does. See
+  [MaxStaleness](https://maxanstey-meridian.github.io/sluice/guides/sources-and-queries#maxstaleness).
+- **New: `InvalidateNowAsync` and `InvalidateNow`,** for data that must go at once, such as an
+  erasure. They evict what `InvalidateAsync` does, and the stale copies too, take no
+  cancellation token, and are published again 5 to 6 s later, as `InvalidateAsync` is. They
+  write twice the tags, so keep `InvalidateAsync` for writes that can lag. An EF save still
+  publishes through `InvalidateAsync`, so follow one that must go at once with
+  `await cache.InvalidateNowAsync(db.Customers.Dependency(id))`, after the commit. `ClearAsync`
+  already removes stale copies.
+- **Docs:** Sources and Queries gains MaxStaleness; Invalidating, EF Core, Configuration, How It
+  Works, and Limitations say where stale copies differ (the tag table gains their `!` tags, and
+  clock skew moves the bound).
+
 ## 0.5.0 — breaking
 
 Two gaps found in the Casebridge pilot: a conditional `ExecuteUpdate` of one form evicted every

@@ -66,6 +66,38 @@ public sealed class Query<TKey, TValue>
         }
     }
 
+    /// <summary>
+    /// How long after Sluice began computing a value it may still serve it once a write it read is invalidated;
+    /// <see langword="null"/>, the default, evicts it at once. When set, every node sees a committed change within this
+    /// long of when the compute that missed it began, give or take clock skew between servers: a value read and then
+    /// invalidated is served for the rest of that time, and recomputed after it. Quiet data still lives its full
+    /// <see cref="Duration"/>, and busy data is recomputed about once per this long, however often it's written.
+    /// </summary>
+    /// <remarks>
+    /// For broad, expensive reads over busy data that can lag, such as dashboards, counts, and public listings. Within
+    /// it, a writer may read its own write's old value. Each compute writes a second entry, the stale copy, to memory and
+    /// the distributed cache. <see cref="SluiceCache.InvalidateNowAsync(Dependency)"/> evicts the stale copies too, for
+    /// data that must go at once.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">It is zero or less.</exception>
+    public TimeSpan? MaxStaleness
+    {
+        get;
+        init
+        {
+            if (value is { } maxStaleness)
+            {
+                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(
+                    maxStaleness,
+                    TimeSpan.Zero,
+                    nameof(MaxStaleness)
+                );
+            }
+
+            field = value;
+        }
+    }
+
     internal string Name { get; }
 
     internal string EntryKey(TKey key) => $"{Name}:{KeyText.Of(_format, key)}";
@@ -102,6 +134,25 @@ public sealed class Query<TValue>
             if (value is { } size)
             {
                 ArgumentOutOfRangeException.ThrowIfNegative(size, nameof(Size));
+            }
+
+            field = value;
+        }
+    }
+
+    /// <inheritdoc cref="Query{TKey, TValue}.MaxStaleness"/>
+    public TimeSpan? MaxStaleness
+    {
+        get;
+        init
+        {
+            if (value is { } maxStaleness)
+            {
+                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(
+                    maxStaleness,
+                    TimeSpan.Zero,
+                    nameof(MaxStaleness)
+                );
             }
 
             field = value;

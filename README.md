@@ -296,6 +296,9 @@ start.
 - [Typed declarations](https://maxanstey-meridian.github.io/sluice/guides/sources-and-queries):
   which key types work, typed ids, keys with several parts or a tenant, and how long each query
   is cached
+- [Bounded staleness](https://maxanstey-meridian.github.io/sluice/guides/sources-and-queries#maxstaleness):
+  let a broad read over busy data lag by a stated time instead of recomputing on every write,
+  and evict at once what must go, such as an erasure
 - [Invalidating](https://maxanstey-meridian.github.io/sluice/guides/invalidation): several
   things at once or a whole source, fallback values that still get cleared, and clearing
   everything

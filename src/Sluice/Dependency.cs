@@ -30,6 +30,14 @@ public sealed class Dependency
     internal string[] InvalidationTags =>
         _key is null ? [$"{_source}:"] : [$"{_source}:{_key}", $"{_source}:*"];
 
+    // What a hard eviction publishes: the invalidation tags and their now-tags, so it reaches stale copies too.
+    internal string[] HardInvalidationTags => [.. InvalidationTags, .. NowTags(InvalidationTags)];
+
+    // A stale copy (SLUICE-CORE-024) carries each tag its compute read prefixed '!', so InvalidateAsync, which publishes
+    // only the plain tags, leaves it, and only a hard eviction reaches it. A now-tag keeps its ':' after a non-blank
+    // start, so none can equal a clear sentinel either.
+    internal static string[] NowTags(string[] tags) => [.. tags.Select(tag => $"!{tag}")];
+
     /// <summary>
     /// Refuses a FusionCache clear tag that could equal one of these tags: any with ':' after a non-blank start, as
     /// <c>a:b</c> is source <c>a</c> key <c>b</c>'s. Invalidating that dependency would clear the cache on every node.

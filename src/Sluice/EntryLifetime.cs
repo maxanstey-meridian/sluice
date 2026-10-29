@@ -8,10 +8,13 @@ namespace Sluice;
 /// </summary>
 internal static class EntryLifetime
 {
+    // shorten: what the error tells the app to shorten, when that's one setting of its own (a query's MaxStaleness)
+    // rather than the entry options.
     internal static void EnsureWithin(
         FusionCacheEntryOptions entry,
         FusionCacheEntryOptions tags,
-        string subject
+        string subject,
+        string? shorten = null
     )
     {
         // FusionCache jitters memory expiry only. Jitter on the tag side only lengthens tag data, so it's ignored.
@@ -20,7 +23,7 @@ internal static class EntryLifetime
             InMemory(tags),
             subject,
             "in memory",
-            "Duration, MemoryCacheDuration, FailSafeMaxDuration or JitterMaxDuration",
+            shorten ?? "Duration, MemoryCacheDuration, FailSafeMaxDuration or JitterMaxDuration",
             "TagsDefaultEntryOptions.MemoryCacheDuration or TagsDefaultEntryOptions.FailSafeMaxDuration"
         );
         Ensure(
@@ -28,7 +31,8 @@ internal static class EntryLifetime
             InDistributed(tags),
             subject,
             "in the distributed cache",
-            "Duration, DistributedCacheDuration, DistributedCacheFailSafeMaxDuration or FailSafeMaxDuration",
+            shorten
+                ?? "Duration, DistributedCacheDuration, DistributedCacheFailSafeMaxDuration or FailSafeMaxDuration",
             "TagsDefaultEntryOptions.DistributedCacheDuration, TagsDefaultEntryOptions.DistributedCacheFailSafeMaxDuration "
                 + "or TagsDefaultEntryOptions.FailSafeMaxDuration"
         );

@@ -139,9 +139,16 @@ public async Task MarkPaid(InvoiceId invoiceId, CustomerId customerId)
 | `InvalidateAsync(source.All)` | every reader of anything in the source |
 | `InvalidateAsync([a, b, ...])` | the union, in one call |
 | `Invalidate(a, b, ...)` | the same, synchronously |
+| `InvalidateNowAsync(a)` or `InvalidateNowAsync([a, b, ...])` | what `InvalidateAsync` does, and the stale copies a query with `MaxStaleness` would still serve |
+| `InvalidateNow(a, b, ...)` | the same, synchronously |
 | `ClearAsync()` | everything Sluice cached |
 
 Values that read none of it stay cached.
+
+A query with [`MaxStaleness`](/guides/sources-and-queries#maxstaleness) keeps serving what it
+computed for up to that long after `InvalidateAsync`, from its stale copy. For data that must go
+at once, such as an erasure, call `InvalidateNowAsync` instead, after the write commits, as
+always. It writes twice the tags, so keep `InvalidateAsync` for writes that can lag.
 
 Each call publishes again 5 to 6 s later, in the background, and so does `ClearAsync`; those due
 in the same second go out together, each tag once. That restores
@@ -202,7 +209,7 @@ EF writes do this for you. See [Transactions](/guides/transactions).
 
 ### No cancellation token
 
-`InvalidateAsync` takes no token on purpose. A request aborted just after its write committed
+`InvalidateAsync` takes no token on purpose, and nor does `InvalidateNowAsync`. A request aborted just after its write committed
 must still invalidate, or the old value stays cached until it expires. With Redis, a failed
 Redis write doesn't make it throw, but a slow Redis holds it up until the Redis client times
 out; see [When Redis is slow or down](/guides/configuration#when-redis-is-slow-or-down).
@@ -211,7 +218,9 @@ out; see [When Redis is slow or down](/guides/configuration#when-redis-is-slow-o
 
 If something a compute has read is invalidated while the compute is still running, the caller
 still gets the value it computed, but it isn't kept: the next call computes again. An
-invalidation of something the compute didn't read leaves the new entry alone.
+invalidation of something the compute didn't read leaves the new entry alone. A query with
+`MaxStaleness` keeps the value as its stale copy, so the next call gets it until `MaxStaleness`
+after the compute began, unless the invalidation was `InvalidateNowAsync` or `InvalidateNow`.
 
 ### Mixing with EF Core
 
@@ -223,7 +232,8 @@ await cache.InvalidateAsync([db.Users.Dependency(userId), Billing.Invoice.For(in
 
 ### Clearing
 
-`ClearAsync` evicts everything Sluice cached, and fail-safe never serves a cleared value. Other
+`ClearAsync` evicts everything Sluice cached, stale copies included, and fail-safe never serves
+a cleared value. Other
 FusionCaches, even on the same Redis, are untouched.
 
 ## Cached values are shared

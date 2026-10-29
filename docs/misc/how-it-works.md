@@ -14,16 +14,22 @@ invalidated is treated as gone.
 Sluice maps each dependency to a pair of tags. For a source named `n` and a key whose text is
 `k`:
 
-| Dependency | A compute that reads it gets the tags | Invalidating it removes the tags |
-|---|---|---|
-| `source.For(key)` | `n:k`, `n:` | `n:k`, `n:*` |
-| `source.All` | `n:*`, `n:` | `n:` |
+| Dependency | A compute that reads it gets the tags | Its stale copy gets | Invalidating it removes the tags | `InvalidateNowAsync` also removes |
+|---|---|---|---|---|
+| `source.For(key)` | `n:k`, `n:` | `!n:k`, `!n:` | `n:k`, `n:*` | `!n:k`, `!n:*` |
+| `source.All` | `n:*`, `n:` | `!n:*`, `!n:` | `n:` | `!n:` |
 
 So invalidating a key evicts readers of that key and readers of the whole source; invalidating
 the whole source evicts every reader of anything in it. Every tag contains `:`, and Sluice refuses a
 clear tag with `:` after a non-blank start (`a:b`, not `:rem`), so none can collide with FusionCache's own clear
 markers. Two sources whose tags happen to coincide only
 share evictions.
+
+A [stale copy](#a-query-with-maxstaleness) carries its compute's tags with `!` in front, its
+*now-tags*, so `InvalidateAsync` never reaches it, and only `InvalidateNowAsync`, `InvalidateNow`,
+and a clear do. A now-tag still has `:` after a non-blank start, so it can't equal a clear marker
+either. A source whose name starts with `!` can share tags with another source's now-tags, which,
+as above, only shares evictions.
 
 ## A cached read
 
@@ -39,6 +45,23 @@ share evictions.
 FusionCache stamps the entry with the time the compute *started*. An invalidation that lands
 while the compute runs is later than that stamp, so the entry is already dead when it's stored.
 The caller still gets its value; the next caller recomputes.
+
+### A query with MaxStaleness
+
+A query with `MaxStaleness` set to N first reads its entry, then its stale copy, under the key
+`:` plus the entry key, which no entry key or tag-data key can start with. Both reads refuse an
+expired entry, whatever fail-safe or `AllowStaleOnReadOnly` you set, since either would be served
+past its life. On two misses, it calls `GetOrSetAsync` on the copy's key, and the copy's factory
+makes the usual call on the entry's key with the same `read`. So the copy is stamped before the
+compute starts, and an `InvalidateNowAsync` that lands while the compute runs removes the copy
+too. The copy's factory keeps the value only if its own compute stored the entry: it tags the
+copy with the entry's tags as now-tags, and gives it N less the time since the factory started,
+with fail-safe, jitter, and per-level durations off. Both times are read from
+`DateTimeOffset.UtcNow`, the clock FusionCache stamps and expires entries on, not the
+`TimeProvider` registered in DI. Otherwise, or once N has passed, it skips the three writes, as
+the guards below do. N counts from the compute, not the write, because FusionCache keeps only a
+tag's latest invalidation, not the first since an entry was stored. A query without
+`MaxStaleness` makes the single `GetOrSetAsync` call, and never touches a copy.
 
 ### The guards
 
@@ -88,7 +111,8 @@ the tags the pending writes will invalidate. Any overlap throws; none returns th
 `InvalidateAsync` turns the dependencies into tags, de-duplicates them, and removes each by tag,
 concurrently. With a distributed cache, each removal is a write to it and a backplane message.
 It takes no cancellation token and passes none, so an aborted request still invalidates.
-`Invalidate` is the same, synchronously, one tag at a time.
+`Invalidate` is the same, synchronously, one tag at a time. `InvalidateNowAsync` and
+`InvalidateNow` remove each tag's now-tag too.
 
 Then it schedules the same removal again, on the `TimeProvider` registered in DI (`ClearAsync`
 does the same with its clear): in the window due at the first whole second at least 5 s ahead,
@@ -208,4 +232,5 @@ A failed, cancelled or conflicting save publishes the same way: never drop, beca
 over-invalidating is safe. After a commit, a failure to invalidate is logged and never thrown.
 Sync EF calls publish synchronously, through `Invalidate`, never by blocking on async code.
 
-Every invalidation, EF or not, goes through the same public `InvalidateAsync` or `Invalidate`.
+Every invalidation, EF or not, goes through the same public `InvalidateAsync`, `Invalidate`,
+`InvalidateNowAsync`, or `InvalidateNow`; EF's own saves and bulk writes use the first two.

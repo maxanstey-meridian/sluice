@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Transactions;
 using Sluice.Infrastructure;
@@ -150,6 +151,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
             query.EntryKey(key),
             query.Duration,
             query.Size,
+            query.MaxStaleness,
             compute,
             ct
         );
@@ -184,7 +186,15 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(compute);
         ThrowIfNested(query.Name);
-        return GetOrSetAsync(query.Name, query.Name, query.Duration, query.Size, compute, ct);
+        return GetOrSetAsync(
+            query.Name,
+            query.Name,
+            query.Duration,
+            query.Size,
+            query.MaxStaleness,
+            compute,
+            ct
+        );
     }
 
     private async ValueTask<TValue> GetOrSetAsync<TValue>(
@@ -192,6 +202,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         string entryKey,
         TimeSpan? duration,
         long? size,
+        TimeSpan? maxStaleness,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,
         CancellationToken ct
     )
@@ -203,7 +214,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
             await beforeRead().ConfigureAwait(false);
         }
 
-        var options = OptionsFor(name, duration, size);
+        var (options, copyOptions) = OptionsFor(name, duration, size, maxStaleness);
         var reads = new SluiceReads(name, _services, ct);
 
         // A value cached or computed outside the caller's transaction lacks its uncommitted writes, and a hit can't
@@ -214,18 +225,112 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
             return await BypassAsync(reads, compute, pending, ct).ConfigureAwait(false);
         }
 
-        // The caller's token goes to the compute, not to FusionCache: on a cancelled token FusionCache throws
-        // without awaiting its factory, so the caller would resume while the compute still uses its resources.
-        // Cancelling ends the compute first, and the caller resumes after it.
-        var value = await _cache
-            .GetOrSetAsync<TValue>(
-                entryKey,
-                (ctx, _) => FactoryAsync(reads, compute, _storeChecks, ctx, ct),
-                options: options
-            )
-            .ConfigureAwait(false);
+        var value = copyOptions is null
+            ? await GetOrSetEntryAsync(entryKey, options, reads, compute, stored: null, ct)
+                .ConfigureAwait(false)
+            : await GetStaleOrSetAsync(entryKey, options, copyOptions, reads, compute, ct)
+                .ConfigureAwait(false);
 
         reads.ThrowIfViolated();
+        return value;
+    }
+
+    // The normal entry's FusionCache call, which a strict query makes directly and a staleness query's copy factory
+    // makes inside the copy's. The caller's token goes to the compute, not to FusionCache: on a cancelled token
+    // FusionCache throws without awaiting its factory, so the caller would resume while the compute still uses its
+    // resources. Cancelling ends the compute first, and the caller resumes after it.
+    private ValueTask<TValue> GetOrSetEntryAsync<TValue>(
+        string entryKey,
+        FusionCacheEntryOptions options,
+        SluiceReads reads,
+        Func<SluiceReads, CancellationToken, Task<TValue>> compute,
+        StrongBox<string[]?>? stored,
+        CancellationToken ct
+    ) =>
+        _cache.GetOrSetAsync<TValue>(
+            entryKey,
+            (ctx, _) => FactoryAsync(reads, compute, _storeChecks, stored, ctx, ct),
+            options: options
+        );
+
+    // A query with MaxStaleness (SLUICE-CORE-024) reads its normal entry, then its stale copy, and only then computes,
+    // through the copy's factory, so the copy is stamped before the compute begins: a hard eviction landing mid-compute
+    // still removes it. Neither lookup takes the caller's token (SLUICE-CORE-003), and both options refuse a logically
+    // expired entry: fail-safe keeps the normal entry past its Duration, and a node that read the copy from the
+    // distributed cache keeps it in memory past N. The copy's lock is taken before the normal entry's, as FusionCache's
+    // own tag check takes a tag's while it holds an entry's, and strict queries never take it.
+    private async ValueTask<TValue> GetStaleOrSetAsync<TValue>(
+        string entryKey,
+        FusionCacheEntryOptions options,
+        FusionCacheEntryOptions copyOptions,
+        SluiceReads reads,
+        Func<SluiceReads, CancellationToken, Task<TValue>> compute,
+        CancellationToken ct
+    )
+    {
+        if (
+            await _cache.TryGetAsync<TValue>(entryKey, options).ConfigureAwait(false) is
+            { HasValue: true } entry
+        )
+        {
+            return entry.Value;
+        }
+
+        // No entry key or tag-data key starts with ':' (SLUICE-CORE-009).
+        var copyKey = $":{entryKey}";
+        if (
+            await _cache.TryGetAsync<TValue>(copyKey, copyOptions).ConfigureAwait(false) is
+            { HasValue: true } copy
+        )
+        {
+            return copy.Value;
+        }
+
+        return await _cache
+            .GetOrSetAsync<TValue>(
+                copyKey,
+                (ctx, _) => CopyFactoryAsync(entryKey, options, reads, compute, ctx, ct),
+                options: copyOptions
+            )
+            .ConfigureAwait(false);
+    }
+
+    // The stale copy's factory: makes the normal entry's call, then keeps its value as the copy, tagged with the
+    // compute's now-tags, for what's left of N since this factory started. Only a compute of this caller's that stored
+    // the normal entry leaves a copy: on a violation, DoNotCache, or an inner hit (whose tags it can't know; the node
+    // that computed it wrote its own copy), or once N has passed, it returns the value with every write skipped, as
+    // FactoryAsync does, so nothing is served over it. The copy's options have fail-safe off, so the compute's own
+    // exception passes through with nothing served.
+    private async Task<TValue> CopyFactoryAsync<TValue>(
+        string entryKey,
+        FusionCacheEntryOptions options,
+        SluiceReads reads,
+        Func<SluiceReads, CancellationToken, Task<TValue>> compute,
+        FusionCacheFactoryExecutionContext<TValue> ctx,
+        CancellationToken ct
+    )
+    {
+        // FusionCache stamps the copy and sets its expiry on DateTimeOffset.UtcNow, not on the registered TimeProvider,
+        // so the time the compute took is measured on that clock too, to end the copy N after this started. A fake
+        // TimeProvider that doesn't move at real time would leave the compute's time out, and the copy would outlive N
+        // by that much.
+        var start = DateTimeOffset.UtcNow;
+        var stored = new StrongBox<string[]?>();
+        var value = await GetOrSetEntryAsync(entryKey, options, reads, compute, stored, ct)
+            .ConfigureAwait(false);
+
+        var copyOptions = ctx.Options;
+        var life = copyOptions.Duration - (DateTimeOffset.UtcNow - start);
+        if (stored.Value is not { } tags || life <= TimeSpan.Zero)
+        {
+            copyOptions.SkipMemoryCacheWrite = true;
+            copyOptions.SkipDistributedCacheWrite = true;
+            copyOptions.SkipBackplaneNotifications = true;
+            return value;
+        }
+
+        copyOptions.Duration = life;
+        ctx.Tags = Dependency.NowTags(tags);
         return value;
     }
 
@@ -299,11 +404,57 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     /// Redis client's own timeout and FusionCache's circuit breakers. Once it returns, the invalidation is published
     /// again 5 to 6 s later in the background, in one batch with every other invalidation and clear due in the same
     /// second, since FusionCache 2.9 can lose one that lands while the same server checks those dependencies; a value
-    /// cached in between is evicted again, and disposing the cache publishes it at once.
+    /// cached in between is evicted again, and disposing the cache publishes it at once. A query with
+    /// <c>MaxStaleness</c> keeps serving what it computed for up to that long; use
+    /// <see cref="InvalidateNowAsync(IEnumerable{Dependency})"/> for data that must go at once.
     /// </remarks>
-    public async ValueTask InvalidateAsync(IEnumerable<Dependency> dependencies)
+    public ValueTask InvalidateAsync(IEnumerable<Dependency> dependencies) =>
+        InvalidateByAsync(dependencies, dependency => dependency.InvalidationTags);
+
+    /// <summary>The synchronous twin of <see cref="InvalidateAsync(IEnumerable{Dependency})"/>.</summary>
+    /// <param name="dependencies">What was written.</param>
+    /// <inheritdoc cref="InvalidateAsync(IEnumerable{Dependency})" path="/remarks"/>
+    public void Invalidate(params IEnumerable<Dependency> dependencies) =>
+        InvalidateBy(dependencies, dependency => dependency.InvalidationTags);
+
+    /// <summary>
+    /// Evicts every cached value that read <paramref name="dependency"/>, the values a query with <c>MaxStaleness</c>
+    /// would still serve included. Call it after your write commits, for data that must go at once, such as an erasure.
+    /// </summary>
+    /// <param name="dependency">What was written.</param>
+    /// <inheritdoc cref="InvalidateNowAsync(IEnumerable{Dependency})" path="/remarks"/>
+    public ValueTask InvalidateNowAsync(Dependency dependency)
     {
-        var tags = Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags);
+        ArgumentNullException.ThrowIfNull(dependency);
+        return InvalidateNowAsync([dependency]);
+    }
+
+    /// <summary>
+    /// Evicts every cached value that read any of <paramref name="dependencies"/>, the values a query with
+    /// <c>MaxStaleness</c> would still serve included. Call it after your write commits, for data that must go at once,
+    /// such as an erasure.
+    /// </summary>
+    /// <param name="dependencies">What was written.</param>
+    /// <remarks>
+    /// Takes no cancellation token, and is published again 5 to 6 s later in the background, as
+    /// <see cref="InvalidateAsync(IEnumerable{Dependency})"/> is. It writes twice the tags, so prefer that for writes
+    /// that can lag.
+    /// </remarks>
+    public ValueTask InvalidateNowAsync(IEnumerable<Dependency> dependencies) =>
+        InvalidateByAsync(dependencies, dependency => dependency.HardInvalidationTags);
+
+    /// <summary>The synchronous twin of <see cref="InvalidateNowAsync(IEnumerable{Dependency})"/>.</summary>
+    /// <param name="dependencies">What was written.</param>
+    /// <inheritdoc cref="InvalidateNowAsync(IEnumerable{Dependency})" path="/remarks"/>
+    public void InvalidateNow(params IEnumerable<Dependency> dependencies) =>
+        InvalidateBy(dependencies, dependency => dependency.HardInvalidationTags);
+
+    private async ValueTask InvalidateByAsync(
+        IEnumerable<Dependency> dependencies,
+        Func<Dependency, string[]> tagsOf
+    )
+    {
+        var tags = Dependency.TagsOf(dependencies, tagsOf);
         if (tags.Count == 0)
         {
             return;
@@ -313,12 +464,12 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         PublishAgainLater(tags, clear: false);
     }
 
-    /// <summary>The synchronous twin of <see cref="InvalidateAsync(IEnumerable{Dependency})"/>.</summary>
-    /// <param name="dependencies">What was written.</param>
-    /// <inheritdoc cref="InvalidateAsync(IEnumerable{Dependency})" path="/remarks"/>
-    public void Invalidate(params IEnumerable<Dependency> dependencies)
+    private void InvalidateBy(
+        IEnumerable<Dependency> dependencies,
+        Func<Dependency, string[]> tagsOf
+    )
     {
-        var tags = Dependency.TagsOf(dependencies, dependency => dependency.InvalidationTags);
+        var tags = Dependency.TagsOf(dependencies, tagsOf);
         if (tags.Count == 0)
         {
             return;
@@ -527,11 +678,18 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         public void Fire() => _fired.TrySetResult();
     }
 
-    private FusionCacheEntryOptions OptionsFor(string name, TimeSpan? duration, long? size)
+    // The normal entry's options, and the stale copy's for a query with MaxStaleness (SLUICE-CORE-024). A query with
+    // none of its own settings shares the pinned defaults, with no allocation.
+    private (FusionCacheEntryOptions Normal, FusionCacheEntryOptions? Copy) OptionsFor(
+        string name,
+        TimeSpan? duration,
+        long? size,
+        TimeSpan? maxStaleness
+    )
     {
-        if (duration is null && size is null)
+        if (duration is null && size is null && maxStaleness is null)
         {
-            return _entryOptions;
+            return (_entryOptions, null);
         }
 
         var options = _entryOptions.Duplicate(duration);
@@ -542,7 +700,29 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
             EntryLifetime.EnsureWithin(options, _tagOptions, $"Query '{name}'");
         }
 
-        return options;
+        if (maxStaleness is not { } n)
+        {
+            return (options, null);
+        }
+
+        // The copy lives N from its factory's start and no longer: fail-safe, jitter, and a level's own duration would
+        // each keep it past that, and a read of a logically expired entry would serve it. Its size is the query's.
+        options.AllowStaleOnReadOnly = false;
+        var copy = _entryOptions.Duplicate(n);
+        copy.Size = options.Size;
+        copy.IsFailSafeEnabled = false;
+        copy.JitterMaxDuration = TimeSpan.Zero;
+        copy.MemoryCacheDuration = null;
+        copy.DistributedCacheDuration = null;
+        copy.AllowStaleOnReadOnly = false;
+        EntryLifetime.EnsureWithin(
+            copy,
+            _tagOptions,
+            $"The MaxStaleness of query '{name}'",
+            shorten: "MaxStaleness"
+        );
+
+        return (options, copy);
     }
 
     // On a hit the outer compute couldn't learn the inner value's dependencies, so they'd be lost. That holds inside a
@@ -562,11 +742,13 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     }
 
     // FusionCache's factory: stores the value with the tags its compute recorded, unless it asked not to be cached or
-    // a guard was violated.
+    // a guard was violated. When it stores, it puts the tags in `stored`, which a stale copy's factory passes to learn
+    // that this caller's compute stored the entry, and with what.
     private static async Task<TValue> FactoryAsync<TValue>(
         SluiceReads reads,
         Func<SluiceReads, CancellationToken, Task<TValue>> compute,
         Func<object, Exception?>[] storeChecks,
+        StrongBox<string[]?>? stored,
         FusionCacheFactoryExecutionContext<TValue> ctx,
         CancellationToken ct
     )
@@ -588,6 +770,7 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
         }
 
         ctx.Tags = tags;
+        stored?.Value = tags;
         return value;
     }
 

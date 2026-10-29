@@ -2,7 +2,7 @@
 
 These are Sluice's deliberate limits, listed here so you don't discover them in production.
 Each links to the page that explains it. Where a limit can leave an old value cached, it lives
-no longer than the entry's duration.
+no longer than the entry's duration, or its query's `MaxStaleness` if that's longer.
 
 ## Writes Sluice can't see
 
@@ -69,6 +69,10 @@ no longer than the entry's duration.
 
 - **Clocks that disagree between servers** open a window about as wide as the difference:
   FusionCache compares when one server stored an entry with when another invalidated it.
+- **A stale copy expires on each server's own clock.** A query with `MaxStaleness` serves a
+  written value until that long after its compute began, as the reading server tells the time,
+  so clocks that disagree shift the bound by the difference. See
+  [MaxStaleness](/guides/sources-and-queries#maxstaleness).
 - **A missed backplane message** leaves that server serving old values until its in-memory tag
   data expires (an hour by default). Without a distributed cache, only the entries' own expiry
   ends it.

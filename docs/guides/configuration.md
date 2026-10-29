@@ -33,6 +33,8 @@ configuration, overriding anything that conflicts:
 | `FactorySoftTimeout`, `FactoryHardTimeout` | infinite, per call | a timed-out compute would keep running, and using what it holds, after the caller moved on |
 | `AllowTimedOutFactoryBackgroundCompletion`, `EagerRefreshThreshold` | off, per call | both store a value marked as built when its compute *finished*, so an invalidation that landed while it ran could be missed |
 | `ClearAsync` | without fail-safe | a cleared value is never served as a fallback |
+| `AllowStaleOnReadOnly` | off, per call, for a query with [`MaxStaleness`](/guides/sources-and-queries#maxstaleness) | it reads its entry and its stale copy before computing, and an expired one would be served past its `Duration` or past `MaxStaleness` |
+| a stale copy's fail-safe, `JitterMaxDuration`, `MemoryCacheDuration`, and `DistributedCacheDuration` | off | each would keep the copy past `MaxStaleness` |
 | `TagsDefaultEntryOptions.Priority`, `.Size` | `NeverRemove`, `0` | under a memory size limit, a tag marker evicted or refused for want of room would let an invalidated value be served again |
 
 And it refuses, when `SluiceCache` is first resolved, two `InternalStrings` settings that would
@@ -62,7 +64,9 @@ command timeout, an HTTP timeout).
 
 An entry lives for its query's `Duration`, or the cache's `DefaultEntryOptions.Duration`, which
 is FusionCache's 30 seconds unless you set it. If an invalidation is ever missed, the duration
-is how long the old value can live. Keep it short for data something outside your app writes:
+is how long the old value can live (or a query's
+[`MaxStaleness`](/guides/sources-and-queries#maxstaleness), if that's longer). Keep it short for
+data something outside your app writes:
 those writes evict nothing unless they
 [invalidate by hand](/guides/ef-core#writes-sluice-can-t-see).
 
@@ -234,7 +238,7 @@ So in memory and in Redis alike, an entry must not outlive the tag data:
 FusionCache turns fail-safe on for tag data, which keeps it for up to ten days in memory and in
 Redis, so the defaults pass easily. A breach throws `InvalidOperationException` when
 `SluiceCache` is first resolved (with EF, that's when the first context is configured), or, for
-a query with its own `Duration`, the first time the query is used. The usual ways to trip it are a long fail-safe on
+a query with its own `Duration` or a `MaxStaleness`, the first time the query is used. The usual ways to trip it are a long fail-safe on
 your entries, or turning fail-safe off for the tag data:
 
 ```text
@@ -260,6 +264,12 @@ builder.Services.AddSluice(cache =>
         )
 );
 ```
+
+A query's [`MaxStaleness`](/guides/sources-and-queries#maxstaleness) is a lifetime too: its
+stale copy lives that long, in memory and in the distributed cache, and its tags need their tag
+data as long. So it's checked the same way, and a breach names it: "The MaxStaleness of query
+'job-board' keeps entries in memory for up to …", ending "Shorten MaxStaleness, or lengthen …".
+Under the defaults, a `MaxStaleness` of up to ten days passes.
 
 An entry's lifetime counts from when it's stored, and tag data's from the invalidation. So with
 exactly equal lifetimes, a gap as long as one compute remains. With the defaults' ten days,

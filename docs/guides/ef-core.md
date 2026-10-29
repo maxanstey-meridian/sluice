@@ -370,6 +370,25 @@ set, and it detects nothing itself, so it never changes what EF saves: with
 save with nothing to write runs no command and invalidates nothing. A save that fails, is cancelled or hits a concurrency conflict still
 invalidates what it was saving, because part of it may already have committed.
 
+### Saves that must go at once
+
+A save evicts at once, except from a query with
+[`MaxStaleness`](/guides/sources-and-queries#maxstaleness), which keeps serving what it computed
+for up to that long. When the data must vanish at once, such as an erasure, follow the save with
+`InvalidateNowAsync`, which evicts that too:
+
+```csharp
+db.Customers.Remove(customer);
+await db.SaveChangesAsync(ct);
+await cache.InvalidateNowAsync(db.Customers.Dependency(customer.Id));
+```
+
+Inside a transaction, call it after the commit, not before: a read in between would cache the
+old value again. `set.Dependency(key)` reaches `Entity` readers of the row, by its key or by a
+unique column that found it, and plain queries of its type, but not `Children` lists, nor
+readers by a unique value no row held. When those must go too, pass `set.AllDependencies()`
+(see [Writes Sluice can't see](#writes-sluice-can-t-see)).
+
 ### Row versions
 
 The parent a row had when EF loaded it isn't always the one it has when the save runs. Say
