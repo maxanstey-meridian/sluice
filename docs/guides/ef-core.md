@@ -389,9 +389,10 @@ Every write that starts inside the scope evicts the stale copies too, as
 [`InvalidateNowAsync`](/guides/invalidation#invalidating) does: saves through the change tracker,
 sync or async, `ExecuteUpdate` and `ExecuteDelete` (keyed ones included), and your own
 `InvalidateAsync` and `Invalidate` calls. It evicts everything the write would evict anyway,
-`Children` lists holding the row and readers by a unique value no row held included. Each such
-write sends twice the tags, so keep the scope for writes that can't lag. It doesn't need
-`SluiceFlow.Begin()`, and a scope inside another leaves the outer one on when it ends.
+`Children` lists holding the row and cached "not found" reads of a unique value the write gives a
+row included. Each such write sends twice the tags, so keep the scope for writes that can't lag.
+It doesn't need `SluiceFlow.Begin()`, and a scope inside another leaves the outer one on when it
+ends.
 
 A write takes the scope when it runs, not when it commits. A save made inside it evicts the
 stale copies even when its transaction, EF's or a `TransactionScope`, commits after the scope
@@ -409,8 +410,9 @@ await transaction.CommitAsync(ct); // evicts at once, stale copies included
 ```
 
 The scope is an `AsyncLocal`: a value .NET carries from a method into the calls and tasks it
-starts, but not back out of them. So open it in the method that writes, or one that calls it. One opened inside an `async` helper ends when the helper returns, so the writes
-after the call don't see it. A task started inside the scope keeps it, and work started under
+starts, but not back out of an `async` method. So open it in the method that writes, or one that
+calls it. One opened inside an `async` helper ends when the helper returns, so the writes after
+the call don't see it. A task started inside the scope keeps it, and work started under
 `ExecutionContext.SuppressFlow` doesn't see it.
 
 For a write Sluice can't see, call `InvalidateNowAsync` after it commits; see

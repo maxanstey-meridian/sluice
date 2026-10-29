@@ -14,7 +14,7 @@ invalidated is treated as gone.
 Sluice maps each dependency to a pair of tags. For a source named `n` and a key whose text is
 `k`:
 
-| Dependency | A compute that reads it gets the tags | Its stale copy gets | Invalidating it removes the tags | Invalidating it hard also removes |
+| Dependency | A compute that reads it gets the tags | Its stale copy gets | Invalidating it removes the tags | `InvalidateNowAsync`, or invalidating it hard (below), also removes |
 |---|---|---|---|---|
 | `source.For(key)` | `n:k`, `n:` | `!n:k`, `!n:` | `n:k`, `n:*` | `!n:k`, `!n:*` |
 | `source.All` | `n:*`, `n:` | `!n:*`, `!n:` | `n:` | `!n:` |
@@ -29,8 +29,8 @@ A [stale copy](#a-query-with-maxstaleness) carries its compute's tags with `!` i
 *now-tags*, so a plain invalidation never reaches it. Only a clear, or a *hard* invalidation,
 which removes the now-tags too, does: `InvalidateNowAsync`, `InvalidateNow`, and every
 invalidation or EF write started inside `SluiceFlow.InvalidateNow()`. A now-tag still has `:`
-after a non-blank start, so it can't equal a clear marker either. A source whose name starts with `!` can share tags with another source's now-tags, which,
-as above, only shares evictions.
+after a non-blank start, so it can't equal a clear marker either. A source whose name starts
+with `!` can share tags with another source's now-tags, which, as above, only shares evictions.
 
 ## A cached read
 

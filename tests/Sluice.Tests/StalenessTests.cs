@@ -329,11 +329,15 @@ public sealed class StalenessTests
     }
 
     // Both nodes hold the copy in memory before the hard eviction. Node A's clock moves only when the test advances
-    // it, so its re-publish, the one invalidation it makes, lands when the test says.
+    // it, so its re-publish, the one invalidation it makes, lands when the test says. Every hard publisher is a row:
+    // InvalidateNow*, InvalidateAsync inside SluiceFlow.InvalidateNow, and a package's publish of an AsNow dependency.
     [Theory]
     [InlineData("InvalidateNowAsync(dependency)")]
     [InlineData("InvalidateNowAsync(dependencies)")]
     [InlineData("InvalidateNow")]
+    [InlineData("InvalidateAsync inside SluiceFlow.InvalidateNow")]
+    [InlineData("FlowWrites.PublishAsync of an AsNow dependency")]
+    [InlineData("FlowWrites.Publish of an AsNow dependency")]
     public async Task InvalidateNowAsync_evicts_stale_copies_at_once_on_every_node(string call)
     {
         var time = new FakeTimeProvider();
@@ -357,8 +361,21 @@ public sealed class StalenessTests
             case "InvalidateNowAsync(dependencies)":
                 await a.Cache.InvalidateNowAsync([_rows.For(1)]);
                 break;
-            default:
+            case "InvalidateNow":
                 a.Cache.InvalidateNow(_rows.For(1));
+                break;
+            case "InvalidateAsync inside SluiceFlow.InvalidateNow":
+                using (SluiceFlow.InvalidateNow())
+                {
+                    await a.Cache.InvalidateAsync(_rows.For(1));
+                }
+
+                break;
+            case "FlowWrites.PublishAsync of an AsNow dependency":
+                await FlowWrites.PublishAsync(a.Cache, [_rows.For(1).AsNow()]);
+                break;
+            default:
+                FlowWrites.Publish(a.Cache, [_rows.For(1).AsNow()]);
                 break;
         }
 
@@ -471,6 +488,35 @@ public sealed class StalenessTests
 
         (await HasStaleCopy(node, _patient)).Should().BeFalse();
         (await Read(node.Cache, _patient)).Should().Be("new");
+    }
+
+    // A package publishes what it captured as each write was marked when it started (SLUICE-EF-028), so a write made
+    // outside the scope stays soft when its transaction commits, and publishes, inside one.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_package_s_publish_of_a_plain_dependency_inside_SluiceFlow_InvalidateNow_leaves_the_stale_copy(
+        bool asynchronously
+    )
+    {
+        await using var node = new SluiceNode();
+        await Read(node.Cache, _patient);
+        _data[1] = "new";
+
+        using (SluiceFlow.InvalidateNow())
+        {
+            if (asynchronously)
+            {
+                await FlowWrites.PublishAsync(node.Cache, [_rows.For(1)]);
+            }
+            else
+            {
+                FlowWrites.Publish(node.Cache, [_rows.For(1)]);
+            }
+        }
+
+        (await HasStaleCopy(node, _patient)).Should().BeTrue();
+        (await Read(node.Cache, _patient)).Should().Be("old");
     }
 
     // Disposing a scope puts back what the flow had, so the inner one leaves the outer on, and the outer turns it off.

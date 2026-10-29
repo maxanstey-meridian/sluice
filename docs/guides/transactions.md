@@ -36,8 +36,7 @@ A save made inside [`SluiceFlow.InvalidateNow()`](/guides/ef-core#writes-that-mu
 which also evicts the stale copies of queries with `MaxStaleness`, takes the scope when it runs,
 not when its transaction ends. It evicts them even when the transaction commits after the scope
 has ended, and a save made outside the scope doesn't, even when its transaction commits inside
-one.
-Bulk updates and deletes work the same way.
+one. Bulk updates and deletes work the same way.
 
 ### Committing outside EF
 

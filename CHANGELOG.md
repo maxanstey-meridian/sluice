@@ -26,14 +26,15 @@ Queries that don't opt in behave exactly as before.
   removes stale copies.
 - **New: `SluiceFlow.InvalidateNow()`,** a scope for writes that must go at once:
   `using (SluiceFlow.InvalidateNow()) { ... }`. Inside it, every EF save and bulk write (sync or
-  async, `ForKey` and `ForKeys` included), and the app's own `InvalidateAsync` and `Invalidate`
-  calls, evict as `InvalidateNowAsync` does. A save reaches every read it would evict anyway,
-  `Children` lists holding the row and cached "not found" reads by a unique value included. An
-  EF write takes the scope when it runs, not when its transaction commits: a save made inside it
-  evicts the stale copies even when its transaction commits after the scope has ended, and one
-  made outside it doesn't, even when its transaction commits inside one. It doesn't need `SluiceFlow.Begin()`,
-  scopes nest, and tasks started inside one keep it. Open it in the method that writes, or one
-  that calls it: one opened inside an `async` helper ends when the helper returns. See
+  async, `ForKey` and `ForKeys` included), and your own `InvalidateAsync` and `Invalidate` calls,
+  evict as `InvalidateNowAsync` does. A save reaches every read it would evict anyway, `Children`
+  lists holding the row and cached "not found" reads by a unique value included. An EF write
+  takes the scope when it runs, not when its transaction commits: a save made inside it evicts
+  the stale copies even when its transaction commits after the scope has ended, and one made
+  outside it doesn't, even when its transaction commits inside one. It doesn't need
+  `SluiceFlow.Begin()`, scopes nest, and tasks started inside one keep it. Open it in the method
+  that writes, or one that calls it: one opened inside an `async` helper ends when the helper
+  returns. See
   [Writes that must go at once](https://maxanstey-meridian.github.io/sluice/guides/ef-core#writes-that-must-go-at-once).
 - **Docs:** Sources and Queries gains MaxStaleness, and EF Core gains Writes that must go at once;
   Invalidating, Transactions, Configuration, How It Works, and Limitations say where stale copies

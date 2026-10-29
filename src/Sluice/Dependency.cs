@@ -40,8 +40,8 @@ public sealed class Dependency
     internal string[] HardInvalidationTags => [.. InvalidationTags, .. NowTags(InvalidationTags)];
 
     // What InvalidateAsync, Invalidate, and a package's publish publish for it: the hard tags for a dependency AsNow
-    // marked, otherwise the plain ones. InvalidationTags stays plain either way, since SLUICE-CORE-019's overlap check reads it as the
-    // invalidation rule, and a read of a source named '!x' must not overlap a hard write of 'x'.
+    // marked, otherwise the plain ones. InvalidationTags stays plain either way, since SLUICE-CORE-019's overlap check
+    // reads it as the invalidation rule, and a read of a source named '!x' must not overlap a hard write of 'x'.
     internal string[] PublishedTags => _now ? HardInvalidationTags : InvalidationTags;
 
     // The same dependency, published hard wherever and whenever it's published: itself when it already is, otherwise a

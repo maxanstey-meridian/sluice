@@ -5,25 +5,36 @@ namespace Sluice.EntityFrameworkCore.Tests.Support;
 /// <summary>A value cached on a node by a compute that runs one read, so a test can ask whether a write evicted it.</summary>
 public sealed class CachedRead
 {
-    private static readonly Query<Guid, int> _query = new("ef-cached-read");
+    private static readonly Query<Guid, int> _strict = new("ef-cached-read");
 
     private readonly SluiceCache _cache;
     private readonly Func<SluiceReads, CancellationToken, Task> _read;
+    private readonly Query<Guid, int> _query;
     private readonly Guid _key = Guid.NewGuid();
     private int _computes;
 
-    private CachedRead(SluiceCache cache, Func<SluiceReads, CancellationToken, Task> read)
+    private CachedRead(
+        SluiceCache cache,
+        Func<SluiceReads, CancellationToken, Task> read,
+        Query<Guid, int> query
+    )
     {
         _cache = cache;
         _read = read;
+        _query = query;
     }
 
+    /// <summary>
+    /// Caches a value whose compute runs <paramref name="read"/>, under <paramref name="query"/>, or a strict query
+    /// when it's null, and a key of its own.
+    /// </summary>
     public static async Task<CachedRead> Of(
         SluiceCache cache,
-        Func<SluiceReads, CancellationToken, Task> read
+        Func<SluiceReads, CancellationToken, Task> read,
+        Query<Guid, int>? query = null
     )
     {
-        var cached = new CachedRead(cache, read);
+        var cached = new CachedRead(cache, read, query ?? _strict);
         await cached.Get();
         return cached;
     }

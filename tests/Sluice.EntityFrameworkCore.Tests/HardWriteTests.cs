@@ -93,19 +93,23 @@ public sealed class HardWriteTests(PostgresFixture postgres)
     }
 
     // Each kind takes its own branch of what a bulk write publishes: the whole type, updated or deleted, or the pinned
-    // keys. In a transaction, it commits after the scope is disposed.
+    // keys. In a transaction, it commits in the scope's opposite state, so the flag counts when the statement ran, not
+    // when it committed.
     [Theory]
-    [InlineData("ExecuteUpdate", false)]
-    [InlineData("ExecuteDelete", false)]
-    [InlineData("keyed ExecuteUpdateAsync", false)]
-    [InlineData("keyed ExecuteDeleteAsync", false)]
-    [InlineData("ExecuteUpdate", true)]
-    [InlineData("ExecuteDelete", true)]
-    [InlineData("keyed ExecuteUpdateAsync", true)]
-    [InlineData("keyed ExecuteDeleteAsync", true)]
-    public async Task A_bulk_write_inside_InvalidateNow_publishes_hard(
+    [InlineData("ExecuteUpdate", false, true)]
+    [InlineData("ExecuteDelete", false, true)]
+    [InlineData("keyed ExecuteUpdateAsync", false, true)]
+    [InlineData("keyed ExecuteDeleteAsync", false, true)]
+    [InlineData("ExecuteUpdate", true, true)]
+    [InlineData("ExecuteDelete", true, true)]
+    [InlineData("keyed ExecuteUpdateAsync", true, true)]
+    [InlineData("keyed ExecuteDeleteAsync", true, true)]
+    [InlineData("ExecuteUpdate", false, false)]
+    [InlineData("keyed ExecuteDeleteAsync", true, false)]
+    public async Task A_bulk_write_publishes_hard_inside_InvalidateNow_and_soft_outside_it(
         string kind,
-        bool inTransaction
+        bool inTransaction,
+        bool inside
     )
     {
         await using var scene = await Scene.Of(postgres);
@@ -115,7 +119,7 @@ public sealed class HardWriteTests(PostgresFixture postgres)
             ? await scene.Db.Database.BeginTransactionAsync()
             : null;
 
-        using (SluiceFlow.InvalidateNow())
+        using (inside ? SluiceFlow.InvalidateNow() : null)
         {
             switch (kind)
             {
@@ -140,25 +144,55 @@ public sealed class HardWriteTests(PostgresFixture postgres)
 
         if (transaction is not null)
         {
-            await transaction.CommitAsync();
+            using (inside ? null : SluiceFlow.InvalidateNow())
+            {
+                await transaction.CommitAsync();
+            }
         }
 
-        await scene.ShouldBeEvicted(hard: true, only: scene.OrderRead);
+        await scene.ShouldBeEvicted(hard: inside, only: scene.OrderRead);
     }
 
-    // What such a save wrote is unknown, so it publishes every type whole: hard, when it started inside the scope.
-    [Fact]
-    public async Task A_save_Sluice_saw_no_command_of_inside_InvalidateNow_publishes_every_type_hard()
+    // An interceptor after Sluice swaps the command EF initialised for another, so Sluice noted nothing on the one that
+    // runs, and reads the flag as the statement ends, still on the writing flow.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_bulk_write_Sluice_did_not_see_initialised_publishes_hard_inside_InvalidateNow_and_soft_outside_it(
+        bool inside
+    )
+    {
+        await using var scene = await Scene.Of(postgres, after: [new ReplaceBulkCommand()]);
+        var id = scene.Order.Id;
+
+        using (inside ? SluiceFlow.InvalidateNow() : null)
+        {
+            await scene
+                .Db.Orders.Where(o => o.Id == id)
+                .ExecuteUpdateAsync(set => set.SetProperty(o => o.Item, "Cake"));
+        }
+
+        await scene.ShouldBeEvicted(hard: inside, only: scene.OrderRead);
+    }
+
+    // What such a save wrote is unknown, so it publishes every type whole: hard when it started inside the scope, soft
+    // when it started outside it.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_save_Sluice_saw_no_command_of_publishes_every_type_hard_inside_InvalidateNow_and_soft_outside_it(
+        bool inside
+    )
     {
         await using var scene = await Scene.Of(postgres, after: [new SuppressSave(rows: 1)]);
 
-        using (SluiceFlow.InvalidateNow())
+        using (inside ? SluiceFlow.InvalidateNow() : null)
         {
             scene.Change();
             await scene.Db.SaveChangesAsync();
         }
 
-        await scene.ShouldBeEvicted(hard: true);
+        await scene.ShouldBeEvicted(hard: inside);
     }
 
     // The interceptor saves again from SavedChanges, before Sluice sees the first save complete, so the second save
@@ -347,28 +381,19 @@ public sealed class HardWriteTests(PostgresFixture postgres)
     // One read cached by a strict query and by a staleness one, each under a key of its own.
     private sealed class Twice
     {
-        private static readonly Query<Guid, int> _stale = new("ef-hard-write")
+        private static readonly Query<Guid, int> _staleness = new("ef-hard-write")
         {
             MaxStaleness = TimeSpan.FromMinutes(1),
         };
 
-        private readonly SluiceCache _cache;
-        private readonly Func<SluiceReads, CancellationToken, Task> _read;
         private readonly CachedRead _strict;
-        private readonly Guid _key = Guid.NewGuid();
-        private int _computes;
+        private readonly CachedRead _stale;
 
-        private Twice(
-            SluiceCache cache,
-            string name,
-            Func<SluiceReads, CancellationToken, Task> read,
-            CachedRead strict
-        )
+        private Twice(string name, CachedRead strict, CachedRead stale)
         {
-            _cache = cache;
             Name = name;
-            _read = read;
             _strict = strict;
+            _stale = stale;
         }
 
         public string Name { get; }
@@ -377,31 +402,15 @@ public sealed class HardWriteTests(PostgresFixture postgres)
             SluiceCache cache,
             string name,
             Func<SluiceReads, CancellationToken, Task> read
-        )
-        {
-            var twice = new Twice(cache, name, read, await CachedRead.Of(cache, read));
-            await twice.GetStale();
-            return twice;
-        }
+        ) =>
+            new(
+                name,
+                await CachedRead.Of(cache, read),
+                await CachedRead.Of(cache, read, _staleness)
+            );
 
         /// <summary>Reads both again: whether each had been evicted and was recomputed.</summary>
-        public async Task<(bool Strict, bool Stale)> Evicted()
-        {
-            var strict = await _strict.WasEvicted();
-            var before = _computes;
-            await GetStale();
-            return (strict, _computes > before);
-        }
-
-        private async Task GetStale() =>
-            await _cache.GetOrSetAsync(
-                _stale,
-                _key,
-                async (read, ct) =>
-                {
-                    await _read(read, ct);
-                    return ++_computes;
-                }
-            );
+        public async Task<(bool Strict, bool Stale)> Evicted() =>
+            (await _strict.WasEvicted(), await _stale.WasEvicted());
     }
 }

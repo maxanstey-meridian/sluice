@@ -270,6 +270,8 @@ public sealed class RaceTests
     [InlineData("InvalidateAsync(dependency)")]
     [InlineData("InvalidateAsync(dependencies)")]
     [InlineData("Invalidate")]
+    [InlineData("FlowWrites.PublishAsync")]
+    [InlineData("FlowWrites.Publish")]
     public async Task Each_invalidation_is_published_again_after_the_delay_and_not_before(
         string call
     )
@@ -285,6 +287,12 @@ public sealed class RaceTests
                 break;
             case "InvalidateAsync(dependencies)":
                 await node.Cache.InvalidateAsync([_rows.For(1)]);
+                break;
+            case "FlowWrites.PublishAsync":
+                await FlowWrites.PublishAsync(node.Cache, [_rows.For(1)]);
+                break;
+            case "FlowWrites.Publish":
+                FlowWrites.Publish(node.Cache, [_rows.For(1)]);
                 break;
             default:
                 node.Cache.Invalidate(_rows.For(1));
