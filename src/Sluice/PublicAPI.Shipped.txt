@@ -36,3 +36,11 @@ Sluice.SluiceFlow
 static Sluice.SluiceFlow.Begin() -> System.IDisposable!
 Sluice.SluiceCache.Dispose() -> void
 Sluice.SluiceCache.DisposeAsync() -> System.Threading.Tasks.ValueTask
+Sluice.Query<TKey, TValue>.MaxStaleness.get -> System.TimeSpan?
+Sluice.Query<TKey, TValue>.MaxStaleness.init -> void
+Sluice.Query<TValue>.MaxStaleness.get -> System.TimeSpan?
+Sluice.Query<TValue>.MaxStaleness.init -> void
+Sluice.SluiceCache.InvalidateNow(params System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> void
+Sluice.SluiceCache.InvalidateNowAsync(Sluice.Dependency! dependency) -> System.Threading.Tasks.ValueTask
+Sluice.SluiceCache.InvalidateNowAsync(System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> System.Threading.Tasks.ValueTask
+static Sluice.SluiceFlow.InvalidateNow() -> System.IDisposable!
