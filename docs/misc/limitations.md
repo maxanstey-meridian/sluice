@@ -57,6 +57,11 @@ no longer than the entry's duration, or its query's `MaxStaleness` if that's lon
 - **Work started under `ExecutionContext.SuppressFlow`** can't see the compute, so the nesting
   and read checks are off there. See
   [What isn't checked](/guides/strict-reads#what-isn-t-checked).
+- **`SluiceFlow.InvalidateNow()` reaches only writes on its own flow.** One opened inside an
+  `async` helper ends when the helper returns, and work started under
+  `ExecutionContext.SuppressFlow` doesn't see it. A write it misses evicts as `InvalidateAsync`
+  does, so a query with `MaxStaleness` can serve the old value for up to that long. See
+  [Writes that must go at once](/guides/ef-core#writes-that-must-go-at-once).
 - **Callers waiting on a `read.DoNotCache()` compute don't share its value.** Each runs its own
   compute once the first ends, one at a time, since FusionCache hands a waiter only what was
   stored. See [Leaving a value uncached](/guides/sources-and-queries#leaving-a-value-uncached).

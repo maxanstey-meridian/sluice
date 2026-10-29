@@ -14,7 +14,7 @@ invalidated is treated as gone.
 Sluice maps each dependency to a pair of tags. For a source named `n` and a key whose text is
 `k`:
 
-| Dependency | A compute that reads it gets the tags | Its stale copy gets | Invalidating it removes the tags | `InvalidateNowAsync` also removes |
+| Dependency | A compute that reads it gets the tags | Its stale copy gets | Invalidating it removes the tags | Invalidating it hard also removes |
 |---|---|---|---|---|
 | `source.For(key)` | `n:k`, `n:` | `!n:k`, `!n:` | `n:k`, `n:*` | `!n:k`, `!n:*` |
 | `source.All` | `n:*`, `n:` | `!n:*`, `!n:` | `n:` | `!n:` |
@@ -26,9 +26,10 @@ markers. Two sources whose tags happen to coincide only
 share evictions.
 
 A [stale copy](#a-query-with-maxstaleness) carries its compute's tags with `!` in front, its
-*now-tags*, so `InvalidateAsync` never reaches it, and only `InvalidateNowAsync`, `InvalidateNow`,
-and a clear do. A now-tag still has `:` after a non-blank start, so it can't equal a clear marker
-either. A source whose name starts with `!` can share tags with another source's now-tags, which,
+*now-tags*, so a plain invalidation never reaches it. Only a clear, or a *hard* invalidation,
+which removes the now-tags too, does: `InvalidateNowAsync`, `InvalidateNow`, and every
+invalidation or EF write started inside `SluiceFlow.InvalidateNow()`. A now-tag still has `:`
+after a non-blank start, so it can't equal a clear marker either. A source whose name starts with `!` can share tags with another source's now-tags, which,
 as above, only shares evictions.
 
 ## A cached read
@@ -53,8 +54,8 @@ A query with `MaxStaleness` set to N first reads its entry, then its stale copy,
 expired entry, whatever fail-safe or `AllowStaleOnReadOnly` you set, since either would be served
 past its life. On two misses, it calls `GetOrSetAsync` on the copy's key, and the copy's factory
 makes the usual call on the entry's key with the same `read`. So the copy is stamped before the
-compute starts, and an `InvalidateNowAsync` that lands while the compute runs removes the copy
-too. An `InvalidateAsync` that lands while the compute runs leaves the copy, so the next caller
+compute starts, and a hard invalidation that lands while the compute runs removes the copy
+too. A plain invalidation that lands while the compute runs leaves the copy, so the next caller
 gets it until N. The copy's factory keeps the value only if its own compute stored the entry: it
 tags the copy with the entry's tags as now-tags, with fail-safe, jitter, and
 `MemoryCacheDuration` off. In memory, FusionCache counts the copy's life from when it's stored,
@@ -117,7 +118,10 @@ the tags the pending writes will invalidate. Any overlap throws; none returns th
 concurrently. With a distributed cache, each removal is a write to it and a backplane message.
 It takes no cancellation token and passes none, so an aborted request still invalidates.
 `Invalidate` is the same, synchronously, one tag at a time. `InvalidateNowAsync` and
-`InvalidateNow` remove each tag's now-tag too.
+`InvalidateNow` remove each tag's now-tag too, and so do `InvalidateAsync` and `Invalidate`
+called inside `SluiceFlow.InvalidateNow()`. The scope is an `AsyncLocal`, set when it opens and
+put back to what the flow had when it's disposed, so scopes nest, and a task started inside one
+keeps it. The call reads it on the caller's flow before it awaits anything.
 
 Then it schedules the same removal again, on the `TimeProvider` registered in DI (`ClearAsync`
 does the same with its clear): in the window due at the first whole second at least 5 s ahead,
@@ -235,7 +239,18 @@ so it publishes whole. Every other type the SQL names publishes whole.
 
 A failed, cancelled, or conflicting save publishes the same way: never drop, because
 over-invalidating is safe. After a commit, a failure to invalidate is logged and never thrown.
-Sync EF calls publish synchronously, through `Invalidate`, never by blocking on async code.
+Sync EF calls publish synchronously, as `Invalidate` does, never by blocking on async code.
 
-Every invalidation, EF or not, goes through the same public `InvalidateAsync`, `Invalidate`,
-`InvalidateNowAsync`, or `InvalidateNow`; EF's own saves and bulk writes use the first two.
+A save or bulk write started inside `SluiceFlow.InvalidateNow()` publishes hard. It reads the
+scope once, on its own flow, when it starts: a save when `SavingChanges` runs, a bulk command when
+EF initialises it. Every dependency it derives keeps that answer, so it publishes the same way
+wherever and whenever it publishes: at once, at a commit or rollback after the scope has ended,
+from a `TransactionCompleted` event, or when its context's next save finds it unfinished. One
+started outside the scope publishes plain, even when its transaction commits inside one. The
+scope can't be read at publish time, because that often runs on another flow, or after the
+scope has ended.
+
+Every invalidation, EF or not, removes tags the same way, through the same paths as the public
+`InvalidateAsync`, `Invalidate`, `InvalidateNowAsync`, and `InvalidateNow`; EF's own saves and
+bulk writes publish as the first two do, or as the last two do when they started inside
+`SluiceFlow.InvalidateNow()`.

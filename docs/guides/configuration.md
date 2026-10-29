@@ -192,8 +192,9 @@ What multi-node can't guarantee is in [Limitations](/misc/limitations#multi-node
 
 Sluice invalidates through FusionCache tags: each cached value is labelled with what it read,
 and invalidating writes a timestamp for a label. Each dependency you invalidate writes one or
-two tags to Redis (two or four with `InvalidateNowAsync`), and announces each over the
-backplane. `InvalidateAsync`, `InvalidateNowAsync`, and every EF save wait for those writes.
+two tags to Redis (two or four with `InvalidateNowAsync`, or for an invalidation or EF write
+inside `SluiceFlow.InvalidateNow()`), and announces each over the backplane. `InvalidateAsync`,
+`InvalidateNowAsync`, and every EF save wait for those writes.
 FusionCache puts no timeout on them, so only the Redis client's own timeout stops them waiting.
 
 - **A slow Redis** holds up each invalidation, and each EF save, until the client times out.

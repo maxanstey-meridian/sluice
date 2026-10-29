@@ -32,6 +32,13 @@ Inside an EF transaction, all its saves are invalidated together at the commit. 
 transaction completes. A save rolled back to a savepoint is still invalidated when the
 transaction ends.
 
+A save made inside [`SluiceFlow.InvalidateNow()`](/guides/ef-core#writes-that-must-go-at-once),
+which also evicts the stale copies of queries with `MaxStaleness`, takes the scope when it runs,
+not when its transaction ends. It evicts them even when the transaction commits after the scope
+has ended, and a save made outside the scope doesn't, even when its transaction commits inside
+one.
+Bulk updates and deletes work the same way.
+
 ### Committing outside EF
 
 EF raises no event when you call `Commit()` or `Rollback()` on the `DbTransaction` itself

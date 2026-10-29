@@ -6,3 +6,4 @@ Sluice.Query<TValue>.MaxStaleness.init -> void
 Sluice.SluiceCache.InvalidateNow(params System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> void
 Sluice.SluiceCache.InvalidateNowAsync(Sluice.Dependency! dependency) -> System.Threading.Tasks.ValueTask
 Sluice.SluiceCache.InvalidateNowAsync(System.Collections.Generic.IEnumerable<Sluice.Dependency!>! dependencies) -> System.Threading.Tasks.ValueTask
+static Sluice.SluiceFlow.InvalidateNow() -> System.IDisposable!

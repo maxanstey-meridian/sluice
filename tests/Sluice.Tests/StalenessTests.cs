@@ -440,6 +440,118 @@ public sealed class StalenessTests
         _runs.Should().Be(2);
     }
 
+    // No SluiceFlow.Begin: the scope stands alone.
+    [Theory]
+    [InlineData("InvalidateAsync(dependency)")]
+    [InlineData("InvalidateAsync(dependencies)")]
+    [InlineData("Invalidate")]
+    public async Task Inside_SluiceFlow_InvalidateNow_InvalidateAsync_and_Invalidate_evict_stale_copies(
+        string call
+    )
+    {
+        await using var node = new SluiceNode();
+        await Read(node.Cache, _patient);
+        _data[1] = "new";
+
+        using (SluiceFlow.InvalidateNow())
+        {
+            switch (call)
+            {
+                case "InvalidateAsync(dependency)":
+                    await node.Cache.InvalidateAsync(_rows.For(1));
+                    break;
+                case "InvalidateAsync(dependencies)":
+                    await node.Cache.InvalidateAsync([_rows.For(1)]);
+                    break;
+                default:
+                    node.Cache.Invalidate(_rows.For(1));
+                    break;
+            }
+        }
+
+        (await HasStaleCopy(node, _patient)).Should().BeFalse();
+        (await Read(node.Cache, _patient)).Should().Be("new");
+    }
+
+    // Disposing a scope puts back what the flow had, so the inner one leaves the outer on, and the outer turns it off.
+    [Fact]
+    public async Task SluiceFlow_InvalidateNow_nests_and_disposing_it_puts_back_what_the_flow_had()
+    {
+        await using var node = new SluiceNode();
+        await Read(node.Cache, _patient, row: 1);
+        await Read(node.Cache, _patient, row: 2);
+        _data[1] = _data[2] = "new";
+
+        using (SluiceFlow.InvalidateNow())
+        {
+            using (SluiceFlow.InvalidateNow())
+            {
+                FlowWrites.Now.Should().BeTrue();
+            }
+
+            await node.Cache.InvalidateAsync(_rows.For(1));
+        }
+
+        FlowWrites.Now.Should().BeFalse();
+        await node.Cache.InvalidateAsync(_rows.For(2));
+
+        (await Read(node.Cache, _patient, row: 1))
+            .Should()
+            .Be("new", "the outer scope was still open after the inner one was disposed");
+        (await Read(node.Cache, _patient, row: 2))
+            .Should()
+            .Be("old", "outside every scope, InvalidateAsync leaves the stale copy");
+    }
+
+    // A task captures the flow's async state when it starts, so it keeps the flag whatever the flow does after.
+    [Fact]
+    public async Task A_task_started_inside_SluiceFlow_InvalidateNow_keeps_it_after_the_scope_is_disposed()
+    {
+        await using var node = new SluiceNode();
+        await Read(node.Cache, _patient);
+        _data[1] = "new";
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task invalidating;
+
+        using (SluiceFlow.InvalidateNow())
+        {
+            invalidating = Task.Run(async () =>
+            {
+                await release.Task;
+                await node.Cache.InvalidateAsync(_rows.For(1));
+            });
+        }
+
+        FlowWrites.Now.Should().BeFalse();
+        release.SetResult();
+        await invalidating.WaitAsync(TimeSpan.FromSeconds(10));
+
+        (await HasStaleCopy(node, _patient)).Should().BeFalse();
+        (await Read(node.Cache, _patient)).Should().Be("new");
+    }
+
+    // Source.All is one instance every reader and writer of the source shares, so marking it in place would make every
+    // later invalidation of the source hard.
+    [Fact]
+    public async Task AsNow_never_changes_the_dependency_it_is_called_on()
+    {
+        await using var node = new SluiceNode();
+        var all = _rows.All;
+
+        var hard = all.AsNow();
+
+        hard.Should().NotBeSameAs(all);
+        hard.AsNow().Should().BeSameAs(hard);
+        hard.InvalidationTags.Should().Equal(all.InvalidationTags);
+        hard.PublishedTags.Should().Equal("stale-rows:", "!stale-rows:");
+        _rows.All.PublishedTags.Should().Equal("stale-rows:");
+
+        await Read(node.Cache, _patient);
+        _data[1] = "new";
+        await node.Cache.InvalidateAsync(_rows.All);
+        (await Read(node.Cache, _patient)).Should().Be("old");
+    }
+
     // A copy written anyway would hold the violation's default value, or the uncached one, and the next read would
     // return it instead of computing.
     [Theory]

@@ -168,13 +168,16 @@ after it. So:
   committed. That's what opting in means. Where the writer must see its change, read it some
   other way, such as a query without `MaxStaleness`.
 - **Data that must go at once**, such as an erasure, goes with `InvalidateNowAsync` instead of
-  `InvalidateAsync`: it evicts what this query would still serve. See
+  `InvalidateAsync`, or with the write made inside `SluiceFlow.InvalidateNow()`, where EF saves
+  and bulk writes, and your own `InvalidateAsync` calls, evict as `InvalidateNowAsync` does.
+  Either evicts what this query would still serve. See
   [Invalidating](/guides/invalidation#invalidating), and for EF,
-  [Saves that must go at once](/guides/ef-core#saves-that-must-go-at-once).
+  [Writes that must go at once](/guides/ef-core#writes-that-must-go-at-once).
 
 It works by storing each computed value twice: the usual entry, which a write evicts at once, as
-always, and a *stale copy*, which only `InvalidateNowAsync`, `InvalidateNow`, and `ClearAsync`
-evict, and which expires N after its compute began. A read takes the entry, else the copy, else
+always, and a *stale copy*, which only `InvalidateNowAsync`, `InvalidateNow`, a write or
+invalidation inside `SluiceFlow.InvalidateNow()`, and `ClearAsync` evict, and which expires N
+after its compute began. A read takes the entry, else the copy, else
 computes. A compute that takes longer than N leaves no copy, so a write evicts its value at once.
 Nor does a compute that stores nothing: one that called
 [`DoNotCache`](#leaving-a-value-uncached), broke a rule, or ran while its flow had

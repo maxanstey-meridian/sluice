@@ -141,6 +141,7 @@ public async Task MarkPaid(InvoiceId invoiceId, CustomerId customerId)
 | `Invalidate(a, b, ...)` | the same, synchronously |
 | `InvalidateNowAsync(a)` or `InvalidateNowAsync([a, b, ...])` | what `InvalidateAsync` does, and the stale copies a query with `MaxStaleness` would still serve |
 | `InvalidateNow(a, b, ...)` | the same, synchronously |
+| `InvalidateAsync` or `Invalidate` inside `using (SluiceFlow.InvalidateNow())` | what `InvalidateNowAsync` does |
 | `ClearAsync()` | everything Sluice cached |
 
 Values that read none of it stay cached.
@@ -149,6 +150,21 @@ A query with [`MaxStaleness`](/guides/sources-and-queries#maxstaleness) keeps se
 computed for up to that long after `InvalidateAsync`, from its stale copy. For data that must go
 at once, such as an erasure, call `InvalidateNowAsync` instead, after the write commits, as
 always. It writes twice the tags, so keep `InvalidateAsync` for writes that can lag.
+
+Or make the write inside `SluiceFlow.InvalidateNow()`. Every invalidation made inside the
+scope, or in a task started inside it, evicts as `InvalidateNowAsync` does: your own
+`InvalidateAsync` and `Invalidate` calls, and EF's saves and bulk writes, which need no call of
+yours. It doesn't need `SluiceFlow.Begin()`, and scopes nest. Open it in the method that writes,
+or one that calls it: one opened inside an `async` helper ends when the helper returns. An EF
+write takes the scope when it runs, not when its transaction commits; see
+[Writes that must go at once](/guides/ef-core#writes-that-must-go-at-once).
+
+```csharp
+using (SluiceFlow.InvalidateNow())
+{
+    await MarkPaid(invoiceId, customerId); // its InvalidateAsync evicts the stale copies too
+}
+```
 
 Each call publishes again 5 to 6 s later, in the background, and so does `ClearAsync`; those due
 in the same second go out together, each tag once. That restores
@@ -220,7 +236,8 @@ If something a compute has read is invalidated while the compute is still runnin
 still gets the value it computed, but it isn't kept: the next call computes again. An
 invalidation of something the compute didn't read leaves the new entry alone. A query with
 `MaxStaleness` keeps the value as its stale copy, so the next call gets it until `MaxStaleness`
-after the compute began, unless the invalidation was `InvalidateNowAsync` or `InvalidateNow`.
+after the compute began, unless the invalidation was `InvalidateNowAsync`, `InvalidateNow`, or
+made inside `SluiceFlow.InvalidateNow()`.
 
 ### Mixing with EF Core
 

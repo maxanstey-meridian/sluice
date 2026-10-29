@@ -24,7 +24,14 @@ internal sealed class CapturedSave
     private readonly List<Dependency> _originals = [];
     private readonly HashSet<IEntityType> _unversioned = [];
 
-    private CapturedSave(ContextTransaction transaction) => Transaction = transaction;
+    // Whether the save started inside SluiceFlow.InvalidateNow, read on its own flow when it started.
+    private readonly bool _now;
+
+    private CapturedSave(ContextTransaction transaction, bool now)
+    {
+        Transaction = transaction;
+        _now = now;
+    }
 
     /// <summary>
     /// The transaction the save's first command ran in, with the ambient one its connection was opened in when the
@@ -44,6 +51,9 @@ internal sealed class CapturedSave
     /// </summary>
     /// <param name="context">The context whose save EF is about to run the first command of.</param>
     /// <param name="transaction">The transaction that command runs in.</param>
+    /// <param name="now">
+    /// Whether the save started inside <see cref="SluiceFlow.InvalidateNow"/>, so everything it derives publishes hard.
+    /// </param>
     /// <exception cref="InvalidOperationException">
     /// The model has a key, foreign key or unique column whose value converter isn't known to round-trip
     /// (<see cref="ModelSources.EnsureRoundTrips"/>).
@@ -51,11 +61,15 @@ internal sealed class CapturedSave
     /// <exception cref="ArgumentException">
     /// The core refuses one of the model's source names (<see cref="ModelSources.EnsureSources"/>).
     /// </exception>
-    internal static CapturedSave Capture(DbContext context, ContextTransaction transaction)
+    internal static CapturedSave Capture(
+        DbContext context,
+        ContextTransaction transaction,
+        bool now
+    )
     {
         // Before the save writes anything: once it has, a refusal could only be logged.
         ModelSources.EnsureSources(context);
-        var save = new CapturedSave(transaction);
+        var save = new CapturedSave(transaction, now);
         var tracker = context.ChangeTracker;
 
         // EF has detected changes and applied its own cascades by now, and accepts none until every batch has run.
@@ -139,9 +153,13 @@ internal sealed class CapturedSave
     /// Everything the save may have changed: each row's key, and its foreign keys and unique columns before and after,
     /// or whole when the value before is unknown. A deleted row also invalidates every foreign key that points at it,
     /// and the whole of every type the model lets the database delete or set to null with it
-    /// (<see cref="ModelSources.Cascades"/>), since EF may not have loaded those rows.
+    /// (<see cref="ModelSources.Cascades"/>), since EF may not have loaded those rows. A save started inside
+    /// <see cref="SluiceFlow.InvalidateNow"/> derives each of them hard, for every caller: the save's own publish, and
+    /// a later save's publish of it as a leftover.
     /// </summary>
-    internal List<Dependency> Dependencies()
+    internal List<Dependency> Dependencies() => Dependency.AsNow(Derived(), _now);
+
+    private List<Dependency> Derived()
     {
         var dependencies = new List<Dependency>(_originals);
         foreach (var (entry, state, written) in _changes)

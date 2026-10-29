@@ -4,6 +4,8 @@ namespace Sluice;
 /// Marks an entry point, such as a request or a message handler, so Sluice can see the transactions it opens. Inside
 /// it, a cached read that depends on writes the flow's own transaction has saved but not committed throws, rather than
 /// return data without them; any other cached read while such writes are pending computes fresh and stores nothing.
+/// <see cref="InvalidateNow"/> marks a stretch of the flow whose writes must vanish at once, even from queries with
+/// <c>MaxStaleness</c>.
 /// </summary>
 /// <remarks>
 /// Sluice sees a transaction's writes through the package that made them, such as the EF Core package. An ambient
@@ -14,6 +16,7 @@ namespace Sluice;
 public static class SluiceFlow
 {
     private static readonly AsyncLocal<Box?> _box = new();
+    private static readonly AsyncLocal<bool> _now = new();
 
     /// <summary>
     /// Starts tracking the current flow's transactions, until the returned handle is disposed: <c>using var _ =
@@ -32,6 +35,32 @@ public static class SluiceFlow
         _box.Value = box;
         return new Handle(box);
     }
+
+    /// <summary>
+    /// Makes everything the current flow invalidates publish hard, as
+    /// <see cref="SluiceCache.InvalidateNowAsync(IEnumerable{Dependency})"/> does, until the returned scope is disposed:
+    /// <c>using (SluiceFlow.InvalidateNow()) { ... }</c> around a write that must vanish at once, such as an erasure.
+    /// That's the writes a package such as the EF Core package captures here, and the app's own
+    /// <see cref="SluiceCache.InvalidateAsync(IEnumerable{Dependency})"/> and
+    /// <see cref="SluiceCache.Invalidate(IEnumerable{Dependency})"/> calls made here. Tasks the flow starts inside it
+    /// keep it. It doesn't need <see cref="Begin"/>.
+    /// </summary>
+    /// <remarks>
+    /// A package's write publishes hard when it started inside the scope, wherever and whenever it publishes: a save
+    /// inside it whose transaction commits after the scope is disposed publishes hard, and one made before it whose
+    /// transaction commits inside it doesn't. Open it in the method that writes, or one that calls it: an
+    /// <c>AsyncLocal</c> set inside an <c>async</c> helper is undone when the helper returns.
+    /// </remarks>
+    /// <returns>The scope; disposing it puts back what the flow had, so a nested scope leaves the outer one on.</returns>
+    public static IDisposable InvalidateNow()
+    {
+        var previous = _now.Value;
+        _now.Value = true;
+        return new NowScope(previous);
+    }
+
+    // Whether the current flow is inside InvalidateNow: read once, on the writing flow, when a write starts.
+    internal static bool Now => _now.Value;
 
     // Keeps a probe in the current flow's box, unless it holds one for this cache and key; false when the flow has no
     // box.
@@ -106,6 +135,12 @@ public static class SluiceFlow
 
             return pending;
         }
+    }
+
+    // KeyPin's save-and-restore scope: a sync call sets the flow's own value, which would otherwise outlive it.
+    private sealed class NowScope(bool previous) : IDisposable
+    {
+        public void Dispose() => _now.Value = previous;
     }
 
     // The outermost handle removes its box; a nested one, holding none, does nothing.

@@ -4,8 +4,8 @@ With `Sluice.EntityFrameworkCore`, you don't declare sources for your entities: 
 them out from the EF model. Inside a compute you query a context of the compute's own with
 ordinary LINQ, and Sluice records every entity type each query reads. Saves and bulk updates
 invalidate what they changed by themselves once they commit. Underneath it's the same API as
-everywhere else: queries record ordinary dependencies, and writes call
-`SluiceCache.InvalidateAsync`.
+everywhere else: queries record ordinary dependencies, and writes invalidate them as
+`SluiceCache.InvalidateAsync` does.
 
 ## Setup
 
@@ -370,24 +370,51 @@ set, and it detects nothing itself, so it never changes what EF saves: with
 save with nothing to write runs no command and invalidates nothing. A save that fails, is cancelled, or hits a concurrency conflict still
 invalidates what it was saving, because part of it may already have committed.
 
-### Saves that must go at once
+### Writes that must go at once
 
-A save evicts at once, except from a query with
+A write evicts at once, except from a query with
 [`MaxStaleness`](/guides/sources-and-queries#maxstaleness), which keeps serving what it computed
-for up to that long. When the data must vanish at once, such as an erasure, follow the save with
-`InvalidateNowAsync`, which evicts that too:
+for up to that long, from a second entry, its *stale copy*. When the data must vanish at once,
+such as an erasure, make the write inside `SluiceFlow.InvalidateNow()`, in the same method:
 
 ```csharp
-db.Customers.Remove(customer);
-await db.SaveChangesAsync(ct);
-await cache.InvalidateNowAsync(db.Customers.Dependency(customer.Id));
+using (SluiceFlow.InvalidateNow())
+{
+    db.Customers.Remove(customer);
+    await db.SaveChangesAsync(ct);
+}
 ```
 
-Inside a transaction, call it after the commit, not before: a read in between would cache the
-old value again. `set.Dependency(key)` reaches `Entity` readers of the row, by its key or by a
-unique column that found it, and plain queries of its type, but not `Children` lists, nor
-readers by a unique value no row held. When those must go too, pass `set.AllDependencies()`
-(see [Writes Sluice can't see](#writes-sluice-can-t-see)).
+Every write that starts inside the scope evicts the stale copies too, as
+[`InvalidateNowAsync`](/guides/invalidation#invalidating) does: saves through the change tracker,
+sync or async, `ExecuteUpdate` and `ExecuteDelete` (keyed ones included), and your own
+`InvalidateAsync` and `Invalidate` calls. It evicts everything the write would evict anyway,
+`Children` lists holding the row and readers by a unique value no row held included. Each such
+write sends twice the tags, so keep the scope for writes that can't lag. It doesn't need
+`SluiceFlow.Begin()`, and a scope inside another leaves the outer one on when it ends.
+
+A write takes the scope when it runs, not when it commits. A save made inside it evicts the
+stale copies even when its transaction, EF's or a `TransactionScope`, commits after the scope
+has ended; one made before the scope opened doesn't, even when its transaction commits inside
+it. So put the scope around the save, not the commit:
+
+```csharp
+await using var transaction = await db.Database.BeginTransactionAsync(ct);
+using (SluiceFlow.InvalidateNow())
+{
+    db.Customers.Remove(customer);
+    await db.SaveChangesAsync(ct);
+}
+await transaction.CommitAsync(ct); // evicts at once, stale copies included
+```
+
+The scope is an `AsyncLocal`: a value .NET carries from a method into the calls and tasks it
+starts, but not back out of them. So open it in the method that writes, or one that calls it. One opened inside an `async` helper ends when the helper returns, so the writes
+after the call don't see it. A task started inside the scope keeps it, and work started under
+`ExecutionContext.SuppressFlow` doesn't see it.
+
+For a write Sluice can't see, call `InvalidateNowAsync` after it commits; see
+[Writes Sluice can't see](#writes-sluice-can-t-see).
 
 ### Row versions
 
@@ -694,6 +721,10 @@ await cache.InvalidateAsync(db.Orders.AllDependencies());
 no row held, because Sluice can't see the row's foreign keys or new unique values without
 loading it. If something reads the rows you changed through `Children`, or by a unique value
 the write may have given a row, use `set.AllDependencies()`.
+
+When the write must also vanish from queries with
+[`MaxStaleness`](/guides/sources-and-queries#maxstaleness), such as an erasure, call
+`InvalidateNowAsync` with the same dependencies instead.
 
 EF dependencies batch with declared ones:
 

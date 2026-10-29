@@ -11,6 +11,9 @@ namespace Sluice.Tests;
 public sealed class ComputeGuardTests
 {
     private static readonly Source<int> _rows = new("guard-rows");
+
+    // Named so its read tags are _rows' now-tags.
+    private static readonly Source<int> _banged = new("!guard-rows");
     private static readonly Query<string, string> _outer = new("guard-outer");
     private static readonly Query<string, string> _inner = new("guard-inner");
 
@@ -515,17 +518,26 @@ public sealed class ComputeGuardTests
         }
     }
 
+    // A write started inside SluiceFlow.InvalidateNow is pending as a hard dependency, which overlaps by its plain
+    // invalidation tags, as a soft one does.
     [Theory]
-    [InlineData("a key", "the whole source")]
-    [InlineData("the whole source", "a key")]
+    [InlineData("a key", "the whole source", false)]
+    [InlineData("the whole source", "a key", false)]
+    [InlineData("a key", "the whole source", true)]
+    [InlineData("the whole source", "a key", true)]
     public async Task Uncommitted_writes_overlap_a_read_as_an_invalidation_would(
         string reads,
-        string writes
+        string writes,
+        bool hard
     )
     {
         await using var node = new SluiceNode();
         var read = reads == "a key" ? _rows.For(1) : _rows.All;
         var written = writes == "a key" ? _rows.For(5) : _rows.All;
+        if (hard)
+        {
+            written = written.AsNow();
+        }
 
         using var flow = SluiceFlow.Begin();
         FlowWrites.AddProbe(node.Cache, "transaction", Pending(written));
@@ -547,6 +559,28 @@ public sealed class ComputeGuardTests
             .WithMessage(
                 Uncommitted.Replace("*", writes == "a key" ? "guard-rows:5" : "guard-rows (all)")
             );
+    }
+
+    // A hard write publishes '!guard-rows:1', which is also a read tag of source '!guard-rows' key 1: committing it
+    // would only over-invalidate that reader, so the pending write mustn't make the read throw.
+    [Fact]
+    public async Task A_hard_uncommitted_write_does_not_overlap_a_read_of_a_source_named_with_its_now_tag()
+    {
+        await using var node = new SluiceNode();
+
+        using var flow = SluiceFlow.Begin();
+        FlowWrites.AddProbe(node.Cache, "transaction", Pending(_rows.For(1).AsNow()));
+        var value = await node.Cache.GetOrSetAsync(
+            _outer,
+            "k",
+            (r, _) =>
+            {
+                r.From(_banged.For(1));
+                return Task.FromResult("value");
+            }
+        );
+
+        value.Should().Be("value");
     }
 
     [Fact]

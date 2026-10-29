@@ -77,7 +77,8 @@ public sealed class Query<TKey, TValue>
     /// For broad, expensive reads over busy data that can lag, such as dashboards, counts, and public listings. Within
     /// it, a writer may read its own write's old value. Each compute writes a second entry, the stale copy, to memory and
     /// the distributed cache. <see cref="SluiceCache.InvalidateNowAsync(Dependency)"/> evicts the stale copies too, for
-    /// data that must go at once.
+    /// data that must go at once, as does every invalidation inside <see cref="SluiceFlow.InvalidateNow"/>, the writes
+    /// a package such as the EF Core package captures there included.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">It is zero or less.</exception>
     public TimeSpan? MaxStaleness

@@ -13,10 +13,15 @@ public sealed class Dependency
     private readonly string _source;
     private readonly string? _key;
 
-    internal Dependency(string source, string? key)
+    // Whether its write publishes hard (SLUICE-EF-028): set only on a new instance, by AsNow, never on one already
+    // handed out, since Source.All is one instance every reader and writer of the source shares.
+    private readonly bool _now;
+
+    internal Dependency(string source, string? key, bool now = false)
     {
         _source = source;
         _key = key;
+        _now = now;
     }
 
     internal string Text => _key is null ? $"{_source} (all)" : $"{_source}:{_key}";
@@ -30,8 +35,23 @@ public sealed class Dependency
     internal string[] InvalidationTags =>
         _key is null ? [$"{_source}:"] : [$"{_source}:{_key}", $"{_source}:*"];
 
-    // What a hard eviction publishes: the invalidation tags and their now-tags, so it reaches stale copies too.
+    // What a hard eviction publishes: the invalidation tags and their now-tags, so it reaches stale copies too. Built from
+    // the plain tags, which a hard dependency keeps, so it never yields a '!!' form.
     internal string[] HardInvalidationTags => [.. InvalidationTags, .. NowTags(InvalidationTags)];
+
+    // What InvalidateAsync, Invalidate, and a package's publish publish for it: the hard tags for a dependency AsNow
+    // marked, otherwise the plain ones. InvalidationTags stays plain either way, since SLUICE-CORE-019's overlap check reads it as the
+    // invalidation rule, and a read of a source named '!x' must not overlap a hard write of 'x'.
+    internal string[] PublishedTags => _now ? HardInvalidationTags : InvalidationTags;
+
+    // The same dependency, published hard wherever and whenever it's published: itself when it already is, otherwise a
+    // new instance, so a shared one stays as it was.
+    internal Dependency AsNow() => _now ? this : new(_source, _key, now: true);
+
+    // Each of the dependencies AsNow when now, otherwise the list itself: what a write started inside
+    // SluiceFlow.InvalidateNow derives.
+    internal static List<Dependency> AsNow(List<Dependency> dependencies, bool now) =>
+        now ? [.. dependencies.Select(dependency => dependency.AsNow())] : dependencies;
 
     // A stale copy (SLUICE-CORE-024) carries each tag its compute read prefixed '!', so InvalidateAsync, which publishes
     // only the plain tags, leaves it, and only a hard eviction reaches it. A now-tag keeps its ':' after a non-blank

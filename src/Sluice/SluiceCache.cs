@@ -411,17 +411,33 @@ public sealed class SluiceCache : IAsyncDisposable, IDisposable
     /// again 5 to 6 s later in the background, in one batch with every other invalidation and clear due in the same
     /// second, since FusionCache 2.9 can lose one that lands while the same server checks those dependencies; a value
     /// cached in between is evicted again, and disposing the cache publishes it at once. A query with
-    /// <c>MaxStaleness</c> keeps serving what it computed for up to that long; use
-    /// <see cref="InvalidateNowAsync(IEnumerable{Dependency})"/> for data that must go at once.
+    /// <c>MaxStaleness</c> keeps serving what it computed for up to that long; for data that must go at once, use
+    /// <see cref="InvalidateNowAsync(IEnumerable{Dependency})"/>, or call this inside <see cref="SluiceFlow.InvalidateNow"/>,
+    /// which makes it publish as that does.
     /// </remarks>
     public ValueTask InvalidateAsync(IEnumerable<Dependency> dependencies) =>
-        InvalidateByAsync(dependencies, dependency => dependency.InvalidationTags);
+        InvalidateByAsync(dependencies, PublishedOnThisFlow());
 
     /// <summary>The synchronous twin of <see cref="InvalidateAsync(IEnumerable{Dependency})"/>.</summary>
     /// <param name="dependencies">What was written.</param>
     /// <inheritdoc cref="InvalidateAsync(IEnumerable{Dependency})" path="/remarks"/>
     public void Invalidate(params IEnumerable<Dependency> dependencies) =>
-        InvalidateBy(dependencies, dependency => dependency.InvalidationTags);
+        InvalidateBy(dependencies, PublishedOnThisFlow());
+
+    // Read on the caller's flow, before anything is awaited. Inside SluiceFlow.InvalidateNow every dependency publishes
+    // as if made hard first, its hard tags, so the app's own calls there publish as InvalidateNowAsync does.
+    private static Func<Dependency, string[]> PublishedOnThisFlow() =>
+        SluiceFlow.Now
+            ? dependency => dependency.HardInvalidationTags
+            : dependency => dependency.PublishedTags;
+
+    // What a package captured (FlowWrites.Publish): each dependency publishes as it was marked when its write started,
+    // whatever flow this runs on, so the scope isn't read here.
+    internal ValueTask PublishAsync(IEnumerable<Dependency> dependencies) =>
+        InvalidateByAsync(dependencies, dependency => dependency.PublishedTags);
+
+    internal void Publish(IEnumerable<Dependency> dependencies) =>
+        InvalidateBy(dependencies, dependency => dependency.PublishedTags);
 
     /// <summary>
     /// Evicts every cached value that read <paramref name="dependency"/>, the values a query with <c>MaxStaleness</c>

@@ -10,6 +10,36 @@ namespace Sluice.Infrastructure;
 internal static class FlowWrites
 {
     /// <summary>
+    /// Whether the current flow is inside <see cref="SluiceFlow.InvalidateNow"/>. A package reads it on the writing flow
+    /// when a write starts, and marks what the write derives with it, so the write publishes hard whatever flow
+    /// publishes it, and whenever (SLUICE-EF-028).
+    /// </summary>
+    public static bool Now => SluiceFlow.Now;
+
+    /// <summary>
+    /// Publishes what a package captured, each dependency as it was marked when its write started: hard if it was
+    /// started inside <see cref="SluiceFlow.InvalidateNow"/>, otherwise soft. The publishing flow's own scope isn't
+    /// read, since a write made outside one stays soft when its transaction commits inside one. Otherwise it behaves as
+    /// <see cref="SluiceCache.InvalidateAsync(IEnumerable{Dependency})"/>, re-publish included.
+    /// </summary>
+    /// <param name="cache">The cache to invalidate.</param>
+    /// <param name="dependencies">What the writes changed.</param>
+    public static ValueTask PublishAsync(SluiceCache cache, IEnumerable<Dependency> dependencies)
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        return cache.PublishAsync(dependencies);
+    }
+
+    /// <summary>The synchronous twin of <see cref="PublishAsync"/>.</summary>
+    /// <param name="cache">The cache to invalidate.</param>
+    /// <param name="dependencies">What the writes changed.</param>
+    public static void Publish(SluiceCache cache, IEnumerable<Dependency> dependencies)
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        cache.Publish(dependencies);
+    }
+
+    /// <summary>
     /// Adds a probe to the current flow's <see cref="SluiceFlow"/> box, which every
     /// <see cref="SluiceCache.GetOrSetAsync{TKey, TValue}"/> on <paramref name="cache"/> in the flow calls first, unless
     /// the box already holds one for <paramref name="cache"/> and <paramref name="key"/>: a box keeps one probe per

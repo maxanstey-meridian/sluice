@@ -22,7 +22,10 @@ namespace Sluice.EntityFrameworkCore;
 /// <remarks>
 /// Never drops: every outcome that might have committed something publishes, because over-invalidating is safe.
 /// Publishing after a commit logs failures instead of throwing, since a throw would make the caller retry a write
-/// that already committed. Sync EF calls publish synchronously.
+/// that already committed. Sync EF calls publish synchronously. A write that starts inside
+/// <see cref="SluiceFlow.InvalidateNow"/> publishes hard, evicting the stale copies of queries with <c>MaxStaleness</c>
+/// too, wherever and whenever it publishes: the flag is read on the writing flow when the save or bulk command starts
+/// and kept on each dependency it derives (SLUICE-EF-028).
 /// </remarks>
 internal sealed partial class SluiceInterceptor
     : ISaveChangesInterceptor,
@@ -396,11 +399,14 @@ internal sealed partial class SluiceInterceptor
         {
             case CommandSource.SaveChanges:
                 var save = _saves.GetValue(context, _ => new());
-                save.Capture ??= Capture(context);
+                save.Capture ??= Capture(context, save.Now);
                 break;
             case CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete:
                 ModelSources.EnsureSources(context);
-                _bulk.AddOrUpdate(result, new(KeyPin.Take(), CommandTransaction(context).Ambient));
+                _bulk.AddOrUpdate(
+                    result,
+                    new(KeyPin.Take(), CommandTransaction(context).Ambient, FlowWrites.Now)
+                );
                 break;
         }
 
@@ -825,9 +831,10 @@ internal sealed partial class SluiceInterceptor
             LogNothingCaptured(rows, context.GetType().Name);
             ModelSources.NameProvider(context);
             var model = context.Model;
+            var now = save.Now;
             return new(
                 context,
-                () => EveryType(model),
+                () => Dependency.AsNow(EveryType(model), now),
                 save.RolledBack,
                 Recorded: null,
                 save.OwnTransaction
@@ -860,7 +867,9 @@ internal sealed partial class SluiceInterceptor
     // reports ExecuteDelete as ExecuteUpdate (both pass CommandSource.BulkUpdate, its old name), so the statement says
     // which it was; anything but an UPDATE is taken for a delete, which also evicts the lists its rows were in and what
     // the database cascades to.
-    // A keyed one (ForKey, ForKeys) names its rows: the pin the command took when EF initialised it.
+    // A keyed one (ForKey, ForKeys) names its rows: the pin the command took when EF initialised it. It publishes hard
+    // when it started inside SluiceFlow.InvalidateNow, as noted then; a command Sluice didn't see initialised reads the
+    // flag here, which still runs on the writing flow, as the command's own events do.
     private Write? BulkWrite(DbCommand command, CommandEventData eventData)
     {
         if (
@@ -876,9 +885,10 @@ internal sealed partial class SluiceInterceptor
 
         _bulk.TryGetValue(command, out var bulk);
         _bulk.Remove(command);
+        var now = bulk?.Now ?? FlowWrites.Now;
         return new(
             context,
-            () => BulkWritten(context, command, bulk?.Pin),
+            () => Dependency.AsNow(BulkWritten(context, command, bulk?.Pin), now),
             Undone: false,
             bulk?.Ambient
         );
@@ -1152,9 +1162,9 @@ internal sealed partial class SluiceInterceptor
         );
     }
 
-    private CapturedSave Capture(DbContext context)
+    private CapturedSave Capture(DbContext context, bool now)
     {
-        var save = CapturedSave.Capture(context, CommandTransaction(context));
+        var save = CapturedSave.Capture(context, CommandTransaction(context), now);
         foreach (var entityType in save.Unversioned)
         {
             if (_loggedUnversioned.TryAdd(entityType.Name, true))
@@ -1248,7 +1258,8 @@ internal sealed partial class SluiceInterceptor
     }
 
     // Takes the dependencies as a function so that a failure to derive them, after a commit without a transaction,
-    // is logged too. An empty list publishes nothing.
+    // is logged too. An empty list publishes nothing. Each dependency publishes as its write marked it when it started
+    // (SLUICE-EF-028), not as the flow publishing it now is: this often runs on another flow, or later.
     private void Publish(Func<List<Dependency>> derive)
     {
         List<Dependency>? dependencies = null;
@@ -1257,7 +1268,7 @@ internal sealed partial class SluiceInterceptor
             dependencies = derive();
             if (dependencies.Count > 0)
             {
-                _cache.Invalidate(dependencies);
+                FlowWrites.Publish(_cache, dependencies);
             }
         }
         catch (Exception exception)
@@ -1274,7 +1285,7 @@ internal sealed partial class SluiceInterceptor
             dependencies = derive();
             if (dependencies.Count > 0)
             {
-                await _cache.InvalidateAsync(dependencies).ConfigureAwait(false);
+                await FlowWrites.PublishAsync(_cache, dependencies).ConfigureAwait(false);
             }
         }
         catch (Exception exception)
@@ -1341,13 +1352,18 @@ internal sealed partial class SluiceInterceptor
         Guid? OwnTransaction = null
     );
 
-    // What a bulk command took when EF initialised it.
-    private sealed record BulkCommand(KeyPin? Pin, Transaction? Ambient);
+    // What a bulk command took when EF initialised it, on the writing flow: whether it started inside
+    // SluiceFlow.InvalidateNow included.
+    private sealed record BulkCommand(KeyPin? Pin, Transaction? Ambient, bool Now);
 
     // A save from SavingChanges until EF reports how it ended: what it writes, once its first command is initialised,
     // and whether a rollback to a savepoint made during it has undone that. Read and set on the save's own flow.
     private sealed class SaveInProgress
     {
+        // Whether the save started inside SluiceFlow.InvalidateNow: read when its record is made, on its own flow, at
+        // SavingChanges, or at its first command or savepoint when a save run inside it took the record.
+        public bool Now { get; } = FlowWrites.Now;
+
         public CapturedSave? Capture { get; set; }
 
         public bool RolledBack { get; set; }
